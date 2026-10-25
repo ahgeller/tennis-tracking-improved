@@ -375,16 +375,25 @@ def test_new_augmentations_draw_after_the_old_ones_so_old_runs_reproduce(tmp_pat
 
 # --------------------------------------------------------------------------- the metric and the winner
 
-def scripted_run(tmp_path, argv, train_losses, val_losses, scored, scoring=True, validate=True):
+def scripted_run(tmp_path, argv, train_losses, val_losses, scored, scoring=True, validate=True, resume=False):
     """``fit`` on a fresh CPU model with the epoch losses scripted and the held-out metric answered
     from `scored` (recall per scored call, wrong 0); returns (args, selection, the metric calls).
-    `scoring` False runs without scoring and `validate` False without a validation loader."""
+    `scoring` False runs without scoring and `validate` False without a validation loader. `resume`
+    continues the run dir's checkpoint instead of starting over: `train_losses` is indexed by
+    epoch, so it stays the whole list, while `val_losses` and `scored` are the epochs left."""
     model = fresh_model(torch.device("cpu"))
     with torch.no_grad():
         model.convs[0].bias.zero_()
     template = blank_template(model, tmp_path / "template.npz")
-    args = training.build_parser().parse_args(["--run-dir", str(tmp_path / "run"), "--weights", str(template), *argv])
-    args.run_dir.mkdir()
+    args = training.build_parser().parse_args(["--run-dir", str(tmp_path / "run"), "--weights", str(template),
+                                               *(["--resume"] if resume else []), *argv])
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    progress = training.START
+    if resume:
+        progress = training.read_checkpoint(args.run_dir / training.CHECKPOINT, model, optimizer, scaler)
+    else:
+        args.run_dir.mkdir()
     calls = []
 
     def score(weights):
@@ -394,13 +403,14 @@ def scripted_run(tmp_path, argv, train_losses, val_losses, scored, scoring=True,
     def train_epoch(model, *_):
         with torch.no_grad():
             model.convs[0].bias += 1.0          # "training": the first bias counts the epochs, so each saved file is its epoch
+            for parameter in model.parameters():    # and the optimizer gets a step to remember
+                parameter.grad = torch.zeros_like(parameter)
+        optimizer.step()
         return train_losses[int(model.convs[0].bias[0]) - 1]
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-    scaler = torch.amp.GradScaler("cuda", enabled=False)
     with patch.object(training, "train_epoch", side_effect=train_epoch), \
             patch.object(training, "evaluate_loss", side_effect=val_losses):
         selection = training.fit(args, model, None, object() if validate else None, optimizer, scaler, torch.device("cpu"),
-                                 score if scoring else None)
+                                 score if scoring else None, progress)
     return args, selection, calls
 
 
@@ -442,6 +452,111 @@ def test_score_every_leaves_unscored_epochs_blank_and_always_scores_the_last(tmp
     assert training.main(["--score-every", "0", "--self-test"]) == 0        # the self-test needs no run
     assert training.main(["--score-every", "0"]) == 1
     assert training.main(["--epochs", "0"]) == 1                            # no epoch: no best.npz to score or save
+
+
+def test_resume_continues_an_interrupted_run_to_the_uninterrupted_result(tmp_path):
+    """Four epochs in one go against two, an interruption (a results row the checkpoint never saw)
+    and --resume for the other two: the same best epochs, the same results.csv (one row per
+    epoch, the duplicated row written once) and the same files, with checkpoint.pt at epoch 4."""
+    losses, val_losses, scored = [0.6, 0.4, 0.3, 0.35], [0.5, 0.3, 0.2, 0.25], [0.80, 0.90, 0.90, 0.85]
+    (tmp_path / "whole").mkdir()
+    whole_args, whole, _ = scripted_run(tmp_path / "whole", ["--epochs", "4"], losses, val_losses, scored)
+    (tmp_path / "parts").mkdir()
+    args, first, _ = scripted_run(tmp_path / "parts", ["--epochs", "2"], losses, val_losses[:2], scored[:2])
+    assert first.best_epoch == 2 and first.best_loss_epoch == 2
+    checkpoint = torch.load(args.run_dir / "checkpoint.pt", weights_only=True)
+    assert checkpoint["epoch"] == 2 and checkpoint["best_epoch"] == 2 and checkpoint["best_metrics"]["recall"] == 0.90
+    assert checkpoint["best_loss_epoch"] == 2 and checkpoint["best_loss"] == 0.3
+    assert checkpoint["optimizer"]["state"] and "momentum_buffer" in checkpoint["optimizer"]["state"][0]
+    assert float(checkpoint["model"]["convs.0.bias"][0]) == 2.0 and checkpoint["scaler"] == {}
+    with (args.run_dir / "results.csv").open("a", encoding="utf-8", newline="") as handle:
+        handle.write("3,0.1,0.1,1,,,,,,,,,,\n")             # the interruption fell between epoch 3's row and its checkpoint
+    args, resumed, calls = scripted_run(tmp_path / "parts", ["--epochs", "4"], losses, val_losses[2:], scored[2:], resume=True)
+    assert args.resume and calls == [args.run_dir / "last.npz"] * 2
+    assert resumed._replace(best_path=whole.best_path) == whole
+    assert (resumed.best_epoch, resumed.best_loss_epoch, resumed.best_loss) == (2, 3, 0.2)
+    rows, whole_rows = results_of(args.run_dir), results_of(whole_args.run_dir)
+    assert [row["epoch"] for row in rows] == ["1", "2", "3", "4"]
+    timings = ("seconds", "score_seconds")
+    assert [{k: v for k, v in row.items() if k not in timings} for row in rows] == \
+        [{k: v for k, v in row.items() if k not in timings} for row in whole_rows]
+    for name in ("best.npz", "best_loss.npz", "last.npz"):
+        assert epoch_of(args.run_dir / name) == epoch_of(whole_args.run_dir / name)
+    assert epoch_of(args.run_dir / "best.npz") == 2 and epoch_of(args.run_dir / "last.npz") == 4
+    assert torch.load(args.run_dir / "checkpoint.pt", weights_only=True)["epoch"] == 4
+    assert not (args.run_dir / "checkpoint.pt.tmp").exists()
+
+
+def test_resume_at_the_last_epoch_runs_nothing_and_a_lower_epoch_count_is_refused(tmp_path):
+    (tmp_path / "run").mkdir()
+    scripted_run(tmp_path / "run", ["--epochs", "2"], [0.6, 0.4], [0.5, 0.3], [0.80, 0.90])
+    args, selection, calls = scripted_run(tmp_path / "run", ["--epochs", "2"], [0.6, 0.4], [], [], resume=True)
+    assert calls == [] and (selection.best_epoch, selection.best_loss_epoch, selection.best_loss) == (2, 2, 0.3)
+    assert selection.best_metrics.recall == 0.90 and selection.best_path == args.run_dir / "best.npz"
+    assert [row["epoch"] for row in results_of(args.run_dir)] == ["1", "2"] and epoch_of(args.run_dir / "last.npz") == 2
+    with pytest.raises(ValueError, match="below the checkpoint's epoch 2"):
+        scripted_run(tmp_path / "run", ["--epochs", "1"], [0.6, 0.4], [], [], resume=True)
+
+
+def test_resume_needs_a_checkpoint_and_the_run_it_belongs_to(tmp_path, capsys):
+    """--resume on a folder without checkpoint.pt, or with one from a run of other options, is a
+    one-line error naming what is missing or which config.json field differs, before any cache
+    or training; the run's own outcomes (epochs, the hard-negative count) may differ."""
+    videos, labels = workspace(tmp_path, ["a", "b"])
+    run_dir = tmp_path / "run"
+    argv = ["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"), "--run-dir", str(run_dir)]
+    assert training.main([*argv, "--resume"]) == 1
+    assert "[error] --resume needs a checkpoint.pt in" in capsys.readouterr().err
+    run_dir.mkdir()
+    (run_dir / "checkpoint.pt").write_bytes(b"not a checkpoint")
+    assert training.main([*argv, "--resume"]) == 1
+    assert "readable config.json" in capsys.readouterr().err
+    config = training.run_config(training.build_parser().parse_args(argv), ["a", "b"], ["b"], {})
+    config["epochs"], config["lr"] = 3, 0.3
+    (run_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    assert training.main([*argv, "--resume"]) == 1
+    assert "[error] --resume would continue a different run: config.json has lr=0.3, this run lr=1.0" in capsys.readouterr().err
+    assert not (tmp_path / "cache").exists()
+    training.same_run(config, {**config, "epochs": 5, "false_alarm_units": 12})
+    with pytest.raises(ValueError, match="validation_clips"):
+        training.same_run(config, {**config, "validation_clips": ["a"]})
+    with pytest.raises(ValueError, match="readable checkpoint.pt"):
+        training.read_checkpoint(run_dir / "checkpoint.pt", fresh_model(torch.device("cpu")), None, None)
+
+
+def test_resume_through_main_keeps_the_run_and_raises_its_epochs(tmp_path, capsys):
+    """The whole trainer on two tiny clips, CPU, one step per epoch, the CUDA-only scoring stubbed:
+    one epoch, then --resume with --epochs 2 continues the same run (results.csv rows 1 and 2,
+    config.json's epochs raised, the winner picked), and a third run without --resume starts over
+    after saying what it dropped."""
+    (tmp_path / "videos").mkdir()
+    (tmp_path / "labels").mkdir()
+    for clip in ("a", "b"):
+        write_clip(tmp_path / "videos" / f"{clip}.avi", 8, SIZE, 30.0)
+        write_labels(tmp_path / "labels" / f"{clip}_ball.csv", {f: (1.0 + f, 1.0) for f in range(7)}, *SIZE)
+    run_dir = tmp_path / "run"
+    argv = ["--videos", str(tmp_path / "videos"), "--labels", str(tmp_path / "labels"), "--data-dir", str(tmp_path / "cache"),
+            "--run-dir", str(run_dir), "--save", str(tmp_path / "save.npz"), "--device", "cpu", "--workers", "0",
+            "--from-scratch", "--max-train-steps", "1", "--max-val-steps", "1", "--prep-workers", "1"]
+    recalls = iter([0.5, 0.6, 0.7])
+    with patch.object(training, "score_weights", side_effect=lambda *_: training.metrics_of(next(recalls), 0.0)):
+        assert training.main([*argv, "--epochs", "1"]) == 0
+        assert [row["epoch"] for row in results_of(run_dir)] == ["1"] and "[train] epoch 1:" in capsys.readouterr().out
+        assert training.main([*argv, "--resume", "--epochs", "2"]) == 0
+        out = capsys.readouterr().out
+        assert f"[train] resuming {run_dir} after epoch 1 of 2" in out and "[train] epoch 2:" in out and "[train] epoch 1:" not in out
+        assert [row["epoch"] for row in results_of(run_dir)] == ["1", "2"]
+        assert json.loads((run_dir / "config.json").read_text(encoding="utf-8"))["epochs"] == 2
+        winner = json.loads((run_dir / "winner.json").read_text(encoding="utf-8"))
+        assert winner["best_epoch"] == 2 and winner["metrics"]["recall"] == 0.6 and (tmp_path / "save.npz").exists()
+        assert training.main([*argv, "--resume"]) == 0                 # --epochs defaults to the run's: nothing left to train
+        out = capsys.readouterr().out
+        assert "after epoch 2 of 2: the epochs are done" in out and "[train] epoch" not in out
+        assert training.main([*argv, "--epochs", "1"]) == 0
+        out = capsys.readouterr().out
+        assert "[train] checkpoint.pt found in" in out and "--resume would have continued it" in out
+        assert [row["epoch"] for row in results_of(run_dir)] == ["1"]
+        assert torch.load(run_dir / "checkpoint.pt", weights_only=True)["epoch"] == 1
 
 
 def test_pick_winner_reuses_the_best_epochs_metrics_and_records_how_it_chose(tmp_path, capsys):

@@ -14,6 +14,7 @@ tags every clip with a source so you can pick, hold out and oversample by source
     python finetune/training/train_gridtracknet.py --augment basic translate reverse --oversample-absent 3
     python finetune/training/train_gridtracknet.py --from-scratch --epochs 30   # train a fresh network on everything
     python finetune/training/train_gridtracknet.py --all-clips --selection-run finetune/runs/r5 --augment basic translate
+    python finetune/training/train_gridtracknet.py --resume --run-dir finetune/runs/r5   # carry on after an interruption
     python finetune/training/train_gridtracknet.py --self-test
 
 After every scored epoch (``--score-every``, the last epoch always) the weights are
@@ -23,6 +24,13 @@ prefers (``promotion_improves``; a tie keeps the earlier epoch), not the one wit
 lowest validation loss (kept as ``best_loss.npz`` for the record). The run ends by
 setting that best epoch against the starting weights on the same clips, and the
 winner is copied to ``--save`` so the tracker always points at the best model.
+
+Every epoch also leaves ``checkpoint.pt`` in the run dir (the model, optimizer and
+GradScaler states with the epoch and the best-so-far bookkeeping), and ``--resume``
+carries an interrupted run on from it with the same options (``--epochs`` may be raised;
+a Colab runtime recycled mid-run no longer costs the epochs done). The seed of every
+epoch's batch draws is ``--seed`` plus the epoch, so a resumed run draws the batches
+the uninterrupted one would have; see ``fit``.
 
 ``--all-clips`` is the other kind of run: once a recipe (the flags and the epoch count)
 has been chosen on a held-out set, train it on every clip with nothing held out and no
@@ -37,6 +45,7 @@ import argparse
 import csv
 import json
 import math
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -51,7 +60,7 @@ if __name__ == "__main__":          # run as a script: make the repository root 
 
 from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
 from finetune.data.detector_metrics import DetectorMetrics
-from finetune.data.fileio import copy_atomic, write_atomic
+from finetune.data.fileio import atomic_binary, atomic_csv, copy_atomic, write_atomic
 from finetune.data import workspace as ws
 from finetune.training.clips import Clip, ClipSelection, find_clips, resolve_val_clips, validation_split
 from finetune.training.dataset import (AUGMENTATIONS, Augmenter, UnitDataset, make_sampler, make_target,
@@ -63,6 +72,8 @@ from finetune.training.metrics import FALSE_ALARM_CONF, false_alarm_units, promo
 SEED = 7                   # every run draws the same augmentation and sampling sequence unless --seed says otherwise
 DEFAULT_EPOCHS = 10
 RESULTS_COLUMNS = ("epoch", "train_loss", "val_loss", "seconds", "score_seconds", *DetectorMetrics._fields)
+CHECKPOINT = "checkpoint.pt"
+RUN_OUTCOMES = ("epochs", "false_alarm_units")     # the config.json fields a --resume may differ in, see same_run
 
 # --------------------------------------------------------------------------- the run
 
@@ -104,6 +115,72 @@ class Selection(NamedTuple):
     best_loss: float
 
 
+class Checkpoint(NamedTuple):
+    """Where a run stood when an epoch ended: the epoch just finished and the best-so-far
+    bookkeeping ``fit`` carries from one epoch to the next (the fields ``Selection`` reports).
+    ``checkpoint.pt`` records it beside the model, optimizer and GradScaler states, and
+    ``--resume`` picks the run up from it; ``START`` is a run that has not begun."""
+    epoch: int
+    best_epoch: int
+    best_metrics: Optional[DetectorMetrics]
+    best_loss_epoch: int
+    best_loss: float
+
+
+START = Checkpoint(0, 0, None, 0, math.inf)
+
+
+def write_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
+                     scaler: torch.amp.GradScaler, progress: Checkpoint) -> None:
+    """Record `progress` with the model, optimizer, GradScaler and torch RNG states at `path`, through
+    a temporary file beside it, so an interruption leaves the previous checkpoint or this one whole."""
+    state = {**progress._asdict(), "best_metrics": None if progress.best_metrics is None else progress.best_metrics._asdict(),
+             "model": model.state_dict(), "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
+             "torch_rng": torch.get_rng_state()}
+    with atomic_binary(path) as handle:
+        torch.save(state, handle)
+
+
+def read_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
+                    scaler: torch.amp.GradScaler) -> Checkpoint:
+    """Load the states ``write_checkpoint`` recorded at `path` into `model`, `optimizer`, `scaler`
+    and torch's RNG, and return the progress they belong to. A missing or unreadable file is a
+    ValueError, the one ``--resume`` reports."""
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=True)
+    except (OSError, RuntimeError, ValueError, pickle.UnpicklingError, EOFError) as error:
+        raise ValueError(f"--resume needs a readable {CHECKPOINT} in {path.parent} ({error})") from error
+    model.load_state_dict(state["model"])
+    optimizer.load_state_dict(state["optimizer"])
+    if state["scaler"]:                 # a disabled (CPU) scaler saves nothing, and an enabled one refuses nothing
+        scaler.load_state_dict(state["scaler"])
+    torch.set_rng_state(state["torch_rng"])
+    best_metrics = None if state["best_metrics"] is None else DetectorMetrics(**state["best_metrics"])
+    return Checkpoint(state["epoch"], state["best_epoch"], best_metrics, state["best_loss_epoch"], state["best_loss"])
+
+
+def read_run_config(run_dir: Path) -> dict:
+    """The ``config.json`` of the run ``--resume`` continues in `run_dir`; a folder without it and
+    a ``checkpoint.pt`` is a ValueError."""
+    if not (run_dir / CHECKPOINT).is_file():
+        raise ValueError(f"--resume needs a {CHECKPOINT} in {run_dir}; there is none, so there is no run to continue")
+    try:
+        return json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"--resume needs a readable config.json beside {run_dir / CHECKPOINT} ({error})") from error
+
+
+def same_run(saved: dict, current: dict) -> None:
+    """Refuse to resume a run with other options than it was started with: every ``config.json``
+    field but the run's outcomes (``epochs``, which may be raised to train longer, and the
+    hard-negative count the prepass found) must agree, or the first that differs names a
+    ValueError."""
+    for field in current:
+        if field not in RUN_OUTCOMES and saved.get(field) != current[field]:
+            raise ValueError(f"--resume would continue a different run: config.json has {field}={saved.get(field)!r}, "
+                             f"this run {field}={current[field]!r}")
+
+
 def results_row(epoch: int, train_loss: float, val_loss: Optional[float], seconds: float,
                 score_seconds: Optional[float], metrics: Optional[DetectorMetrics]) -> List[str]:
     """One ``results.csv`` row; the validation column is empty when nothing is held out and the
@@ -114,21 +191,44 @@ def results_row(epoch: int, train_loss: float, val_loss: Optional[float], second
     return row + [f"{score_seconds:.0f}"] + [f"{value:.6f}" if isinstance(value, float) else str(value) for value in metrics]
 
 
+def keep_results_through(results: Path, epoch: int) -> None:
+    """Cut ``results.csv`` back to the rows up to `epoch`, the checkpoint's: an interruption between
+    an epoch's row and its checkpoint leaves a row the resumed run writes again."""
+    rows: List[List[str]] = []
+    if results.is_file():
+        with results.open(newline="", encoding="utf-8") as handle:
+            rows = [row for row in csv.reader(handle) if row and row[0] != RESULTS_COLUMNS[0]]
+    with atomic_csv(results) as writer:
+        writer.writerow(RESULTS_COLUMNS)
+        writer.writerows(row for row in rows if int(row[0]) <= epoch)
+
+
 def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoader, val_loader: Optional[DataLoader],
         optimizer: torch.optim.Optimizer, scaler: torch.amp.GradScaler, device: torch.device,
-        score: Optional[Callable[[Path], DetectorMetrics]]) -> Selection:
-    """Run the epochs. After each one ``last.npz`` is written and ``results.csv`` gets its row; on a
-    scored epoch (every ``--score-every``, and always the last) ``score(last.npz)`` measures the
-    held-out detector metric and ``best.npz`` follows it by ``promotion_improves`` (a tie keeps
-    the earlier epoch); ``best_loss.npz`` follows the validation loss. With nothing held out
-    (``val_loader`` and ``score`` None) the epochs only run, and ``last.npz`` is the result."""
+        score: Optional[Callable[[Path], DetectorMetrics]], progress: Checkpoint = START) -> Selection:
+    """Run the epochs after `progress` (``START``, or the checkpoint ``--resume`` read; one past
+    ``--epochs`` is a ValueError, one at it leaves nothing to run). After each one ``last.npz`` is
+    written, ``results.csv`` gets its row and ``checkpoint.pt`` is rewritten; on a scored epoch
+    (every ``--score-every``, and always the last) ``score(last.npz)`` measures the held-out
+    detector metric and ``best.npz`` follows it by ``promotion_improves`` (a tie keeps the earlier
+    epoch); ``best_loss.npz`` follows the validation loss. With nothing held out (``val_loader``
+    and ``score`` None) the epochs only run, and ``last.npz`` is the result.
+
+    Each epoch seeds torch with ``--seed`` plus its number before drawing its batches, so the
+    sampler's draws and the loader workers' seeds are the epoch's own, not the run's history's,
+    and a resumed run draws the batches the uninterrupted one would have. The augmentation draws
+    are not exactly those: a persistent worker's ``Augmenter`` streams on from the seed it got
+    when the loader first ran, and a resumed run starts its workers afresh."""
+    if progress.epoch > args.epochs:
+        raise ValueError(f"--epochs {args.epochs} is below the checkpoint's epoch {progress.epoch}; "
+                         "--resume can only keep or raise it")
     results = args.run_dir / "results.csv"
-    write_atomic(results, ",".join(RESULTS_COLUMNS) + "\n")
+    keep_results_through(results, progress.epoch)
     last_path, best_path, best_loss_path = (args.run_dir / name for name in ("last.npz", "best.npz", "best_loss.npz"))
-    best_epoch, best_metrics = 0, None
-    best_loss_epoch, best_loss = 0, math.inf
-    for epoch in range(1, args.epochs + 1):
+    _, best_epoch, best_metrics, best_loss_epoch, best_loss = progress
+    for epoch in range(progress.epoch + 1, args.epochs + 1):
         started = time.perf_counter()
+        torch.manual_seed(args.seed + epoch)
         train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch, args.epochs, args.max_train_steps)
         val_loss = None if val_loader is None else evaluate_loss(model, val_loader, device, args.max_val_steps)
         save_weights(model, args.weights, last_path)
@@ -146,6 +246,8 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
                 copy_atomic(last_path, best_path)
         with results.open("a", encoding="utf-8", newline="") as handle:    # one line per epoch, appended
             csv.writer(handle).writerow(results_row(epoch, train_loss, val_loss, seconds, score_seconds, metrics))
+        write_checkpoint(args.run_dir / CHECKPOINT, model, optimizer, scaler,
+                         Checkpoint(epoch, best_epoch, best_metrics, best_loss_epoch, best_loss))
         validated = "" if val_loss is None else f" val={val_loss:.6f}"
         scored = (f" | held-out recall={metrics.recall:.3f} wrong={metrics.wrong:.3f} falseAlarm={metrics.false_alarm:.3f}"
                   f" ({score_seconds / 60:.1f} min) | best epoch {best_epoch}" if metrics is not None else "")
@@ -212,14 +314,17 @@ def pick_winner(args: argparse.Namespace, clips: List[Clip], val_clips: List[str
 
 
 def train(args: argparse.Namespace) -> None:
-    torch.manual_seed(args.seed)       # the data loaders' draws derive from it too, see Augmenter
+    torch.manual_seed(args.seed)       # a fresh model's init draws from it; every epoch reseeds the loaders' draws, see fit
     selection_run = read_selection_run(args.selection_run) if args.selection_run else None
+    resumed = read_run_config(args.run_dir) if args.resume else None
     if args.epochs is None:
-        args.epochs = (selection_run or {}).get("best_epoch") or DEFAULT_EPOCHS
+        args.epochs = resumed["epochs"] if resumed else (selection_run or {}).get("best_epoch") or DEFAULT_EPOCHS
     clips = find_clips(args.videos, args.labels, ClipSelection(args.sources, args.exclude_clips, args.include_excluded, args.cameras))
     names = [clip for clip, _, _, _ in clips]
     val_clips = [] if args.all_clips else validation_split(clips, args.labels, args.val_clips, args.holdout)
     oversample = parse_oversample(args.oversample)
+    if resumed is not None:
+        same_run(resumed, run_config(args, names, val_clips, oversample))
     manifest = prepare_data(clips, args.data_dir, val_clips, args.rebuild_data, args.prep_workers)
     if not args.all_clips and not manifest["val"]:
         raise ValueError("Need labelled clips in both the training and validation split")
@@ -255,17 +360,26 @@ def train(args: argparse.Namespace) -> None:
     optimizer = torch.optim.Adadelta(model.parameters(), lr=args.lr, rho=0.95, eps=1e-7)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     args.run_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = args.run_dir / CHECKPOINT
+    progress = START
+    if args.resume:
+        progress = read_checkpoint(checkpoint, model, optimizer, scaler)
+        print(f"[train] resuming {args.run_dir} after epoch {progress.epoch} of {args.epochs}"
+              + (": the epochs are done, only the winner is left to pick" if progress.epoch == args.epochs else ""))
+    elif checkpoint.exists():
+        print(f"[train] {CHECKPOINT} found in {args.run_dir} and removed: the run starts over, --resume would have continued it")
+        checkpoint.unlink()
     write_atomic(args.run_dir / "config.json", json.dumps(run_config(args, names, val_clips, oversample, len(flagged)), indent=2))
     print(f"[train] device={device} epochs={args.epochs} batch={args.batch_size} seed={args.seed} "
           f"units/epoch={len(train_loader) * args.batch_size} augment={sorted(set(args.augment))} "
           + ("nothing held out (--all-clips)" if args.all_clips else f"val={val_clips} score every {args.score_every}")
           + (f" oversample={oversample}" if oversample else ""))
     if args.all_clips:
-        record_recipe_result(args, fit(args, model, train_loader, None, optimizer, scaler, device, score=None), selection_run)
+        record_recipe_result(args, fit(args, model, train_loader, None, optimizer, scaler, device, None, progress), selection_run)
         return
     val_only = [entry for entry in clips if entry[0] in val_clips]
     selection = fit(args, model, train_loader, val_loader, optimizer, scaler, device,
-                    score=lambda weights: score_weights(weights, val_only, device))
+                    lambda weights: score_weights(weights, val_only, device), progress)
     pick_winner(args, clips, val_clips, selection, device)
 
 
@@ -329,6 +443,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save", type=Path, default=layout.best_weights)
     parser.add_argument("--data-dir", type=Path, default=layout.cache / "data")
     parser.add_argument("--run-dir", type=Path, default=layout.runs / "train")
+    parser.add_argument("--resume", action="store_true",
+                        help=f"Continue the run in --run-dir from its {CHECKPOINT} (written after every epoch) with the "
+                             "same options; --epochs may be raised to train longer and defaults to the run's")
     held_out = parser.add_mutually_exclusive_group()
     held_out.add_argument("--val-clips", nargs="*", help="Held-out clip stems or globs (default: video10 if present, else the last clip)")
     held_out.add_argument("--holdout", metavar="NAME",

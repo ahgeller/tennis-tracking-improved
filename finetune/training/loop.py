@@ -89,7 +89,7 @@ def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: i
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        total += float(loss)
+        total += float(loss.detach())
         steps += 1
         if steps == 1 or steps % PROGRESS_EVERY == 0:
             rate = steps / max(time.perf_counter() - started, 1e-6)

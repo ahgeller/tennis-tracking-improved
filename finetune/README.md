@@ -47,7 +47,7 @@ finetune/
   clips.csv   one row per clip: source, group, size, fps, stride, label counts (written by import_data.py)
   holdouts.json  named held-out sets of whole recordings (`mixed_v1`), for --holdout
   models/     gridtracknet_best.npz   the winner of the last training run
-  runs/       <tag>/results.csv, config.json, winner.json, best.npz, best_loss.npz, last.npz
+  runs/       <tag>/results.csv, config.json, winner.json, best.npz, best_loss.npz, last.npz, checkpoint.pt (for --resume)
   cache/      768x432 lossless PNG frames (the tracker's own resize), one folder per clip; keyed on the video, a label edit only adds frames (safe to delete; about 8 GB for the 64 trainable clips, measured 7.9 GB)
 ```
 
@@ -252,6 +252,14 @@ separately). `ft.py check` flags files that break this rule.
      good model. `winner.json` records the decision (`selected_by`,
      `best_epoch`). `--seed` changes the augmentation and sampling draws
      (default 7) for a second opinion on a narrow margin.
+   - Every epoch also rewrites `runs/<tag>/checkpoint.pt` (the model, optimizer
+     and scaler states with the epoch and the best-so-far bookkeeping), and
+     `--resume --run-dir runs/<tag>` carries an interrupted run on from it with
+     the same options (`--epochs` may be raised; anything else that differs
+     is refused), keeping `results.csv` and the `best.npz` choice. A run
+     started without `--resume` in a folder that holds one starts over. On
+     Colab, where a runtime can be recycled mid-run, keep `--run-dir` on
+     Drive and resume.
    - `--all-clips` is the last step of a recipe: nothing held out, nothing
      scored, every clip trained on for `--epochs` (default: the best epoch of
      the `--selection-run`), and `last.npz` is the result. Its `winner.json`
