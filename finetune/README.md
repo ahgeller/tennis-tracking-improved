@@ -28,6 +28,7 @@ The same actions exist as commands for scripts and power use:
 | `ft.py train ...` | fine-tune or train from scratch; keeps the better of new vs starting weights |
 | `ft.py promote` | make the winner the tracker's model (`models/gridtracknet_weights_torch.npz`, old one backed up) |
 | `ft.py paths` | which python, which folders |
+| `ft.py colab-zip` | build `output/tennis_finetune_colab.zip`, the one file the Colab notebook unpacks (videos, labels, records, weights, trainer code) |
 
 Everything that is not `ft.py` is still callable directly (`training/pretrack.py`,
 `labeling/label_tool.py`, `training/train_gridtracknet.py`, `data/import_data.py`,
@@ -257,9 +258,9 @@ separately). `ft.py check` flags files that break this rule.
      says `selected_by: "recipe"` and copies the selection run's held-out
      numbers in, because weights that saw every clip carry no honest number
      of their own.
-   - Colab: `GridTrackNet_FineTune_Colab.ipynb` runs the same trainer; put
-     `videos/`, `labels/`, `clips.csv`, `models/` and `code/` under
-     `MyDrive/tennis_finetune/`.
+   - Colab: `GridTrackNet_FineTune_Colab.ipynb` runs the same trainer. Run
+     `ft.py colab-zip` and upload the one file it writes to the top of Google
+     Drive as `tennis_finetune_colab.zip`; the notebook unpacks it.
 
 5. **Use it** — `.\finetune.ps1 promote` copies the winner over
    `models/gridtracknet_weights_torch.npz` (the old file is kept as

@@ -274,6 +274,7 @@ MENU = [
     ("8", "import", "pull every labelled clip on this PC into the workspace", _menu_import),
     ("9", "camera tags", "mark each clip fixed/moving camera (train --cameras fixed uses it)", lambda: ft.run_cli(["camera"])),
     ("10", "hint model", "retrain what places the label tool's suggestions; switch versions", _menu_hints),
+    ("11", "colab zip", "build the one zip the Colab notebook unpacks (output/tennis_finetune_colab.zip)", lambda: ft.run_cli(["colab-zip"])),
 ]
 
 

@@ -1,17 +1,18 @@
 """The Colab notebook stages every repository module the trainer imports.
 
 train_gridtracknet.py imports a handful of finetune.* and tennis_tracker.* modules (some inside
-functions); the notebook's staging cell lists the files it needs as REQUIRED. This walks the
-trainer's internal import closure from the source and checks the two agree, so a new import in
-the trainer fails here instead of with ModuleNotFoundError on Colab."""
+functions); the notebook's staging cell lists the files it needs as REQUIRED (``finetune.colab_zip.staged_files``
+reads it; ``ft.py colab-zip`` packs those files). This walks the trainer's internal import closure
+from the source and checks the two agree, so a new import in the trainer fails here instead of
+with ModuleNotFoundError on Colab."""
 import ast
 import json
 from pathlib import Path
-from typing import Iterator, List, Set
+from typing import Iterator, Set
 
+from finetune.colab_zip import NOTEBOOK, staged_files
 from tennis_tracker.paths import ROOT
 
-NOTEBOOK = ROOT / "finetune" / "GridTrackNet_FineTune_Colab.ipynb"
 PACKAGES = ("finetune", "tennis_tracker")
 TRAINER = "finetune.training.train_gridtracknet"
 
@@ -64,19 +65,6 @@ def import_closure(module: str) -> Set[str]:
         parts = name.split(".")
         seen.update(".".join(parts[:depth]) for depth in range(1, len(parts)))
     return seen
-
-
-def staged_files() -> List[str]:
-    """The REQUIRED list in the notebook's staging cell."""
-    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
-    for cell in notebook["cells"]:
-        source = "".join(cell["source"])
-        if cell["cell_type"] == "code" and "REQUIRED = [" in source:
-            tree = ast.parse(source.replace("!pip", "pass  # pip"))
-            for node in tree.body:
-                if isinstance(node, ast.Assign) and node.targets[0].id == "REQUIRED":
-                    return ast.literal_eval(node.value)
-    raise AssertionError("the notebook has no staging cell with a REQUIRED list")
 
 
 def test_the_notebook_stages_the_trainers_whole_import_closure():

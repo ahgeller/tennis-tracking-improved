@@ -14,6 +14,7 @@ interactive menu that walks through everything below. The commands remain for sc
     python finetune/ft.py hints train                retrain the network that places the label tool's suggestions
     python finetune/ft.py hints list | use <version> its versions (all kept) and which one the tool uses
     python finetune/ft.py hints sheet <clip> [a b]   a zoomed PNG of where two versions disagree, to judge by eye
+    python finetune/ft.py colab-zip                  the one zip the Colab notebook unpacks (videos, labels, records, weights, code)
 
 Runs itself under the training venv automatically (``finetune/interpreter.py``), so plain
 ``python`` works from any shell (``.\\finetune.ps1 <command>`` does the same from PowerShell).
@@ -21,8 +22,8 @@ The commands that run another script - import, add, prelabel, label, eval, train
 pass the arguments they do not declare straight through to it (``ft.py train --epochs 3 --lr
 0.3``); every other command refuses an argument it does not know, so a mistyped option or a
 clip name given without ``--clips`` is an error, not silently ignored. The commands that work
-in this process (status, check, promote, camera, paths) live in ``finetune/commands.py``; the
-menu, the launchers and the script commands are here.
+in this process (status, check, promote, camera, paths) live in ``finetune/commands.py`` and
+colab-zip in ``finetune/colab_zip.py``; the menu, the launchers and the script commands are here.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ if __name__ == "__main__":          # run as a script: make the repository root 
 
 # Only stdlib-backed finetune modules at the top: ft.py must import without cv2, numpy or torch so
 # ensure_interpreter can hand over to an interpreter that has them.
+from finetune.colab_zip import DEFAULT_OUT, cmd_colab_zip
 from finetune.commands import cmd_camera, cmd_check, cmd_paths, cmd_promote, cmd_status
 from finetune.data.data_policy import OWN_SOURCE, evaluation_clips, read_review_status
 from finetune.data.label_flags import open_flags, outstanding_flags
@@ -307,6 +309,10 @@ def run_cli(argv: List[str]) -> int:
     p.add_argument("--force", action="store_true", help="re-measure clips that already have a tag")
     p.set_defaults(func=cmd_camera)
     subparsers.add_parser("paths", help="show the interpreter, workspace and data source paths").set_defaults(func=cmd_paths)
+    p = subparsers.add_parser("colab-zip", help="build the one zip the Colab notebook unpacks: videos, labels, "
+                                               "clips.csv and the other records, the tracker's weights and the trainer's code")
+    p.add_argument("--out", help=f"where to write it (default: {DEFAULT_OUT.relative_to(ROOT).as_posix()})")
+    p.set_defaults(func=cmd_colab_zip)
 
     args, rest = parser.parse_known_args(argv)
     if rest and not getattr(args, "forwards", False):     # only the script commands take what they did not declare
