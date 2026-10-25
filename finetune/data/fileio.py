@@ -16,7 +16,7 @@ import shutil
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import IO, TYPE_CHECKING, BinaryIO, Iterator, TextIO
 
 if TYPE_CHECKING:
     from _csv import _writer as CsvWriter     # what csv.writer() returns; csv.writer itself is a function
@@ -42,15 +42,31 @@ def temporary_for(path: Path) -> Path:
 
 
 @contextmanager
-def atomic_text(path: Path, newline: str = "") -> Iterator:
-    """A text handle whose content lands at `path` only once it is complete and on disk."""
+def atomic_handle(path: Path, mode: str, **options) -> Iterator[IO]:
+    """A handle opened with `mode` (and `options`, as ``Path.open`` takes them) on a temporary file
+    beside `path`, whose content lands at `path` only once it is complete and on disk."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = temporary_for(path)
-    with temporary.open("w", encoding="utf-8", newline=newline) as handle:
+    with temporary.open(mode, **options) as handle:
         yield handle
         handle.flush()
         os.fsync(handle.fileno())
     replace_file(temporary, path)
+
+
+@contextmanager
+def atomic_text(path: Path, newline: str = "") -> Iterator[TextIO]:
+    """A text handle whose content lands at `path` only once it is complete and on disk."""
+    with atomic_handle(path, "w", encoding="utf-8", newline=newline) as handle:
+        yield handle
+
+
+@contextmanager
+def atomic_binary(path: Path) -> Iterator[BinaryIO]:
+    """A binary handle whose content lands at `path` only once it is complete and on disk (what
+    ``torch.save`` and ``np.save`` write to, for a checkpoint or weights)."""
+    with atomic_handle(path, "wb") as handle:
+        yield handle
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -69,13 +85,8 @@ def atomic_csv(path: Path) -> Iterator["CsvWriter"]:
 def copy_atomic(source: Path, path: Path) -> None:
     """Copy `source` over `path` through a temporary file beside it, flushed to disk first, so a
     reader of `path` sees the old file or the complete copy and nothing in between."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = temporary_for(path)
-    with source.open("rb") as reader, temporary.open("wb") as writer:
+    with source.open("rb") as reader, atomic_binary(path) as writer:
         shutil.copyfileobj(reader, writer)
-        writer.flush()
-        os.fsync(writer.fileno())
-    replace_file(temporary, path)
 
 
 def backup_copy(path: Path, tag: str) -> Path:
