@@ -321,3 +321,37 @@ def test_writer_failure_does_not_block_full_queue(tmp_path):
     closer.join(1)
     assert not closer.is_alive()
     assert "encoder failed" in errors[0]
+
+
+class SlowCapture(Capture):
+    """A capture whose reads take a while and which records when it was released."""
+
+    def __init__(self, count):
+        super().__init__(count)
+        self.reading = False
+        self.released_while_reading = False
+        self.released = False
+
+    def read(self):
+        import time
+        self.reading = True
+        time.sleep(0.02)
+        self.reading = False
+        return super().read()
+
+    def release(self):
+        self.released_while_reading = self.reading
+        self.released = True
+
+
+def test_frame_reader_release_waits_for_the_thread_before_releasing_the_capture():
+    """Released with frames still to come (as pass 2 does), the reader stops its thread and
+    joins it before the capture is released: a capture released under a running read aborts
+    the process."""
+    capture = SlowCapture(200)
+    reader = ThreadedFrameReader(capture, prefetch=2)
+    assert int(reader.read()[0, 0, 0]) == 0
+    reader.release()
+    assert not reader._thread.is_alive()
+    assert capture.released and not capture.released_while_reading
+    assert reader.read() is None

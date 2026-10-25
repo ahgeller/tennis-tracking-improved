@@ -325,27 +325,42 @@ class ThreadedFrameReader:
     ``read`` returns the next frame, None at the end of the clip, and raises
     ``RuntimeError`` from the decoder's exception if the reader thread died:
     the failure is handed over, not left as a read that never returns.
+    ``release`` may be called before the clip is exhausted (pass 2 stops at
+    the frame count pass 1 saw): it stops the thread and waits for it before
+    releasing the capture, since releasing a capture a thread is still reading
+    from aborts the process.
     """
 
     def __init__(self, cap: cv2.VideoCapture, prefetch: int = 4):
         self._cap = cap
         self._q: queue.Queue = queue.Queue(maxsize=prefetch)
         self._done = False
+        self._stop = threading.Event()
         self._error: Optional[BaseException] = None
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
 
+    def _put(self, item: Optional[np.ndarray]) -> bool:
+        """Queue ``item`` for the consumer; False when the reader was stopped while the queue
+        stayed full (the consumer is gone and will not drain it)."""
+        while not self._stop.is_set():
+            try:
+                self._q.put(item, timeout=_QUEUE_POLL_S)
+                return True
+            except queue.Full:
+                continue
+        return False
+
     def _read_loop(self) -> None:
         try:
-            while True:
+            while not self._stop.is_set():
                 ret, frame = self._cap.read()
-                if not ret:
+                if not ret or not self._put(frame):
                     break
-                self._q.put(frame)
         except BaseException as error:  # noqa: BLE001 - handed to read() on the consumer thread
             self._error = error
         finally:
-            self._q.put(None)
+            self._put(None)
 
     def read(self) -> Optional[np.ndarray]:
         if self._done:
@@ -358,5 +373,8 @@ class ThreadedFrameReader:
         return frame
 
     def release(self) -> None:
+        """Stop the reader thread, wait for it, then release the capture."""
         self._done = True
+        self._stop.set()
+        self._thread.join()
         self._cap.release()
