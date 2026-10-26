@@ -85,6 +85,25 @@ Use another CUDA device or detector threshold:
 python clean_tracker.py --device 1 --conf 0.55
 ```
 
+## Ball detector weights: two networks, for now
+
+The tracker runs either of two ball-detector networks and picks by the suffix of
+the weights file. Nothing else changes: same video, same JSON, same selector.
+
+| weights file | network | status |
+|---|---|---|
+| `.npz` (default: `models/gridtracknet_weights_torch.npz`) | GridTrackNet, 48x27 grid | the bundled detector |
+| `.pt` | HeatmapNet, 192x108 heat map (`tennis_tracker/heatmapnet.py`) | candidate, being trained on the `train` branch |
+
+```powershell
+python clean_tracker.py --input path	o\match.mp4                        bundled GridTrackNet
+python clean_tracker.py --input path	o\match.mp4 --weights best.pt      the heat-map network
+```
+
+Both are kept only until the held-out comparison picks one; the loser is then
+removed and the winner becomes the default. The training playbook with that
+comparison is the README of the `train` branch.
+
 ## Fine-tuning GridTrackNet
 
 The bundled GridTrackNet weights contain the latest fine-tuned checkpoint used
