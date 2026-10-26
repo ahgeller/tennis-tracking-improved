@@ -42,10 +42,10 @@ def test_arch_of_reads_the_suffix_of_an_npz_and_the_record_of_a_pt(tmp_path):
     save_model(MemoryNet(), tmp_path / "memory.PT")
     assert arch_of(tmp_path / "heat.pt") == HEATMAP_S4 and arch_of(tmp_path / "memory.PT") == MEMORY_S4
     torch.save({"arch": "yolo", "state_dict": {}}, tmp_path / "other.pt")
-    with pytest.raises(ValueError, match="names the unknown ball-detector architecture 'yolo'"):
+    with pytest.raises(ValueError, match="names the architecture 'yolo', not one a .pt record holds \(\['heatmap_s4', 'memory_s4'\]\)"):
         arch_of(tmp_path / "other.pt")
     torch.save({"arch": GRIDTRACKNET, "state_dict": {}}, tmp_path / "grid.pt")       # an .npz architecture in a .pt
-    with pytest.raises(ValueError, match="unknown ball-detector architecture 'gridtracknet'"):
+    with pytest.raises(ValueError, match="names the architecture 'gridtracknet', not one a .pt record holds"):
         arch_of(tmp_path / "grid.pt")
     with pytest.raises(ValueError, match="not a readable ball-detector weights file"):
         arch_of(tmp_path / "missing.pt")

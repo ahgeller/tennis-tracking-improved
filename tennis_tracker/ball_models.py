@@ -58,7 +58,8 @@ def arch_of(weights: Path) -> str:
         raise ValueError(f"{weights}: ball-detector weights end in .npz (GridTrackNet) or .pt (HeatmapNet, MemoryNet)")
     arch = heatmapnet.read_record(Path(weights))["arch"]
     if WEIGHTS_SUFFIX.get(arch) != _RECORD_SUFFIX:
-        raise ValueError(f"{weights} names the unknown ball-detector architecture {arch!r}; one of {ARCHITECTURES}")
+        recorded = sorted(name for name, suffix in WEIGHTS_SUFFIX.items() if suffix == _RECORD_SUFFIX)
+        raise ValueError(f"{weights} names the architecture {arch!r}, not one a {_RECORD_SUFFIX} record holds ({recorded})")
     return arch
 
 
