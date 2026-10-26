@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
@@ -25,7 +25,11 @@ from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
 
 PROGRESS_EVERY = 200       # training steps between progress lines
 LOSS_EPSILON = 1e-6        # keeps the confidence loss's logs finite
-OFFSET_LOSS_WEIGHT = 0.001
+OFFSET_LOSS_WEIGHT = 0.001     # GridTrackNet's, as upstream trains it
+HEAT_OFFSET_WEIGHT = 1.0       # the heat-map loss's, CenterNet's lambda_off: at 0.001 the offsets never trained
+                               # (heat1, 2026-10-26: 3.4 px median at 1080p, a quarter of a cell at random)
+NORMALISED_WEIGHT_DECAY = 1e-4   # on the convolutions BatchNorm follows, whose scale the loss cannot see
+HALF_MAX = 65504.0               # float16's largest value; the prepass and the training forward run in it
 POSITIVE_WEIGHT, NEGATIVE_WEIGHT = 0.75, 0.25    # the focal loss's class weights
 HEAT_ALPHA, HEAT_BETA = 2.0, 4.0                 # CenterNet's focal exponents: the easy-example one and the penalty reduction
 
@@ -50,7 +54,7 @@ def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor
     channel against the Gaussian target (``dataset.make_target``), where a cell at exactly 1 is a
     positive and every other cell a negative whose penalty is reduced by ``(1 - heat) ** HEAT_BETA``
     near the peak, the sum normalised by the number of positives (at least one); plus
-    ``OFFSET_LOSS_WEIGHT`` times the L1 of the offsets at the peak cells, normalised the same way.
+    ``HEAT_OFFSET_WEIGHT`` times the L1 of the offsets at the peak cells, normalised the same way.
     The grid is the target's own, so the loss does not care which stride the network answers at."""
     rows, cols = int(target.shape[-2]), int(target.shape[-1])
     prediction = prediction.float().reshape(-1, FRAMES_PER_UNIT, 3, rows, cols)
@@ -63,7 +67,7 @@ def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor
     negative = (1 - peak) * (1 - heat_true).pow(HEAT_BETA) * heat_pred.pow(HEAT_ALPHA) * (1 - heat_pred).log()
     heat_loss = -(positive + negative).sum() / positives
     offset_loss = ((prediction[:, :, 1:3] - target[:, :, 1:3]).abs() * peak.unsqueeze(2)).sum() / positives
-    return heat_loss + OFFSET_LOSS_WEIGHT * offset_loss
+    return heat_loss + HEAT_OFFSET_WEIGHT * offset_loss
 
 
 LOSSES = {GRIDTRACKNET: gridtracknet_loss, HEATMAP_S4: heatmap_loss, MEMORY_S4: heatmap_loss}
@@ -121,6 +125,60 @@ def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> N
     temporary = destination.with_suffix(".tmp.npz")
     np.savez_compressed(temporary, **arrays)
     temporary.replace(destination)
+
+
+def normalised_conv_weights(model: torch.nn.Module) -> list:
+    """The weights of the convolutions a ``BatchNorm2d`` follows directly (the two of every
+    ``heatmapnet._block``): the normalisation cancels their scale, so the loss never pushes back
+    when the optimizer lets it grow, and nothing but weight decay keeps the pre-normalisation
+    activations inside float16 (heat1, 2026-10-26: the decoder's running variance reached
+    infinity at epoch 24 and the eval-mode network went silent while training looked fine).
+    GridTrackNet's convolutions, the heat head and the memory's gates are not such."""
+    weights = []
+    for module in model.modules():
+        if isinstance(module, torch.nn.Sequential):
+            layers = list(module)
+            weights.extend(conv.weight for conv, following in zip(layers, layers[1:])
+                           if isinstance(conv, torch.nn.Conv2d) and isinstance(following, torch.nn.BatchNorm2d))
+    return weights
+
+
+def build_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Adadelta:
+    """The run's Adadelta (rho 0.95, eps 1e-7, upstream's): one parameter group as before for a
+    network without normalised convolutions (GridTrackNet, byte-for-byte the old optimizer), else
+    ``normalised_conv_weights`` in a group with ``NORMALISED_WEIGHT_DECAY`` and the rest in one
+    without."""
+    decayed = normalised_conv_weights(model)
+    if not decayed:
+        return torch.optim.Adadelta(model.parameters(), lr=lr, rho=0.95, eps=1e-7)
+    decayed_ids = {id(weight) for weight in decayed}
+    rest = [parameter for parameter in model.parameters() if id(parameter) not in decayed_ids]
+    return torch.optim.Adadelta([{"params": decayed, "weight_decay": NORMALISED_WEIGHT_DECAY},
+                                 {"params": rest, "weight_decay": 0.0}], lr=lr, rho=0.95, eps=1e-7)
+
+
+def check_finite(model: torch.nn.Module) -> None:
+    """A RuntimeError naming the first parameter or buffer with a non-finite value. A BatchNorm
+    running statistic poisoned by one overflowing batch stays infinite for the rest of the run
+    and silences the eval-mode network, which the training loss never shows; an epoch that
+    leaves one is stopped here rather than scored at zero for twenty more."""
+    for name, tensor in [*model.named_parameters(), *model.named_buffers()]:
+        if tensor.is_floating_point() and not bool(torch.isfinite(tensor).all()):
+            raise RuntimeError(f"{name} holds a non-finite value after this epoch: the run cannot go on "
+                               f"(a BatchNorm running statistic overflowed float16; resume from an earlier epoch's "
+                               f"weights with a lower --lr)")
+
+
+def largest_running_variance(model: torch.nn.Module) -> Tuple[str, float]:
+    """The BatchNorm running variance nearest float16's ceiling, (buffer name, value); ("", 0.0)
+    for a network without one. The trainer warns when it passes a share of ``HALF_MAX``."""
+    largest = ("", 0.0)
+    for name, buffer in model.named_buffers():
+        if name.endswith("running_var") and buffer.numel():
+            value = float(buffer.max())
+            if value > largest[1]:
+                largest = (name, value)
+    return largest
 
 
 def fresh_model(device: torch.device, arch: str = GRIDTRACKNET) -> torch.nn.Module:

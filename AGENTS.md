@@ -30,7 +30,9 @@ rendering (`--weights` points it at other ball-detector weights, `.npz` or `.pt`
   chains of `--chain` units, `dataset.ChainDataset`, `loop.chain_loss`). The trainer's
   `--arch heatmap_s4` (Gaussian target, CenterNet focal loss) trains it from scratch or
   fine-tunes it from a `.pt`; `--arch memory_s4 --weights <heatmap_s4 .pt>` starts the
-  memory network from its parent. No run of either has been made yet; `README.md`
+  memory network from its parent. The heat recipe is versioned (`HEAT_RECIPE`,
+  `heat_recipe` in config.json: offsets at weight 1, the convolutions BatchNorm follows decayed,
+  `loop.check_finite` after every epoch; heat1, the first run, is in the ledger). `README.md`
   ("Keeping one network") says what to delete when an architecture loses.
 - `tennis_tracker/engines/`: `ball_detectors.py`, the progressive GridTrackNet
   prepass and the single-frame TensorRT ball engine. At about 60 FPS, even and

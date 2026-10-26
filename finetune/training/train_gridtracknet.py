@@ -120,7 +120,8 @@ from finetune.training.dataset import (AUGMENTATIONS, CHAIN, Augmenter, ChainDat
                                        chain_units, chain_weights, make_sampler, make_target, photometric_augment,
                                        unit_weights, weighted_sampler)
 from finetune.training.frame_cache import build_units, prepare_data
-from finetune.training.loop import evaluate_loss, fresh_model, gridtracknet_loss, heatmap_loss, save_weights, train_epoch
+from finetune.training.loop import (HALF_MAX, build_optimizer, check_finite, evaluate_loss, fresh_model, gridtracknet_loss,
+                                    heatmap_loss, largest_running_variance, save_weights, train_epoch)
 from finetune.training.metrics import FALSE_ALARM_CONF, epoch_score, false_alarm_units, promotion_improves, score_weights
 
 SEED = 7                   # every run draws the same augmentation and sampling sequence unless --seed says otherwise
@@ -130,6 +131,8 @@ CHECKPOINT = "checkpoint.pt"
 EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz (or .pt), unless --no-keep-epochs
 RECIPE_FIELDS = ("arch", "chain", "augment", "oversample", "oversample_absent", "oversample_false_alarms",
                  "epoch_units", "batch_size", "lr", "seed", "holdout", "validation_clips")      # what read_selection_run copies
+HEAT_RECIPE = 2            # the heat-map losses' and optimizer's version, see run_config; 1 was heat1's (never recorded)
+VARIANCE_WARNING_SHARE = 0.1   # of HALF_MAX: the running variance above which an epoch warns
 RUN_OUTCOMES = ("epochs", "false_alarm_units")     # the config.json fields a --resume may differ in, see same_run
 RATE_FIELDS = ("lr", "lr_schedule")                # ... and the two same_run reads as the schedule, not field by field
 
@@ -151,8 +154,13 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
     every option that shaped the training (``flagged``: how many training units
     ``--oversample-false-alarms`` weighted up; ``lr_schedule``: the rates the run has trained at,
     see ``lr_schedule_of``, by default the one ``--lr`` from epoch 1), as ``config.json`` records
-    it. ``lr`` is the rate in force."""
-    return {"arch": args.arch or GRIDTRACKNET, "chain": args.chain, "clips": names,
+    it. ``lr`` is the rate in force. ``heat_recipe`` is ``HEAT_RECIPE`` for a HeatmapNet or MemoryNet
+    run (2: offsets weighted ``loop.HEAT_OFFSET_WEIGHT``, the normalised convolutions decayed) and
+    None for GridTrackNet, whose recipe has not changed; ``same_run`` refuses to continue a run
+    recorded under another, so heat1 (recipe 1, before the field existed) is not resumed as this one."""
+    arch = args.arch or GRIDTRACKNET
+    return {"arch": arch, "chain": args.chain, "heat_recipe": None if arch == GRIDTRACKNET else HEAT_RECIPE,
+            "clips": names,
             "validation_clips": val_clips, "holdout": args.holdout,
             "val_clips": args.val_clips,
             "all_clips": args.all_clips, "selection_run": str(args.selection_run) if args.selection_run else None,
@@ -394,6 +402,11 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
         started = time.perf_counter()
         torch.manual_seed(args.seed + epoch)
         train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch, args.epochs, args.max_train_steps)
+        check_finite(model)
+        name, variance = largest_running_variance(model)
+        if variance > HALF_MAX * VARIANCE_WARNING_SHARE:
+            print(f"[train] warning: {name} running variance {variance:.0f}, float16 overflows at {HALF_MAX:.0f}; "
+                  f"the pre-normalisation activations are growing, lower --lr before they do", flush=True)
         val_loss = None if val_loader is None else evaluate_loss(model, val_loader, device, args.max_val_steps)
         save_weights(model, args.weights, last_path)
         if val_loss is not None and val_loss < best_loss:
@@ -596,7 +609,7 @@ def train(args: argparse.Namespace) -> None:
         model = load_ball_model(args.weights, device).float()
         print(f"[train] fine-tuning {args.arch} from {args.weights}")
     model.train()
-    optimizer = torch.optim.Adadelta(model.parameters(), lr=args.lr, rho=0.95, eps=1e-7)
+    optimizer = build_optimizer(model, args.lr)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     args.run_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = args.run_dir / CHECKPOINT

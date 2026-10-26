@@ -39,6 +39,7 @@ weights (`models/gridtracknet_weights_torch.npz`), training on the 40 clips outs
 | E0 linear | 9b4985b | bundled weights, raw, `--holdout mixed_v1 --cell-histogram` | - | - | 0.925 / 0.012 / 0.210 (109/518) | 0.919 | 0.964 / 0.900 / 0.891 | 2.0 | the reference; cell spread 0.033 (x) and 0.034 (y); prepass 65 fps |
 | E0 area | 9b4985b | same, `RESIZE_INTERPOLATION` flipped to INTER_AREA by `output/e0_area.py` | - | - | 0.931 / 0.009 / 0.205 (106/518) | 0.924 | 0.967 / 0.905 / 0.905 | 2.0 | +0.6 recall, under the 2 point bar, prepass 58 fps: the recipe stays INTER_LINEAR |
 | R0 | 9b4985b | `--epochs 10 --seed 7` (basic augmentation), cancelled in epoch 10 | 7 | 1 (of 9 scored) | 0.938 / 0.011 / 0.305 (epoch 1); 0.936 / 0.007 / 0.230 (epoch 9) | - | - | 1.9 | baseline: recall +1 point over the bundled weights from epoch 1 on, false alarms up and falling with epochs; not scored by source (cancelled) |
+| heat1 | d6dc880 | `--arch heatmap_s4 --from-scratch --holdout mixed_v1 --epochs 40 --lr 1.0 --augment basic translate --score-every 2` (Colab A100, 4.4 min/epoch) | 7 | 12 (of 20 scored) | 0.866 / 0.005 / 0.075 (39/518) at 0.50; 0.920 / 0.011 / 0.168 at 0.30 | 0.869 | 0.904 / 0.873 / 0.768 | 3.4 | epoch 10 was 0.897 recall at 0.112 false alarm; from epoch 18 recall fell to 0.11 and from 24 to 0.000 while the training loss kept falling: the decoder's BatchNorm running variance (`up2.1`, `up2.4`) had overflowed float16 to infinity (25104 at epoch 12, 9088 running mean at 24), which silences the eval-mode network only. Fixed in recipe 2 below; the 3.4 px median (bundled 2.1) is the offset head untrained at weight 0.001 |
 | R1 to R5 | - | see `audit/gridtracknet_recipe_experiments.md` | - | - | - | - | - | - | not run: the chain was cancelled on 2026-10-21 at the user's request (ten more hours); the protocol and commands are in the doc |
 
 ## E0: the current weights, INTER_LINEAR against INTER_AREA
@@ -108,3 +109,23 @@ Full tables, the cell histogram and the per-source reading are in
   architecture inside and `ball_models.arch_of` reads it (the suffix is shared). The README's
   stage 3b says how to train it from the heat run's `best.pt` and judge it on the same
   commands, and "Keeping one network" what to delete when an architecture loses. No run yet.
+- 2026-10-26, heat1 (the first `heatmap_s4` run; the table above): 0.897 held-out recall at epoch
+  10 and the best score at 12 (0.864 / 0.005 / 0.073), then a collapse to zero detections from
+  epoch 24 while the training loss kept falling. On the PC the epoch 24 file had infinite
+  running variances in the decoder's two last BatchNorms and running means of 9088: with
+  BatchNorm after every convolution the loss cannot see the convolutions' scale, Adadelta at 1.0
+  let it grow, the pre-normalisation activations passed float16's 65504 in some batches, and one
+  such batch leaves the running variance infinite for good. Training mode uses the batch's own
+  statistics, so only the eval-mode network (the prepass, the metric, the tracker) went silent.
+  Also found: the 3.4 px median at 1080p against the bundled 2.1 is a quarter of a 10 px cell at
+  random, the offset head untrained at GridTrackNet's weight of 0.001 (mean offset -0.12 px, no
+  bias). Recipe 2 (`train_gridtracknet.HEAT_RECIPE`, recorded as `heat_recipe` in config.json;
+  a heatmap run without it is refused as a resume): `loop.HEAT_OFFSET_WEIGHT` 1.0 (CenterNet's
+  lambda_off), `loop.build_optimizer` putting the convolutions BatchNorm follows in an Adadelta
+  group with weight decay 1e-4 (`NORMALISED_WEIGHT_DECAY`; GridTrackNet keeps its one undecayed
+  group, byte-for-byte), `loop.check_finite` stopping an epoch that leaves a non-finite parameter
+  or buffer instead of scoring zero for the rest of the run, and a warning line once a running
+  variance passes a tenth of 65504. heat1's `best.pt` (recipe 1) stays a valid network: on the
+  held-out set at threshold 0.30 it matches the bundled weights' recall with half their false
+  alarms (0.920 / 0.168 against 0.919 / 0.326), at 3.6x the speed. heat2 is the same stage 1 on
+  recipe 2.

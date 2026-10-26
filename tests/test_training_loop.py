@@ -7,8 +7,11 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from finetune.training.dataset import make_target
-from finetune.training.loop import (LOSSES, batch_loss, chain_loss, evaluate_loss, fresh_model, gridtracknet_loss,
-                                    heatmap_loss, save_weights, train_epoch, unit_loss)
+from finetune.training.loop import (HEAT_OFFSET_WEIGHT, LOSSES, NORMALISED_WEIGHT_DECAY, batch_loss, build_optimizer,
+                                    chain_loss, check_finite, evaluate_loss, fresh_model, gridtracknet_loss,
+                                    heatmap_loss, largest_running_variance, normalised_conv_weights, save_weights,
+                                    train_epoch, unit_loss)
+from tennis_tracker import memorynet
 from tennis_tracker import heatmapnet
 from tennis_tracker.ball_models import load_ball_model
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
@@ -158,3 +161,62 @@ def test_a_fresh_memorynet_trains_on_chains_evaluates_and_round_trips_through_th
     for name, tensor in model.state_dict().items():                      # exact, after the tracker's float16
         expected = tensor.half() if tensor.is_floating_point() else tensor
         assert torch.equal(reloaded.state_dict()[name], expected), name
+
+
+def test_heatmap_offsets_are_weighted_as_centernet_weights_them():
+    """A wrong offset at the peak costs HEAT_OFFSET_WEIGHT times its L1 error per positive (1.0,
+    lambda_off), not GridTrackNet's 0.001: heat1 trained at the latter and its offsets never
+    moved (3.4 px median at 1080p, a quarter of a cell at random)."""
+    target = make_target([None, (100.0, 50.0), None, None, None], WIDTH, HEIGHT, arch="heatmap_s4").unsqueeze(0)
+    exact = target.clone()
+    exact[:, 3] = 0.5                      # the second frame's heat is right, and so are its offsets
+    exact[:, 4:6] = target[:, 4:6]
+    heat_true = target[0, 3]
+    row, col = divmod(int(heat_true.argmax()), heat_true.shape[-1])
+    off = exact.clone()
+    off[0, 4, row, col] = target[0, 4, row, col] + 0.25
+    off[0, 5, row, col] = target[0, 5, row, col] - 0.25
+    assert HEAT_OFFSET_WEIGHT == 1.0
+    assert heatmap_loss(off, target) - heatmap_loss(exact, target) == pytest.approx(HEAT_OFFSET_WEIGHT * 0.5, abs=1e-5)
+
+
+def test_the_optimizer_decays_exactly_the_convolutions_batchnorm_follows():
+    """A HeatmapNet's fourteen block convolutions (two per block: stem, four stages, two decoder
+    stages) get NORMALISED_WEIGHT_DECAY and nothing else does: not the heat head, whose scale the
+    sigmoid reads, nor a MemoryNet's gates and ``out``; a GridTrackNet, with no BatchNorm2d after
+    its convolutions, gets the one undecayed group it always had."""
+    heat = heatmapnet.HeatmapNet()
+    decayed = normalised_conv_weights(heat)
+    assert len(decayed) == 14 and all(weight.dim() == 4 for weight in decayed)
+    assert not any(weight is heat.head.weight for weight in decayed)
+    optimizer = build_optimizer(heat, 1.0)
+    assert [group["weight_decay"] for group in optimizer.param_groups] == [NORMALISED_WEIGHT_DECAY, 0.0]
+    assert all(group["lr"] == 1.0 and group["rho"] == 0.95 and group["eps"] == 1e-7 for group in optimizer.param_groups)
+    counted = sum(len(group["params"]) for group in optimizer.param_groups)
+    assert counted == len(list(heat.parameters()))
+    memory = memorynet.MemoryNet()
+    decayed_ids = {id(weight) for weight in normalised_conv_weights(memory)}
+    assert len(decayed_ids) == 14
+    for name, parameter in memory.named_parameters():
+        assert (id(parameter) in decayed_ids) == (parameter.dim() == 4 and not name.startswith(("head", "memory", "out")))
+    grid = fresh_model(torch.device("cpu"), "gridtracknet")
+    assert normalised_conv_weights(grid) == []
+    plain = build_optimizer(grid, 0.3)
+    assert len(plain.param_groups) == 1 and plain.param_groups[0]["weight_decay"] == 0
+    assert len(plain.param_groups[0]["params"]) == len(list(grid.parameters()))
+
+
+def test_check_finite_names_a_poisoned_running_statistic_and_the_largest_variance_is_reported():
+    """An infinite BatchNorm running variance (what heat1's decoder had from epoch 24, silencing
+    the eval-mode network while the training loss kept falling) is a RuntimeError naming the
+    buffer; a finite network passes, and largest_running_variance says which buffer is nearest
+    float16's ceiling."""
+    model = heatmapnet.HeatmapNet()
+    check_finite(model)
+    assert largest_running_variance(model)[1] == 1.0            # every running variance starts at one
+    model.up2[1].running_var[3] = 25104.0
+    assert largest_running_variance(model) == ("up2.1.running_var", 25104.0)
+    model.up2[4].running_var[0] = float("inf")
+    with pytest.raises(RuntimeError, match=r"up2\.4\.running_var holds a non-finite value"):
+        check_finite(model)
+    assert largest_running_variance(fresh_model(torch.device("cpu"), "gridtracknet")) == ("", 0.0)

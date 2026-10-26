@@ -73,6 +73,14 @@ Reading the table:
   the step is too big. Go to stage 2 now; the rest of the epochs are wasted.
 - `EPOCHS` reached while recall is still climbing: raise `EPOCHS`, keep the
   `TAG`, Run all.
+- Recall falling towards 0 while the train loss keeps falling: the network's
+  normalisation statistics overflowed (heat1 did this from epoch 18 at `LR` 1.0).
+  The trainer now stops the run with a message naming the layer instead of
+  scoring zeros, and warns an epoch or two before. Start a new `TAG` from the
+  last good epoch's file in `epochs/` with `MODE = "finetune"` and `LR = 0.1`.
+
+The first heat run (heat1, October 2026) reached 0.897 recall at epoch 10 and
+its best score at epoch 12; the old network from scratch plateaued at 0.85.
 
 ## Stage 2: the rate drop (resume the same run)
 

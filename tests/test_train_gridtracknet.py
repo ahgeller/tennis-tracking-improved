@@ -250,6 +250,22 @@ def test_config_json_carries_the_arch_and_the_chain_and_same_run_refuses_a_chang
         training.same_run(memory, {**memory, "chain": 6})
 
 
+def test_config_json_versions_the_heat_recipe_and_same_run_refuses_an_older_one():
+    """A HeatmapNet or MemoryNet run records heat_recipe (HEAT_RECIPE, 2: offsets at weight 1,
+    normalised convolutions decayed) and a GridTrackNet run None; heat1's config.json, written
+    before the field existed, is refused as a resume of this recipe, while an old GridTrackNet
+    config without the field still resumes."""
+    parser = training.build_parser()
+    grid = training.run_config(parser.parse_args([]), ["a"], ["a"], {})
+    heat = training.run_config(parser.parse_args(["--arch", "heatmap_s4", "--from-scratch"]), ["a"], ["a"], {})
+    assert grid["heat_recipe"] is None and heat["heat_recipe"] == training.HEAT_RECIPE == 2
+    training.same_run({key: value for key, value in grid.items() if key != "heat_recipe"}, grid)
+    training.same_run(heat, heat)
+    with pytest.raises(ValueError, match="config.json has heat_recipe=None, this run heat_recipe=2"):
+        training.same_run({key: value for key, value in heat.items() if key != "heat_recipe"}, heat)
+    assert "heat_recipe" not in training.RECIPE_FIELDS           # an all-clips run follows the arch's current recipe
+
+
 def test_a_heatmap_run_writes_every_file_with_the_pt_suffix(tmp_path, capsys):
     """fit on a HeatmapNet: last/best/best_loss and epochs/epoch_NNN are .pt records the tracker's
     loader reads, and no .npz appears."""
