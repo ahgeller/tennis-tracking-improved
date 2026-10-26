@@ -123,6 +123,30 @@ def test_resolve_arch_defaults_inherits_and_corrects_the_save_suffix(tmp_path, c
     assert args.arch == "heatmap_s4"
 
 
+def test_a_resume_without_arch_continues_the_runs_architecture(tmp_path, capsys):
+    """--resume reads the architecture off the run's config.json as it reads --epochs: a heatmap_s4
+    run resumed from its best.pt with no --arch goes on as heatmap_s4 (not refused as a gridtracknet
+    fine-tune from a .pt), and --arch gridtracknet on it is refused in a line naming the run."""
+    videos, labels = workspace(tmp_path, ["a", "b"])
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "checkpoint.pt").write_bytes(b"read after the data, not here")
+    argv = ["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"),
+            "--run-dir", str(run_dir), "--weights", str(tmp_path / "best.pt"), "--save", str(tmp_path / "w.pt")]
+    parser = training.build_parser()
+    config = training.run_config(parser.parse_args([*argv, "--arch", "heatmap_s4"]), ["a", "b"], ["b"], {})
+    (run_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    args = parser.parse_args([*argv, "--resume"])
+    training.resolve_arch(args, None, training.read_run_config(run_dir))
+    assert args.arch == "heatmap_s4"
+    args = parser.parse_args([*argv, "--resume", "--arch", "gridtracknet"])
+    with pytest.raises(ValueError, match="--arch gridtracknet does not follow the run in .*, which trains heatmap_s4"):
+        training.resolve_arch(args, None, config)
+    with patch.object(training, "prepare_data", side_effect=ValueError("the data step")) as data:
+        assert training.main([*argv, "--resume"]) == 1
+    assert data.called and capsys.readouterr().err.strip() == "[error] the data step"      # the options all passed
+
+
 def test_config_json_carries_the_arch_and_same_run_refuses_a_change():
     parser = training.build_parser()
     grid = training.run_config(parser.parse_args([]), ["a"], ["a"], {})
@@ -134,10 +158,9 @@ def test_config_json_carries_the_arch_and_same_run_refuses_a_change():
     before_the_field = {key: value for key, value in grid.items() if key != "arch"}
     training.same_run(before_the_field, grid)                               # an older run trained GridTrackNet
     assert training.arch_of_config(before_the_field) == "gridtracknet"
-    assert training.read_selection_run.__doc__ and "arch_of_config" in training.read_selection_run.__doc__
 
 
-def test_a_heatmap_run_writes_every_file_with_the_pt_suffix(tmp_path):
+def test_a_heatmap_run_writes_every_file_with_the_pt_suffix(tmp_path, capsys):
     """fit on a HeatmapNet: last/best/best_loss and epochs/epoch_NNN are .pt records the tracker's
     loader reads, and no .npz appears."""
     model = fresh_model(torch.device("cpu"), "heatmap_s4")
@@ -156,6 +179,9 @@ def test_a_heatmap_run_writes_every_file_with_the_pt_suffix(tmp_path):
     assert training.epoch_weights(args.run_dir, 3, ".pt") == args.run_dir / "epochs" / "epoch_003.pt"
     from tennis_tracker.ball_models import load_ball_model
     assert isinstance(load_ball_model(args.run_dir / "best.pt", torch.device("cpu")), type(model))
+    args.save = tmp_path / "save.pt"
+    training.pick_winner(args, [], ["video10"], selection, torch.device("cpu"))
+    assert "[eval] best.pt (epoch 1) on ['video10']" in capsys.readouterr().out and args.save.is_file()
 
 
 def test_main_reports_a_run_that_cannot_start_as_status_1(tmp_path, capsys):

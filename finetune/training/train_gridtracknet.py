@@ -69,9 +69,10 @@ fine-tune and must then be the architecture's own file (``.npz`` for GridTrackNe
 HeatmapNet; another is refused in one line); with ``--from-scratch`` it is either architecture's
 and only feeds the hard-negative prepass of ``--oversample-false-alarms`` (a GridTrackNet scratch
 run still needs an ``.npz``, the template its weights are written into). ``config.json`` records
-``arch``, so a resume with the other architecture is refused like any other changed option, and
-an ``--all-clips`` run inherits its selection run's architecture (``read_selection_run``), so a
-HeatmapNet winner can be fine-tuned on every clip, and later on new clips, from its ``.pt``.
+``arch``, which a ``--resume`` without ``--arch`` continues with (one naming the other architecture
+is refused), and an ``--all-clips`` run inherits its selection run's architecture
+(``read_selection_run``), so a HeatmapNet winner can be fine-tuned on every clip, and later on new
+clips, from its ``.pt``.
 """
 
 from __future__ import annotations
@@ -448,7 +449,7 @@ def pick_winner(args: argparse.Namespace, clips: List[Clip], val_clips: List[str
     ``promotion_improves``). A run whose every scored epoch detected nothing still records its
     best epoch: rates of zero and no pixel distance (null) in ``winner.json``."""
     trained = selection.best_metrics
-    print(f"[eval] best.npz (epoch {selection.best_epoch}) on {val_clips}: {trained}")
+    print(f"[eval] {selection.best_path.name} (epoch {selection.best_epoch}) on {val_clips}: {trained}")
     winner, winner_stats = selection.best_path, trained
     record = {"selected_by": "detector_metric", "best_epoch": selection.best_epoch,
               "best_loss_epoch": selection.best_loss_epoch, "validation_clips": val_clips}
@@ -469,22 +470,27 @@ def pick_winner(args: argparse.Namespace, clips: List[Clip], val_clips: List[str
         print("[done] the starting weights stayed ahead on the held-out clips; nothing to promote")
 
 
-def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict]) -> None:
+def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict], resumed: Optional[dict] = None) -> None:
     """Settle which network the run trains, what it starts from and where it saves: ``args.arch``
-    is ``--arch``, or the selection run's architecture when ``--arch`` was not given (an
-    ``--all-clips`` run inherits it; one that names the other architecture is refused, since a
-    recipe chosen for one network says nothing about the other), else GridTrackNet. A fine-tune
+    is ``--arch``, or without it the architecture of the run being continued (`resumed`, the
+    ``config.json`` a ``--resume`` read, so a resume names it no more than it names ``--epochs``)
+    or of the selection run (an ``--all-clips`` run inherits it), else GridTrackNet; an ``--arch``
+    that contradicts either is refused here, in one line that names the run (``same_run`` would
+    refuse it too, but after ``--weights`` had been judged by the wrong architecture). A fine-tune
     starts from ``--weights``, so they must be the architecture's own file (``weights_suffix``);
     a ``--from-scratch`` run reads them only for the hard-negative prepass, which takes either
     architecture's, except that a GridTrackNet scratch run needs the ``.npz`` as the template its
     weights are written into. A mismatch is a ValueError. ``--save`` is then given the
     architecture's suffix, with a line saying so when it had the other."""
-    inherited = selection_run["recipe"]["arch"] if selection_run else None
+    inherited, source = None, ""
+    if resumed is not None:
+        inherited, source = arch_of_config(resumed), f"the run in {args.run_dir}, which trains"
+    elif selection_run:
+        inherited, source = selection_run["recipe"]["arch"], "the selection run, which trained"
     if args.arch is None:
         args.arch = inherited or GRIDTRACKNET
     elif inherited and args.arch != inherited:
-        raise ValueError(f"--arch {args.arch} does not follow the selection run, which trained {inherited}; "
-                         "leave --arch out to inherit it")
+        raise ValueError(f"--arch {args.arch} does not follow {source} {inherited}; leave --arch out to inherit it")
     suffix = weights_suffix(args.arch)
     starting = arch_of(args.weights)                 # a suffix that is neither is refused here
     if starting != args.arch and (not args.from_scratch or args.arch == GRIDTRACKNET):
@@ -501,12 +507,12 @@ def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict]) -> Non
 def train(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)       # a fresh model's init draws from it; every epoch reseeds the loaders' draws, see fit
     selection_run = read_selection_run(args.selection_run) if args.selection_run else None
-    resolve_arch(args, selection_run)
+    resumed = read_run_config(args.run_dir) if args.resume else None
+    resolve_arch(args, selection_run, resumed)
     if selection_run and len(selection_run["recipe"]["lr_schedule"]) > 1:
         steps = ", ".join(f"{entry['lr']:g} from epoch {entry['epoch']}" for entry in selection_run["recipe"]["lr_schedule"])
         print(f"[train] the selection run lowered its learning rate ({steps}); this run trains at --lr {args.lr:g} "
               "throughout, the schedule is not replayed")
-    resumed = read_run_config(args.run_dir) if args.resume else None
     if args.epochs is None:
         args.epochs = resumed["epochs"] if resumed else (selection_run or {}).get("best_epoch") or DEFAULT_EPOCHS
     clips = find_clips(args.videos, args.labels, ClipSelection(args.sources, args.exclude_clips, args.include_excluded, args.cameras))
@@ -643,8 +649,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--videos", type=Path, default=layout.videos)
     parser.add_argument("--labels", type=Path, default=layout.labels)
     parser.add_argument("--arch", choices=ARCHITECTURES, default=None,
-                        help=f"The network: {GRIDTRACKNET} (the default, or the --selection-run's) or {HEATMAP_S4}, the "
-                             "stride-4 heat-map network (its weights are .pt files)")
+                        help=f"The network: {GRIDTRACKNET} (the default; a --resume or --selection-run inherits its run's) or "
+                             f"{HEATMAP_S4}, the stride-4 heat-map network (its weights are .pt files)")
     parser.add_argument("--weights", type=Path, default=layout.repo_weights,
                         help="The starting model of a fine-tune, the architecture's own file (.npz for gridtracknet, "
                              f".pt for {HEATMAP_S4}); with --from-scratch, either architecture's, read only by the "

@@ -148,3 +148,25 @@ def test_everything_on_drive_lives_under_one_folder():
     assert code.count("DRIVE / ") == 1                     # DRIVE_DIR itself: no other path hangs off the top of Drive
     assert "tennis_finetune_runs" not in text and "top of your Google Drive" not in text
     assert "MyDrive/tennis_finetune/runs/<TAG>/" in text
+
+
+def test_every_code_cell_parses():
+    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    for cell in notebook["cells"]:
+        if cell["cell_type"] == "code":
+            ast.parse("".join(cell["source"]).replace("!pip", "pass  # pip"))
+
+
+def test_the_all_clips_run_keeps_the_selection_runs_architecture_and_the_table_names_the_file():
+    """The settings cell always passes --arch, so the all-clips run cannot inherit the selection
+    run's architecture from the trainer: it reads the run's config.json and refuses another ARCH
+    itself, in a line that says what to set, and the after-run text says so; the run cell's
+    best-epoch mark names the file by the architecture's suffix."""
+    settings = code_cell_starting("#@title Training settings")
+    assert "selected = json.loads((SELECTION / 'config.json').read_text(encoding='utf-8')).get('arch') or 'gridtracknet'" in settings
+    assert "if selected != ARCH:" in settings and "trained {selected}: set ARCH to it" in settings
+    run = code_cell_starting("# Runs the trainer and streams its log here and to Drive (RUN/colab.log). The trainer prints "
+                             "a step line every few")
+    assert "f' <- best{SUFFIX}'" in run and "' <- best.npz'" not in run
+    text = "".join("".join(cell["source"]) for cell in json.loads(NOTEBOOK.read_text(encoding="utf-8"))["cells"])
+    assert "keep `ARCH` at the selection run's" in text and "inherits the architecture" not in text
