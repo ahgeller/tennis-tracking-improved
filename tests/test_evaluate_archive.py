@@ -61,9 +61,11 @@ def test_list_clips_trusts_an_archive_without_a_review_policy(tmp_path):
     assert [video.stem for video, _ in list_clips(None, archive)] == ["video1", "video2"]
 
 
-def test_pipeline_mode_forwards_the_court_flag_to_each_headless_run(tmp_path, monkeypatch, capsys):
-    """``--court`` reaches ``run_headless`` as ``court_events`` (off without it); the tracker
-    itself is replaced by a run that finds nothing."""
+def test_pipeline_mode_forwards_the_court_flag_and_the_weights_to_each_headless_run(tmp_path, monkeypatch, capsys):
+    """``--court`` reaches ``run_headless`` as ``court_events`` (off without it) and
+    ``--gridtracknet-weights`` as ``model_path`` (the bundled weights without it), so a new
+    detector is judged through the pipeline too; the tracker itself is replaced by a run that
+    finds nothing."""
     from evaluation import archive
     from tennis_tracker import headless
     from tennis_tracker.export import RunResult
@@ -85,10 +87,13 @@ def test_pipeline_mode_forwards_the_court_flag_to_each_headless_run(tmp_path, mo
     common = ["--mode", "pipeline", "--archive", str(tmp_path), "--out-dir", str(tmp_path / "out")]
     assert archive.main([*common, "--court"]) == 0
     assert archive.main(common) == 0
-    (with_court, without) = seen
+    assert archive.main([*common, "--gridtracknet-weights", str(tmp_path / "best.pt")]) == 0
+    (with_court, without, other_weights) = seen
     assert with_court[0] == video and with_court[1]["court_events"] is True
     assert with_court[1]["tracking_json"] == tmp_path / "out" / "video1_gridtracknet.json"
     assert without[1]["court_events"] is False
+    assert with_court[1]["model_path"] == without[1]["model_path"] == archive.MODELS["gridtracknet"]
+    assert other_weights[1]["model_path"] == tmp_path / "best.pt"
     assert "=== pipeline [gridtracknet] per clip ===" in capsys.readouterr().out
 
 

@@ -285,10 +285,12 @@ def run_raw(models: List[str], clips: List[ClipPair], thresholds: List[float], d
 
 
 def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float], device: str,
-                 out_dir: Path, reuse_json: bool = False, court_events: bool = False) -> None:
+                 out_dir: Path, reuse_json: bool = False, court_events: bool = False,
+                 weights: Optional[Dict[str, Path]] = None) -> None:
     """Track every clip (``headless.run_headless``) and score the per-frame output; with
     ``court_events`` each clip's tracking JSON also carries its court events, which
-    ``score_court_events.py`` reads."""
+    ``score_court_events.py`` reads. `weights` (model name -> file) replaces a model's bundled
+    weights, as it does in ``run_raw``."""
     from tennis_tracker.headless import run_headless, tracking_payload   # the pipeline: CUDA and TensorRT, only here
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -303,7 +305,8 @@ def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float
                       f"these numbers are from whenever this file was written")
                 payload = json.loads(json_path.read_text(encoding="utf-8"))
             else:
-                result = run_headless(video_path, model_path=MODELS[name], conf=conf[name], device=device,
+                result = run_headless(video_path, model_path=(weights or {}).get(name) or MODELS[name],
+                                      conf=conf[name], device=device,
                                       tracking_json=json_path, output_video=out_dir / f"{video_path.stem}_{name}.mp4",
                                       court_events=court_events)
                 payload = tracking_payload(result)
@@ -349,7 +352,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="Pipeline mode: also compute the court events (landings, contacts, rally legs) and "
                              "write them into each clip's tracking JSON for score_court_events.py (needs CatBoost)")
     parser.add_argument("--gridtracknet-weights",
-                        help="Score other five-frame weights in raw mode: a GridTrackNet .npz or a HeatmapNet .pt")
+                        help="Score other five-frame weights, a GridTrackNet .npz or a HeatmapNet .pt: raw mode runs the "
+                             "detector on them, pipeline mode the tracker")
     parser.add_argument("--gridtracknet-stride", type=int, default=None,
                         help="Force the frame spacing fed to GridTrackNet (1 = consecutive frames even at 60 FPS)")
     args = parser.parse_args(argv)
@@ -360,8 +364,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"No clips found in {archive}")
         return 1
     print(f"[archive] {archive}  ({len(clips)} clips" + (f", held-out set {args.holdout}" if args.holdout else "") + ")")
+    weights = {"gridtracknet": Path(args.gridtracknet_weights)} if args.gridtracknet_weights else None
     if args.mode == "raw":
-        weights = {"gridtracknet": Path(args.gridtracknet_weights)} if args.gridtracknet_weights else None
         manifest = read_manifest(archive / MANIFEST_NAME)
         sources = {clip_of(csv_path): clip_source(clip_of(csv_path), manifest) for _, csv_path in clips}
         run_raw(args.models, clips, args.thresholds, args.device, weights, args.gridtracknet_stride, sources,
@@ -371,6 +375,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.models, clips,
             {"gridtracknet": args.gridtracknet_conf},
             args.device, Path(args.out_dir), reuse_json=bool(args.reuse_json), court_events=bool(args.court),
+            weights=weights,
         )
     return 0
 
