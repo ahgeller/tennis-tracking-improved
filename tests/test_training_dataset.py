@@ -134,6 +134,21 @@ def test_build_chains_takes_consecutive_units_five_frames_apart_from_the_clips_f
         build_chains(odd, 0)
 
 
+def test_build_chains_cuts_units_where_the_prepass_cuts_them_whatever_the_first_labelled_frame():
+    """The prepass cuts a phase into units from the clip's first frame (phase p starts units at
+    p, p + 5 * stride, ...), so a chain's units begin at the first such start the labels cover,
+    not at the first labelled frame: labels beginning at frame 5 of an odd 60 FPS phase give
+    units at 11, 21 and 31; labels beginning at 681 of a 30 FPS clip give 685, 690 and 695."""
+    odd = covering_units("o", range(5, 36, 4), 2)                      # frames 5, 7, ..., 41
+    assert [unit["indices"] for chain in build_chains(odd, 1) for unit in chain["units"]] == [
+        [11, 13, 15, 17, 19], [21, 23, 25, 27, 29], [31, 33, 35, 37, 39]]
+    late = covering_units("t", range(681, 700, 2), 1)                  # frames 681 to 703
+    assert [unit["indices"][0] for chain in build_chains(late, 1) for unit in chain["units"]] == [685, 690, 695]
+    assert [[unit["indices"][0] for unit in chain["units"]] for chain in build_chains(late, 2)] == [[685, 690], [690, 695]]
+    on_grid = covering_units("g", range(1, 30, 4), 2)                  # the first label on the grid: unchanged
+    assert [unit["indices"][0] for chain in build_chains(on_grid, 1) for unit in chain["units"]] == [1, 11, 21]
+
+
 def test_chain_units_flatten_and_chain_weights_fold_back_as_the_mean():
     chains = build_chains(covering_units("c", range(0, 13, 2), 1, absent={7}), 2)
     units = chain_units(chains)

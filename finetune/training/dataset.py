@@ -341,11 +341,12 @@ class TrainingChain(TypedDict):
 
 def build_chains(samples: Sequence[TrainingUnit], length: int) -> List[TrainingChain]:
     """Every chain of `length` consecutive units over the frames `samples` cover, per clip:
-    the units start at the clip's first labelled frame and every five frames (at the clip's
-    cadence, which the units' indices show) after it, as the prepass cuts a phase into units
-    from the clip's start; a unit whose five frames are not all covered by `samples` (a label
-    gap, the end of a stretch) breaks the chains there. The frames and labels come from the units
-    that cover them, so no frame is read that the cache does not hold."""
+    the units are the prepass's own (``GridTrackNetBallDetector._prepass`` cuts phase ``p`` into
+    units starting at ``p``, ``p + 5 * stride``, ... from the clip's first frame, the stride the
+    clip's cadence, which the units' indices show), from the first such start the labels cover; a
+    unit whose five frames are not all covered by `samples` (a label gap, the end of a stretch)
+    breaks the chains there. The frames and labels come from the units that cover them, so no
+    frame is read that the cache does not hold."""
     if length < 1:
         raise ValueError(f"a chain holds at least one unit, not {length}")
     by_clip: Dict[str, Dict[int, Tuple[str, Target]]] = {}
@@ -360,8 +361,10 @@ def build_chains(samples: Sequence[TrainingUnit], length: int) -> List[TrainingC
     for clip, covered in by_clip.items():
         source, size, stride = meta[clip]
         first = min(covered)
+        step = FRAMES_PER_UNIT * stride
+        first = first + (first % stride - first) % step          # the prepass's first unit start at or after it
         units: List[Optional[TrainingUnit]] = []
-        for start in range(first, max(covered) + 1, FRAMES_PER_UNIT * stride):
+        for start in range(first, max(covered) + 1, step):
             window = [start + offset * stride for offset in range(FRAMES_PER_UNIT)]
             if all(index in covered for index in window):
                 units.append(TrainingUnit(clip=clip, source=source, indices=window,
