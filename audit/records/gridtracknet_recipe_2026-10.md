@@ -76,3 +76,19 @@ Full tables, the cell histogram and the per-source reading are in
   `--all-clips` run copies the schedule in (`selection_run.recipe.lr_schedule`) and the trainer
   says the schedule is not replayed; whether the drop helps is not yet measured, and the matching
   rule for the all-clips run (when to drop, and to what) is open until it is.
+- 2026-10-25: a second architecture exists behind one switch. `tennis_tracker/heatmapnet.py`
+  (`HeatmapNet`, arch id `heatmap_s4`): a U-shaped encoder-decoder with skip connections
+  (stem 24 at full resolution, 48/96/192/256 at strides 2/4/8/16, decoder 192 and 96 at strides
+  8 and 4) answering on a 192x108 grid in GridTrackNet's 15-channel output layout, from the same
+  five stacked RGB frames; the ball is 2 to 4 px at the input and sub-pixel from stride 4 on, and
+  the published work (WASB 2023, TrackNetV2/V3) measured the biggest gain from a fine heat-map
+  head with skips. The weights file's suffix is the switch (`Config.model_path`: `.npz`
+  GridTrackNet, `.pt` HeatmapNet; `tennis_tracker/ball_models.py`), the tracker's prepass, the
+  decoder, `evaluate_archive.py --gridtracknet-weights` and the trainer's metric all follow it,
+  and `train_gridtracknet.py --arch heatmap_s4 --from-scratch` trains it on a Gaussian heat
+  target (sigma one cell) with CenterNet's penalty-reduced focal loss, writing `last.pt`,
+  `best.pt`, `epochs/epoch_NNN.pt`; a fine-tune (`--weights runs/<tag>/best.pt`, no
+  `--from-scratch`) carries a winner on to every clip and to new clips later, and `--weights`
+  must then be the architecture's own file. GridTrackNet's runs are byte-for-byte unchanged. No
+  `heatmap_s4` run has been made yet; when one is, it goes in the table above with the same
+  held-out set and rule.

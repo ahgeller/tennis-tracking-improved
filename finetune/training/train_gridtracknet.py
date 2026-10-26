@@ -1,4 +1,5 @@
-"""Fine-tune (or train from scratch) GridTrackNet on the finetune workspace labels.
+"""Fine-tune (or train from scratch) the ball detector on the finetune workspace labels:
+GridTrackNet, or with ``--arch heatmap_s4`` the HeatmapNet of ``tennis_tracker/heatmapnet.py``.
 
 Data contract (same as the archive): ``videos/<clip>.mp4`` + ``labels/<clip>_ball.csv``
 with ``frame,ball_x,ball_y`` rows at 30 FPS cadence (every 2nd frame of a 60 FPS
@@ -13,6 +14,8 @@ tags every clip with a source so you can pick, hold out and oversample by source
     python finetune/training/train_gridtracknet.py --oversample custom=6 --epoch-units 20000
     python finetune/training/train_gridtracknet.py --augment basic translate reverse --oversample-absent 3
     python finetune/training/train_gridtracknet.py --from-scratch --epochs 30   # train a fresh network on everything
+    python finetune/training/train_gridtracknet.py --arch heatmap_s4 --from-scratch --holdout mixed_v1   # the second architecture
+    python finetune/training/train_gridtracknet.py --arch heatmap_s4 --weights finetune/runs/h1/best.pt --all-clips --selection-run finetune/runs/h1
     python finetune/training/train_gridtracknet.py --all-clips --selection-run finetune/runs/r5 --augment basic translate
     python finetune/training/train_gridtracknet.py --resume --run-dir finetune/runs/r5   # carry on after an interruption
     python finetune/training/train_gridtracknet.py --resume --lr-drop --lr 0.1 --run-dir finetune/runs/r5   # ... at a lower rate
@@ -53,6 +56,22 @@ has been chosen on a held-out set, train it on every clip with nothing held out 
 scoring, and take ``last.npz`` as the result; ``winner.json`` then says
 ``selected_by: "recipe"`` and copies in the selection run's details (``--selection-run``),
 since the deployable weights were never measured on footage they did not see.
+
+``--arch`` picks the network (``tennis_tracker.ball_models``): ``gridtracknet`` (the default)
+or ``heatmap_s4``, the stride-4 heat-map network, whose target is a Gaussian on its 192x108 grid
+and whose loss is the CenterNet focal loss (``dataset.make_target``, ``loop.heatmap_loss``).
+The scoring, the winner rule and the resume are the same: the metric is the tracker's own
+prepass, which loads either by the weights file's suffix, ``.npz`` for GridTrackNet and ``.pt``
+for HeatmapNet, and every file this trainer writes (``last``, ``best``, ``best_loss``,
+``epochs/epoch_NNN``, ``--save``) carries the architecture's suffix; a ``--save`` given with the
+other suffix is corrected, with a line saying so. ``--weights`` is the starting model of a
+fine-tune and must then be the architecture's own file (``.npz`` for GridTrackNet, ``.pt`` for
+HeatmapNet; another is refused in one line); with ``--from-scratch`` it is either architecture's
+and only feeds the hard-negative prepass of ``--oversample-false-alarms`` (a GridTrackNet scratch
+run still needs an ``.npz``, the template its weights are written into). ``config.json`` records
+``arch``, so a resume with the other architecture is refused like any other changed option, and
+an ``--all-clips`` run inherits its selection run's architecture (``read_selection_run``), so a
+HeatmapNet winner can be fine-tuned on every clip, and later on new clips, from its ``.pt``.
 """
 
 from __future__ import annotations
@@ -74,7 +93,9 @@ from torch.utils.data import DataLoader
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
+from tennis_tracker import heatmapnet
+from tennis_tracker.ball_models import ARCHITECTURES, GRIDTRACKNET, HEATMAP_S4, arch_of, load_ball_model, weights_suffix
+from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH
 from finetune.data.detector_metrics import DetectorMetrics
 from finetune.data.fileio import atomic_binary, atomic_csv, copy_atomic, write_atomic
 from finetune.data import workspace as ws
@@ -82,14 +103,16 @@ from finetune.training.clips import Clip, ClipSelection, find_clips, resolve_val
 from finetune.training.dataset import (AUGMENTATIONS, Augmenter, UnitDataset, make_sampler, make_target,
                                        photometric_augment, unit_weights)
 from finetune.training.frame_cache import build_units, prepare_data
-from finetune.training.loop import evaluate_loss, fresh_model, gridtracknet_loss, save_weights, train_epoch
+from finetune.training.loop import evaluate_loss, fresh_model, gridtracknet_loss, heatmap_loss, save_weights, train_epoch
 from finetune.training.metrics import FALSE_ALARM_CONF, epoch_score, false_alarm_units, promotion_improves, score_weights
 
 SEED = 7                   # every run draws the same augmentation and sampling sequence unless --seed says otherwise
 DEFAULT_EPOCHS = 10
 RESULTS_COLUMNS = ("epoch", "train_loss", "val_loss", "seconds", "score_seconds", *DetectorMetrics._fields)
 CHECKPOINT = "checkpoint.pt"
-EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz, unless --no-keep-epochs
+EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz (or .pt), unless --no-keep-epochs
+RECIPE_FIELDS = ("arch", "augment", "oversample", "oversample_absent", "oversample_false_alarms", "epoch_units",
+                 "batch_size", "lr", "seed", "holdout", "validation_clips")      # what read_selection_run copies
 RUN_OUTCOMES = ("epochs", "false_alarm_units")     # the config.json fields a --resume may differ in, see same_run
 RATE_FIELDS = ("lr", "lr_schedule")                # ... and the two same_run reads as the schedule, not field by field
 
@@ -107,11 +130,13 @@ def parse_oversample(items: Optional[List[str]]) -> Dict[str, float]:
 
 def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str], oversample: Dict[str, float],
                flagged: int = 0, lr_schedule: Optional[List[dict]] = None) -> dict:
-    """What a run was: the clips, the held-out ones and how they were chosen, and every option that
-    shaped the training (``flagged``: how many training units ``--oversample-false-alarms`` weighted
-    up; ``lr_schedule``: the rates the run has trained at, see ``lr_schedule_of``, by default the
-    one ``--lr`` from epoch 1), as ``config.json`` records it. ``lr`` is the rate in force."""
-    return {"clips": names, "validation_clips": val_clips, "holdout": args.holdout, "val_clips": args.val_clips,
+    """What a run was: the architecture, the clips, the held-out ones and how they were chosen, and
+    every option that shaped the training (``flagged``: how many training units
+    ``--oversample-false-alarms`` weighted up; ``lr_schedule``: the rates the run has trained at,
+    see ``lr_schedule_of``, by default the one ``--lr`` from epoch 1), as ``config.json`` records
+    it. ``lr`` is the rate in force."""
+    return {"arch": args.arch or GRIDTRACKNET, "clips": names, "validation_clips": val_clips, "holdout": args.holdout,
+            "val_clips": args.val_clips,
             "all_clips": args.all_clips, "selection_run": str(args.selection_run) if args.selection_run else None,
             "sources": args.sources, "cameras": args.cameras, "augment": sorted(set(args.augment)),
             "oversample": oversample, "oversample_absent": args.oversample_absent,
@@ -120,6 +145,12 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
             "lr_schedule": lr_schedule or [{"epoch": 1, "lr": args.lr}],
             "seed": args.seed, "score_every": args.score_every,
             "from_scratch": args.from_scratch, "weights": str(args.weights)}
+
+
+def arch_of_config(config: dict) -> str:
+    """The architecture a run's ``config.json`` names (``arch``); a run recorded before the field
+    existed trained GridTrackNet."""
+    return config.get("arch") or GRIDTRACKNET
 
 
 def lr_schedule_of(config: dict) -> List[dict]:
@@ -230,8 +261,9 @@ def same_run(saved: dict, current: dict, lr_drop: bool = False) -> None:
     for field in current:
         if field in RUN_OUTCOMES or field in RATE_FIELDS:
             continue
-        if saved.get(field) != current[field]:
-            raise ValueError(f"--resume would continue a different run: config.json has {field}={saved.get(field)!r}, "
+        recorded = arch_of_config(saved) if field == "arch" else saved.get(field)
+        if recorded != current[field]:
+            raise ValueError(f"--resume would continue a different run: config.json has {field}={recorded!r}, "
                              f"this run {field}={current[field]!r}")
     rate, latest = current["lr"], lr_schedule_of(saved)[-1]["lr"]
     if not lr_drop:
@@ -286,9 +318,10 @@ def best_scored_epoch(results: Path) -> Tuple[int, Optional[DetectorMetrics]]:
     return best_epoch, best_metrics
 
 
-def epoch_weights(run_dir: Path, epoch: int) -> Path:
-    """Where a scored epoch's weights are kept: ``<run_dir>/epochs/epoch_NNN.npz``."""
-    return run_dir / EPOCHS_DIR / f"epoch_{epoch:03d}.npz"
+def epoch_weights(run_dir: Path, epoch: int, suffix: str = ".npz") -> Path:
+    """Where a scored epoch's weights are kept: ``<run_dir>/epochs/epoch_NNN<suffix>``, the suffix
+    the architecture's (``weights_suffix``)."""
+    return run_dir / EPOCHS_DIR / f"epoch_{epoch:03d}{suffix}"
 
 
 def metrics_record(metrics: DetectorMetrics) -> dict:
@@ -327,15 +360,17 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
                          "--resume can only keep or raise it")
     results = args.run_dir / "results.csv"
     keep_results_through(results, progress.epoch)
-    last_path, best_path, best_loss_path = (args.run_dir / name for name in ("last.npz", "best.npz", "best_loss.npz"))
+    suffix = weights_suffix(model.ARCH)          # the files carry the suffix of the network actually trained
+    last_path, best_path, best_loss_path = (args.run_dir / (name + suffix) for name in ("last", "best", "best_loss"))
     best_loss_epoch, best_loss = progress.best_loss_epoch, progress.best_loss
     best_epoch, best_metrics = best_scored_epoch(results)
     if best_epoch and best_epoch != progress.best_epoch:
-        kept = epoch_weights(args.run_dir, best_epoch)
+        kept = epoch_weights(args.run_dir, best_epoch, suffix)
         if kept.is_file():
             copy_atomic(kept, best_path)
         print(f"[train] best epoch so far by results.csv: {best_epoch} (the checkpoint said {progress.best_epoch}); "
-              + ("best.npz is now that epoch" if kept.is_file() else f"{kept.name} was not kept, best.npz stays as it was"))
+              + (f"{best_path.name} is now that epoch" if kept.is_file()
+                 else f"{kept.name} was not kept, {best_path.name} stays as it was"))
     for epoch in range(progress.epoch + 1, args.epochs + 1):
         started = time.perf_counter()
         torch.manual_seed(args.seed + epoch)
@@ -352,7 +387,7 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
             metrics = score(last_path)
             score_seconds = time.perf_counter() - scoring
             if args.keep_epochs:
-                copy_atomic(last_path, epoch_weights(args.run_dir, epoch))
+                copy_atomic(last_path, epoch_weights(args.run_dir, epoch, suffix))
             if best_metrics is None or epoch_score(metrics) > epoch_score(best_metrics):
                 best_epoch, best_metrics = epoch, metrics
                 copy_atomic(last_path, best_path)
@@ -373,17 +408,19 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
 def read_selection_run(run_dir: Path) -> dict:
     """What a held-out selection run decided, for the ``--all-clips`` run that follows its recipe:
     its ``winner.json`` (the best epoch and the held-out metrics) and the ``config.json`` fields
-    that make up the recipe, the learning rate as its schedule (``lr_schedule_of``: more than one
-    entry when the run lowered it with ``--lr-drop``, which the all-clips run does not replay; it
-    is recorded so a reader knows the recipe's rate changed). A folder without the two files is a
+    that make up the recipe (``RECIPE_FIELDS``; ``arch`` through ``arch_of_config``, GridTrackNet
+    for a run recorded before the field existed), the learning rate as its schedule
+    (``lr_schedule_of``: more than one entry when the run lowered it with ``--lr-drop``, which the
+    all-clips run does not replay; it is recorded so a reader knows the recipe's rate changed). A
+    folder without the two files is a
     ValueError."""
     try:
         winner = json.loads((run_dir / "winner.json").read_text(encoding="utf-8"))
         config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise ValueError(f"--selection-run {run_dir} has no readable winner.json and config.json ({error})") from error
-    recipe = {key: config.get(key) for key in ("augment", "oversample", "oversample_absent", "oversample_false_alarms",
-                                                "epoch_units", "batch_size", "lr", "seed", "holdout", "validation_clips")}
+    recipe = {key: config.get(key) for key in RECIPE_FIELDS}
+    recipe["arch"] = arch_of_config(config)
     recipe["lr_schedule"] = lr_schedule_of(config)
     return {"run": str(run_dir), "best_epoch": winner.get("best_epoch"), "selected_by": winner.get("selected_by"),
             "winner": winner.get("winner"), "metrics": winner.get("metrics"),
@@ -432,9 +469,39 @@ def pick_winner(args: argparse.Namespace, clips: List[Clip], val_clips: List[str
         print("[done] the starting weights stayed ahead on the held-out clips; nothing to promote")
 
 
+def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict]) -> None:
+    """Settle which network the run trains, what it starts from and where it saves: ``args.arch``
+    is ``--arch``, or the selection run's architecture when ``--arch`` was not given (an
+    ``--all-clips`` run inherits it; one that names the other architecture is refused, since a
+    recipe chosen for one network says nothing about the other), else GridTrackNet. A fine-tune
+    starts from ``--weights``, so they must be the architecture's own file (``weights_suffix``);
+    a ``--from-scratch`` run reads them only for the hard-negative prepass, which takes either
+    architecture's, except that a GridTrackNet scratch run needs the ``.npz`` as the template its
+    weights are written into. A mismatch is a ValueError. ``--save`` is then given the
+    architecture's suffix, with a line saying so when it had the other."""
+    inherited = selection_run["recipe"]["arch"] if selection_run else None
+    if args.arch is None:
+        args.arch = inherited or GRIDTRACKNET
+    elif inherited and args.arch != inherited:
+        raise ValueError(f"--arch {args.arch} does not follow the selection run, which trained {inherited}; "
+                         "leave --arch out to inherit it")
+    suffix = weights_suffix(args.arch)
+    starting = arch_of(args.weights)                 # a suffix that is neither is refused here
+    if starting != args.arch and (not args.from_scratch or args.arch == GRIDTRACKNET):
+        role = ("the template the trained weights are written into" if args.from_scratch
+                else f"the starting model of a {args.arch} fine-tune")
+        raise ValueError(f"--weights {args.weights} is a {starting} file, but {role} must be a {args.arch} one "
+                         f"({suffix})" + ("" if args.from_scratch else "; --from-scratch trains a new network instead"))
+    if args.save.suffix.lower() != suffix:
+        corrected = args.save.with_suffix(suffix)
+        print(f"[train] --save {args.save} is given {suffix}, the {args.arch} weights suffix: {corrected}")
+        args.save = corrected
+
+
 def train(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)       # a fresh model's init draws from it; every epoch reseeds the loaders' draws, see fit
     selection_run = read_selection_run(args.selection_run) if args.selection_run else None
+    resolve_arch(args, selection_run)
     if selection_run and len(selection_run["recipe"]["lr_schedule"]) > 1:
         steps = ", ".join(f"{entry['lr']:g} from epoch {entry['epoch']}" for entry in selection_run["recipe"]["lr_schedule"])
         print(f"[train] the selection run lowered its learning rate ({steps}); this run trains at --lr {args.lr:g} "
@@ -466,19 +533,20 @@ def train(args: argparse.Namespace) -> None:
               f"sampled x{args.oversample_false_alarms:g}")
     sampler = make_sampler(manifest["train"], oversample, args.epoch_units, args.oversample_absent,
                            args.oversample_false_alarms, flagged)
-    train_loader = DataLoader(UnitDataset(args.data_dir, manifest["train"], augment=True, augmentations=args.augment),
+    train_loader = DataLoader(UnitDataset(args.data_dir, manifest["train"], augment=True, augmentations=args.augment,
+                                          arch=args.arch),
                               batch_size=args.batch_size,
                               shuffle=sampler is None, sampler=sampler, num_workers=args.workers,
                               pin_memory=device.type == "cuda", persistent_workers=args.workers > 0)
     val_loader = None if args.all_clips else DataLoader(
-        UnitDataset(args.data_dir, manifest["val"], augment=False), batch_size=args.batch_size,
+        UnitDataset(args.data_dir, manifest["val"], augment=False, arch=args.arch), batch_size=args.batch_size,
         num_workers=args.workers, pin_memory=device.type == "cuda")
     if args.from_scratch:
-        model = fresh_model(device)
-        print("[train] fresh GridTrackNet (random init)")
+        model = fresh_model(device, args.arch)
+        print(f"[train] fresh {args.arch} (random init, {model.GRID_COLS}x{model.GRID_ROWS} grid)")
     else:
-        model = load_model(args.weights, device).float()
-        print(f"[train] fine-tuning from {args.weights}")
+        model = load_ball_model(args.weights, device).float()
+        print(f"[train] fine-tuning {args.arch} from {args.weights}")
     model.train()
     optimizer = torch.optim.Adadelta(model.parameters(), lr=args.lr, rho=0.95, eps=1e-7)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
@@ -497,7 +565,7 @@ def train(args: argparse.Namespace) -> None:
         checkpoint.unlink()
     write_atomic(args.run_dir / "config.json",
                  json.dumps(run_config(args, names, val_clips, oversample, len(flagged), schedule), indent=2))
-    print(f"[train] device={device} epochs={args.epochs} batch={args.batch_size} seed={args.seed} "
+    print(f"[train] arch={args.arch} device={device} epochs={args.epochs} batch={args.batch_size} seed={args.seed} "
           f"units/epoch={len(train_loader) * args.batch_size} augment={sorted(set(args.augment))} "
           + ("nothing held out (--all-clips)" if args.all_clips else f"val={val_clips} score every {args.score_every}")
           + (f" oversample={oversample}" if oversample else ""))
@@ -559,6 +627,13 @@ def self_test() -> None:
     expect(results_row(1, 0.5, None, 90.0, None, None)[2] == "", "a results row with nothing held out")
     model = fresh_model(torch.device("cpu"))
     expect(model(torch.zeros(1, 15, HEIGHT, WIDTH)).shape == (1, 15, GRID_ROWS, GRID_COLS), "the fresh model's output")
+    heat = make_target([[960, 540], None, None, None, None], 1920, 1080, HEATMAP_S4)
+    expect(heat.shape == (15, heatmapnet.GRID_ROWS, heatmapnet.GRID_COLS) and bool(heat[0, 54, 96] == 1)
+           and bool(heat[0, 54, 95] < 1) and float(heat[3:].sum()) == 0.0, "the Gaussian target of a centred ball")
+    prediction = torch.full_like(heat, 0.1).unsqueeze(0).requires_grad_(True)
+    loss = heatmap_loss(prediction, heat.unsqueeze(0))
+    loss.backward()
+    expect(bool(torch.isfinite(loss) and torch.isfinite(prediction.grad).all()), "a finite heat-map loss and gradient")
     print("train_gridtracknet self-test passed")
 
 
@@ -567,9 +642,17 @@ def build_parser() -> argparse.ArgumentParser:
     layout = ws.current()
     parser.add_argument("--videos", type=Path, default=layout.videos)
     parser.add_argument("--labels", type=Path, default=layout.labels)
+    parser.add_argument("--arch", choices=ARCHITECTURES, default=None,
+                        help=f"The network: {GRIDTRACKNET} (the default, or the --selection-run's) or {HEATMAP_S4}, the "
+                             "stride-4 heat-map network (its weights are .pt files)")
     parser.add_argument("--weights", type=Path, default=layout.repo_weights,
-                        help="Starting weights (also the .npz template for saving)")
-    parser.add_argument("--save", type=Path, default=layout.best_weights)
+                        help="The starting model of a fine-tune, the architecture's own file (.npz for gridtracknet, "
+                             f".pt for {HEATMAP_S4}); with --from-scratch, either architecture's, read only by the "
+                             "--oversample-false-alarms prepass (a gridtracknet scratch run still needs the .npz, "
+                             "the template it saves into)")
+    parser.add_argument("--save", type=Path, default=layout.best_weights,
+                        help="Where the winner is copied (default: the workspace's gridtracknet_best.npz); given the "
+                             "other architecture's suffix, it is corrected to the right one")
     parser.add_argument("--data-dir", type=Path, default=layout.cache / "data")
     parser.add_argument("--run-dir", type=Path, default=layout.runs / "train")
     parser.add_argument("--resume", action="store_true",

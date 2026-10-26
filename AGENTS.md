@@ -12,6 +12,17 @@ rendering. Outputs are an annotated MP4 and per-frame JSON. It is not a calibrat
   y-offset grids at 48x27. Width-axis normalization reproduces the upstream export;
   it is Keras BatchNormalization on that axis: gamma and beta train, mean and
   variance are running statistics (buffers).
+- `tennis_tracker/heatmapnet.py`: the second ball-detector architecture, `HeatmapNet`,
+  a U-shaped encoder-decoder with skip connections answering on a 192x108 grid (stride
+  4) in GridTrackNet's output layout, from the same 15-channel input; `.pt` weights
+  (`{"arch": "heatmap_s4", "state_dict"}`). `tennis_tracker/ball_models.py` is the one
+  front door: the suffix of `Config.model_path` picks the network (`.npz` GridTrackNet,
+  `.pt` HeatmapNet), `load_ball_model` builds it, and both classes carry `ARCH`,
+  `GRID_COLS`, `GRID_ROWS`, `INPUT_CHANNELS` and `FRAMES_PER_UNIT`, so the detector,
+  `decode_predictions` (which reads the grid off the output's shape) and the trainer
+  never ask which class they hold. The trainer's `--arch heatmap_s4` (Gaussian target,
+  CenterNet focal loss) trains it from scratch or fine-tunes it from a `.pt` (`--weights`
+  must be the architecture's own file for a fine-tune); no run has been made yet.
 - `tennis_tracker/engines/`: `ball_detectors.py`, the progressive GridTrackNet
   prepass and the single-frame TensorRT ball engine. At about 60 FPS, even and
   odd phases each run at about 30 FPS. Preserve source-frame indices and

@@ -1,6 +1,12 @@
-"""The trainer's torch side of the frame cache: the grid targets, the augmentations, the
-``Dataset`` that reads cached units and the sampler that weights them by source and by what
-they hold (absent-ball frames, the frames the starting weights fired on).
+"""The trainer's torch side of the frame cache: the grid targets of each architecture, the
+augmentations, the ``Dataset`` that reads cached units and the sampler that weights them by
+source and by what they hold (absent-ball frames, the frames the starting weights fired on).
+
+The target follows the architecture (``make_target``): GridTrackNet's one-hot cell on its 48x27
+grid, exactly as the upstream trainer has it; HeatmapNet's Gaussian heat map on its 192x108
+grid (``HEAT_SIGMA_CELLS``), 1 at the ball's cell. Both carry the offsets at the ball's cell
+only, and an absent ball is all zeros. The frames are the same five for both, so every
+augmentation's 15-channel reshape serves either.
 
 Each augmentation is behind a name in ``AUGMENTATIONS`` (``--augment``), so a run can switch one
 on and be measured against the same run without it:
@@ -30,10 +36,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, WeightedRandomSampler
 
-from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
+from tennis_tracker.ball_models import GRIDTRACKNET, HEATMAP_S4, model_class
+from tennis_tracker.gridtracknet import FRAMES_PER_UNIT
 from finetune.training.frame_cache import Target, TrainingUnit
 
 AUGMENTATIONS = ("basic", "strong", "translate", "reverse", "compress")
+HEAT_SIGMA_CELLS = 1.0         # the Gaussian heat target's sigma, in cells of the model's grid
+HEAT_RADIUS_SIGMAS = 3         # ... and how far it reaches before it is cut to zero
 TRANSLATE_PX = 20              # the largest shift, in cache pixels (at 768x432), either way on each axis
 TRANSLATE_P = 0.5
 REVERSE_P = 0.5
@@ -43,15 +52,37 @@ BLUR_P = 0.2                   # ... and softened at this rate, as photometric_a
 BLUR_SIGMA = (0.4, 1.0)
 
 
-def make_target(points, width: int, height: int) -> torch.Tensor:
-    target = np.zeros((FRAMES_PER_UNIT * 3, GRID_ROWS, GRID_COLS), dtype=np.float32)
+def gaussian_heat(target: np.ndarray, row: int, col: int, sigma: float = HEAT_SIGMA_CELLS,
+                  radius_sigmas: int = HEAT_RADIUS_SIGMAS) -> None:
+    """Write a Gaussian of `sigma` cells, exactly 1 at (`row`, `col`) and cut to zero beyond
+    `radius_sigmas` sigmas, into the 2-D `target` by maximum, as CenterNet draws its heat peaks."""
+    radius = int(math.ceil(radius_sigmas * sigma))
+    rows, cols = target.shape
+    top, bottom = max(0, row - radius), min(rows, row + radius + 1)
+    left, right = max(0, col - radius), min(cols, col + radius + 1)
+    dy = np.arange(top, bottom, dtype=np.float32) - row
+    dx = np.arange(left, right, dtype=np.float32) - col
+    heat = np.exp(-(dy[:, None] ** 2 + dx[None, :] ** 2) / (2 * sigma * sigma))
+    heat[np.hypot(dy[:, None], dx[None, :]) > radius] = 0.0
+    np.maximum(target[top:bottom, left:right], heat, out=target[top:bottom, left:right])
+
+
+def make_target(points, width: int, height: int, arch: str = GRIDTRACKNET) -> torch.Tensor:
+    """The (15, rows, cols) target of a unit's five labels on `arch`'s grid: per frame the heat
+    grid (GridTrackNet: 1 at the ball's cell; HeatmapNet: ``gaussian_heat`` around it, 1 at the
+    cell) and the x and y offsets, the ball's fractional position in [0, 1) within its cell,
+    written at that cell only. A frame without a ball (None) is all zeros."""
+    grid_cols, grid_rows = model_class(arch).GRID_COLS, model_class(arch).GRID_ROWS
+    target = np.zeros((FRAMES_PER_UNIT * 3, grid_rows, grid_cols), dtype=np.float32)
     for index, point in enumerate(points):
         if point is None:
             continue
-        grid_x = point[0] * GRID_COLS / width
-        grid_y = point[1] * GRID_ROWS / height
-        col = min(GRID_COLS - 1, int(grid_x))
-        row = min(GRID_ROWS - 1, int(grid_y))
+        grid_x = point[0] * grid_cols / width
+        grid_y = point[1] * grid_rows / height
+        col = min(grid_cols - 1, int(grid_x))
+        row = min(grid_rows - 1, int(grid_y))
+        if arch == HEATMAP_S4:
+            gaussian_heat(target[index * 3], row, col)
         target[index * 3, row, col] = 1
         target[index * 3 + 1, row, col] = grid_x - col
         target[index * 3 + 2, row, col] = grid_y - row
@@ -151,12 +182,17 @@ def compress(images: np.ndarray, quality: int) -> np.ndarray:
 # --------------------------------------------------------------------------- the dataset
 
 class UnitDataset(Dataset):
+    """The cached units as (images, target) pairs: the five frames as one (15, H, W) float tensor
+    and ``make_target`` on `arch`'s grid, with the augmentations in `augmentations` drawn when
+    `augment` is set."""
+
     def __init__(self, data_dir: Path, samples: Sequence[TrainingUnit], augment: bool,
-                 augmentations: Collection[str] = ("basic",)) -> None:
+                 augmentations: Collection[str] = ("basic",), arch: str = GRIDTRACKNET) -> None:
         unknown = set(augmentations) - set(AUGMENTATIONS)
         if unknown:
             raise ValueError(f"unknown augmentation(s) {sorted(unknown)}; choose from {AUGMENTATIONS}")
-        self.data_dir, self.samples, self.augment = data_dir, samples, augment
+        model_class(arch)                        # an unknown architecture is refused here, not per unit
+        self.data_dir, self.samples, self.augment, self.arch = data_dir, samples, augment, arch
         self.augmentations: Set[str] = set(augmentations) if augment else set()
         self.rng: Optional[Augmenter] = None     # made in the process that reads, see Augmenter
 
@@ -213,7 +249,7 @@ class UnitDataset(Dataset):
             images = compress(images, rng.draws.randint(*COMPRESS_QUALITY))
             if rng.draws.random() < BLUR_P:
                 images = blur(images, rng.draws.uniform(*BLUR_SIGMA))
-        return torch.from_numpy(np.ascontiguousarray(images)), make_target(points, width, height)
+        return torch.from_numpy(np.ascontiguousarray(images)), make_target(points, width, height, self.arch)
 
 
 # --------------------------------------------------------------------------- the sampler

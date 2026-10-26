@@ -1,5 +1,11 @@
-"""The training loop proper: GridTrackNet's loss, a fresh network, one epoch of optimisation,
-the validation loss and writing the weights back in the tracker's .npz layout."""
+"""The training loop proper: the loss of each architecture, a fresh network, one epoch of
+optimisation, the validation loss and writing the weights back in the layout the tracker loads
+(the .npz for GridTrackNet, the .pt record for HeatmapNet).
+
+Which loss and which layout is read off the model's ``ARCH`` (the contract ``ball_models``
+spells), so the loop holds no architecture switch of its own: ``LOSSES`` maps the id to the
+loss, ``save_weights`` to the writer.
+"""
 
 from __future__ import annotations
 
@@ -10,15 +16,21 @@ from typing import Optional
 import numpy as np
 import torch
 
-from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS, GridTrackNet
+from tennis_tracker import heatmapnet
+from tennis_tracker.ball_models import GRIDTRACKNET, HEATMAP_S4, model_class
+from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
 
 PROGRESS_EVERY = 200       # training steps between progress lines
 LOSS_EPSILON = 1e-6        # keeps the confidence loss's logs finite
 OFFSET_LOSS_WEIGHT = 0.001
 POSITIVE_WEIGHT, NEGATIVE_WEIGHT = 0.75, 0.25    # the focal loss's class weights
+HEAT_ALPHA, HEAT_BETA = 2.0, 4.0                 # CenterNet's focal exponents: the easy-example one and the penalty reduction
 
 
 def gridtracknet_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """GridTrackNet's loss, as the upstream trainer has it: a class-weighted focal loss on the
+    one-hot confidence grid (``POSITIVE_WEIGHT`` / ``NEGATIVE_WEIGHT``, exponent 2), averaged over
+    every cell, plus ``OFFSET_LOSS_WEIGHT`` times the L1 of the offsets at the labelled cells."""
     prediction = prediction.float().reshape(-1, FRAMES_PER_UNIT, 3, GRID_ROWS, GRID_COLS)
     target = target.reshape_as(prediction)
     confidence_true = target[:, :, 0]
@@ -30,10 +42,43 @@ def gridtracknet_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.T
     return confidence_loss + OFFSET_LOSS_WEIGHT * offset_loss
 
 
+def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """HeatmapNet's loss: CenterNet's penalty-reduced focal loss on the heat channel against the
+    Gaussian target (``dataset.make_target``), where a cell at exactly 1 is a positive and every
+    other cell a negative whose penalty is reduced by ``(1 - heat) ** HEAT_BETA`` near the peak,
+    the sum normalised by the number of positives (at least one); plus ``OFFSET_LOSS_WEIGHT`` times
+    the L1 of the offsets at the peak cells, normalised the same way. The grid is the target's
+    own, so the loss does not care which stride the network answers at."""
+    rows, cols = int(target.shape[-2]), int(target.shape[-1])
+    prediction = prediction.float().reshape(-1, FRAMES_PER_UNIT, 3, rows, cols)
+    target = target.reshape_as(prediction)
+    heat_true = target[:, :, 0]
+    heat_pred = prediction[:, :, 0].clamp(LOSS_EPSILON, 1 - LOSS_EPSILON)
+    peak = (heat_true == 1).float()
+    positives = peak.sum().clamp(min=1.0)
+    positive = peak * (1 - heat_pred).pow(HEAT_ALPHA) * heat_pred.log()
+    negative = (1 - peak) * (1 - heat_true).pow(HEAT_BETA) * heat_pred.pow(HEAT_ALPHA) * (1 - heat_pred).log()
+    heat_loss = -(positive + negative).sum() / positives
+    offset_loss = ((prediction[:, :, 1:3] - target[:, :, 1:3]).abs() * peak.unsqueeze(2)).sum() / positives
+    return heat_loss + OFFSET_LOSS_WEIGHT * offset_loss
+
+
+LOSSES = {GRIDTRACKNET: gridtracknet_loss, HEATMAP_S4: heatmap_loss}
+
+
+def unit_loss(model: torch.nn.Module, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """The loss of `model`'s architecture (``LOSSES`` by ``model.ARCH``) on one batch."""
+    return LOSSES[model.ARCH](prediction, target)
+
+
 def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> None:
-    """Write the model in the .npz layout the tracker loads: every convolution and every
-    BatchNorm layer's gamma, beta and running mean and variance come from ``model``; ``template``
-    supplies whatever else the layout carries."""
+    """Write the model in the layout the tracker loads for its architecture: a HeatmapNet as the
+    ``.pt`` record ``heatmapnet.save_model`` writes (`template` is not read); a GridTrackNet in the
+    .npz layout, where every convolution and every BatchNorm layer's gamma, beta and running mean
+    and variance come from ``model`` and ``template`` supplies whatever else the layout carries."""
+    if model.ARCH == HEATMAP_S4:
+        heatmapnet.save_model(model, destination)
+        return
     with np.load(template) as source:
         arrays = {name: source[name] for name in source.files}
     for index, conv in enumerate(model.convs):
@@ -54,13 +99,16 @@ def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> N
     temporary.replace(destination)
 
 
-def fresh_model(device: torch.device) -> GridTrackNet:
-    """A float32 network to train from scratch: Kaiming convolutions, BatchNorm at Keras's
-    defaults (gamma 1, beta 0, running mean 0, running variance 1), in train mode."""
-    model = GridTrackNet()
-    for conv in model.convs:
-        torch.nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
-        torch.nn.init.zeros_(conv.bias)
+def fresh_model(device: torch.device, arch: str = GRIDTRACKNET) -> torch.nn.Module:
+    """A float32 network of `arch` to train from scratch, in train mode: a GridTrackNet with
+    Kaiming convolutions and BatchNorm at Keras's defaults (gamma 1, beta 0, running mean 0,
+    running variance 1); a HeatmapNet as its own ``reset_parameters`` leaves it (Kaiming
+    convolutions, the heat head at its prior)."""
+    model = model_class(arch)()
+    if arch == GRIDTRACKNET:
+        for conv in model.convs:
+            torch.nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
+            torch.nn.init.zeros_(conv.bias)
     return model.to(device).float()
 
 
@@ -75,7 +123,7 @@ def evaluate_loss(model, loader, device, max_steps=None) -> float:
             for images, target in loader:
                 images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-                    loss = gridtracknet_loss(model(images), target)
+                    loss = unit_loss(model, model(images), target)
                 total += float(loss)
                 steps += 1
                 if max_steps and steps >= max_steps:
@@ -95,7 +143,7 @@ def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: i
         images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-            loss = gridtracknet_loss(model(images), target)
+            loss = unit_loss(model, model(images), target)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()

@@ -22,7 +22,7 @@ from finetune.training.clips import ClipSelection, find_clips
 from finetune.training.dataset import (TRANSLATE_PX, Augmenter, UnitDataset, compress, make_target, reverse, translate,
                                        translate_limits)
 from finetune.training.frame_cache import DATA_VERSION, TrainingUnit, prepare_clip, training_targets
-from finetune.training.loop import evaluate_loss, fresh_model, gridtracknet_loss, save_weights, train_epoch
+from finetune.training.loop import evaluate_loss, fresh_model, save_weights, train_epoch
 from finetune.training.metrics import promotion_improves
 from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
 from tests._helpers import blank_template, metric_probe, write_clip
@@ -32,6 +32,130 @@ SIZE = (64, 36)
 
 def test_training_self_test_passes():
     training.self_test()
+
+
+# --------------------------------------------------------------------------- the architecture switch
+
+def test_a_fine_tune_starts_from_its_own_architectures_weights_or_is_refused_in_one_line(tmp_path, capsys):
+    """Without --from-scratch, --weights is the starting model: a heatmap_s4 fine-tune from the
+    GridTrackNet .npz (the default) is refused before any cache or run folder is written, as is a
+    gridtracknet fine-tune from a .pt; a .pt starts a heatmap_s4 fine-tune."""
+    videos, labels = workspace(tmp_path, ["a", "b"])
+    argv = ["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"),
+            "--run-dir", str(tmp_path / "run"), "--arch", "heatmap_s4"]
+    assert training.main(argv) == 1
+    error = capsys.readouterr().err
+    assert "[error] --weights" in error and "is a gridtracknet file, but the starting model of a heatmap_s4 fine-tune " \
+                                           "must be a heatmap_s4 one (.pt); --from-scratch trains a new network instead" in error
+    assert not (tmp_path / "cache").exists() and not (tmp_path / "run").exists()
+    parser = training.build_parser()
+    args = parser.parse_args(["--arch", "gridtracknet", "--weights", str(tmp_path / "net.pt")])
+    with pytest.raises(ValueError, match="is a heatmap_s4 file, but the starting model of a gridtracknet fine-tune"):
+        training.resolve_arch(args, None)
+    args = parser.parse_args(["--arch", "heatmap_s4", "--weights", str(tmp_path / "best.pt"), "--save", str(tmp_path / "w.pt")])
+    training.resolve_arch(args, None)
+    assert args.arch == "heatmap_s4" and args.weights == tmp_path / "best.pt"
+    args = parser.parse_args(["--weights", str(tmp_path / "ball.engine")])
+    with pytest.raises(ValueError, match="end in .npz"):
+        training.resolve_arch(args, None)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--arch", "yolo"])
+
+
+def test_a_scratch_run_reads_either_weights_for_the_prepass_but_gridtracknet_needs_its_template(tmp_path):
+    parser = training.build_parser()
+    args = parser.parse_args(["--arch", "heatmap_s4", "--from-scratch", "--weights", str(tmp_path / "grid.npz"),
+                              "--save", str(tmp_path / "w.pt")])
+    training.resolve_arch(args, None)                                       # the .npz feeds the prepass alone
+    args = parser.parse_args(["--arch", "heatmap_s4", "--from-scratch", "--weights", str(tmp_path / "old.pt"),
+                              "--save", str(tmp_path / "w.pt")])
+    training.resolve_arch(args, None)
+    args = parser.parse_args(["--from-scratch", "--weights", str(tmp_path / "old.pt")])
+    with pytest.raises(ValueError, match="the template the trained weights are written into must be a gridtracknet one"):
+        training.resolve_arch(args, None)
+
+
+def test_train_fine_tunes_a_heatmap_winner_from_its_pt(tmp_path, capsys):
+    """The deployment path: a heatmap_s4 fine-tune loads the .pt as its starting model (the
+    prepass and the fit are stood in for; the loaded network is what fit receives)."""
+    from tennis_tracker.heatmapnet import HeatmapNet, save_model
+    videos, labels = workspace(tmp_path, ["a", "b"])
+    start = tmp_path / "best.pt"
+    save_model(HeatmapNet(), start)
+    received = {}
+
+    def fit(args, model, *rest):
+        received["model"] = model
+        return training.Selection(args.run_dir / "best.pt", 1, training.metrics_of(0.9, 0.0), 1, 0.1)
+    manifest = {"train": [{"clip": "a"}], "val": [{"clip": "b"}], "validation_clips": ["b"]}
+    with patch.object(training, "prepare_data", return_value=manifest), patch.object(training, "DataLoader"), \
+            patch.object(training, "UnitDataset"), patch.object(training, "make_sampler", return_value=None), \
+            patch.object(training, "fit", side_effect=fit), patch.object(training, "pick_winner"):
+        assert training.main(["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"),
+                              "--run-dir", str(tmp_path / "run"), "--arch", "heatmap_s4", "--weights", str(start),
+                              "--save", str(tmp_path / "winner.npz"), "--device", "cpu", "--epochs", "1"]) == 0
+    assert isinstance(received["model"], HeatmapNet) and received["model"].training
+    out = capsys.readouterr().out
+    assert f"[train] fine-tuning heatmap_s4 from {start}" in out and "winner.pt" in out
+    assert json.loads((tmp_path / "run" / "config.json").read_text(encoding="utf-8"))["arch"] == "heatmap_s4"
+
+
+def test_resolve_arch_defaults_inherits_and_corrects_the_save_suffix(tmp_path, capsys):
+    """No --arch: GridTrackNet, or the selection run's architecture; one that contradicts the
+    selection run is refused; --save takes the architecture's suffix, with a line saying so."""
+    parser = training.build_parser()
+    args = parser.parse_args(["--save", str(tmp_path / "best.npz")])
+    training.resolve_arch(args, None)
+    assert args.arch == "gridtracknet" and args.save == tmp_path / "best.npz" and capsys.readouterr().out == ""
+    args = parser.parse_args(["--arch", "heatmap_s4", "--from-scratch", "--save", str(tmp_path / "gridtracknet_best.npz")])
+    training.resolve_arch(args, None)
+    assert args.arch == "heatmap_s4" and args.save == tmp_path / "gridtracknet_best.pt"
+    assert "is given .pt, the heatmap_s4 weights suffix" in capsys.readouterr().out
+    heat_recipe = {"recipe": {"arch": "heatmap_s4"}}
+    args = parser.parse_args(["--from-scratch", "--all-clips", "--save", str(tmp_path / "w.npz")])
+    training.resolve_arch(args, heat_recipe)
+    assert args.arch == "heatmap_s4" and args.save == tmp_path / "w.pt"
+    args = parser.parse_args(["--arch", "gridtracknet", "--from-scratch", "--all-clips"])
+    with pytest.raises(ValueError, match="does not follow the selection run, which trained heatmap_s4"):
+        training.resolve_arch(args, heat_recipe)
+    args = parser.parse_args(["--all-clips", "--weights", str(tmp_path / "h1" / "best.pt"), "--save", str(tmp_path / "w.pt")])
+    training.resolve_arch(args, heat_recipe)                                 # the winner fine-tuned on every clip
+    assert args.arch == "heatmap_s4"
+
+
+def test_config_json_carries_the_arch_and_same_run_refuses_a_change():
+    parser = training.build_parser()
+    grid = training.run_config(parser.parse_args([]), ["a"], ["a"], {})
+    heat = training.run_config(parser.parse_args(["--arch", "heatmap_s4", "--from-scratch"]), ["a"], ["a"], {})
+    assert grid["arch"] == "gridtracknet" and heat["arch"] == "heatmap_s4"
+    training.same_run(grid, grid)
+    with pytest.raises(ValueError, match="config.json has arch='gridtracknet', this run arch='heatmap_s4'"):
+        training.same_run(grid, {**heat, "from_scratch": False})
+    before_the_field = {key: value for key, value in grid.items() if key != "arch"}
+    training.same_run(before_the_field, grid)                               # an older run trained GridTrackNet
+    assert training.arch_of_config(before_the_field) == "gridtracknet"
+    assert training.read_selection_run.__doc__ and "arch_of_config" in training.read_selection_run.__doc__
+
+
+def test_a_heatmap_run_writes_every_file_with_the_pt_suffix(tmp_path):
+    """fit on a HeatmapNet: last/best/best_loss and epochs/epoch_NNN are .pt records the tracker's
+    loader reads, and no .npz appears."""
+    model = fresh_model(torch.device("cpu"), "heatmap_s4")
+    args = training.build_parser().parse_args(["--run-dir", str(tmp_path / "run"), "--arch", "heatmap_s4", "--from-scratch",
+                                               "--epochs", "2", "--weights", str(tmp_path / "unused.npz")])
+    args.run_dir.mkdir()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    with patch.object(training, "train_epoch", side_effect=[0.5, 0.4]), patch.object(training, "evaluate_loss", side_effect=[0.3, 0.2]):
+        selection = training.fit(args, model, None, object(), optimizer, scaler, torch.device("cpu"),
+                                 lambda weights: training.metrics_of(0.8 if weights.suffix == ".pt" else -1.0, 0.0))
+    assert selection.best_path == args.run_dir / "best.pt" and selection.best_metrics.recall == 0.8
+    assert sorted(path.name for path in args.run_dir.iterdir() if path.suffix in (".pt", ".npz")) == \
+        ["best.pt", "best_loss.pt", "checkpoint.pt", "last.pt"]
+    assert sorted(path.name for path in (args.run_dir / training.EPOCHS_DIR).iterdir()) == ["epoch_001.pt", "epoch_002.pt"]
+    assert training.epoch_weights(args.run_dir, 3, ".pt") == args.run_dir / "epochs" / "epoch_003.pt"
+    from tennis_tracker.ball_models import load_ball_model
+    assert isinstance(load_ball_model(args.run_dir / "best.pt", torch.device("cpu")), type(model))
 
 
 def test_main_reports_a_run_that_cannot_start_as_status_1(tmp_path, capsys):

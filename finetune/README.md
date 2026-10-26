@@ -217,6 +217,23 @@ separately). `ft.py check` flags files that break this rule.
      changes the draw probability per source (0 removes it from training);
      `--epoch-units N` fixes how many windows an epoch draws (an epoch over
      everything is ~50k windows, about an hour on the 5080).
+   - `--arch heatmap_s4` trains the second architecture, `HeatmapNet`
+     (`tennis_tracker/heatmapnet.py`): a U-shaped encoder-decoder with skip
+     connections answering on a 192x108 grid (stride 4) instead of
+     GridTrackNet's 48x27, trained on a Gaussian heat target with CenterNet's
+     focal loss. It takes the same five frames and answers in the same layout,
+     so the tracker runs it the moment `Config.model_path` points at its `.pt`
+     file (the suffix is the switch: `.npz` is GridTrackNet, `.pt` is
+     HeatmapNet; `tennis_tracker/ball_models.py`), and the same metric scores
+     it (`evaluate_archive.py --gridtracknet-weights best.pt`). A fine-tune
+     starts from `--weights`, which must then be the architecture's own file
+     (`.pt` here; the `.npz` is refused in one line); a `--from-scratch` run
+     reads `--weights` only for the hard-negative prepass, so either file
+     serves. Every file the run writes carries the `.pt` suffix (`last.pt`,
+     `best.pt`, `epochs/epoch_NNN.pt`), `config.json` records `arch`, and an
+     `--all-clips` run inherits its selection run's architecture, so a
+     HeatmapNet winner is fine-tuned on every clip, and later on new clips,
+     from its `best.pt` (`--weights runs/<tag>/best.pt`).
    - `--holdout NAME` holds out a named set of whole recordings from
      `holdouts.json` instead of `--val-clips`; `mixed_v1` is the fixed set
      the detector recipe was chosen on (prof games 4 and 7, video1 to 10,
@@ -278,11 +295,12 @@ separately). `ft.py check` flags files that break this rule.
      numbers in, because weights that saw every clip carry no honest number
      of their own.
    - Colab: `GridTrackNet_FineTune_Colab.ipynb` runs the same trainer. Run
-     `ft.py colab-zip` and upload the one file it writes to the top of Google
-     Drive as `tennis_finetune_colab.zip`; the notebook unpacks it. Its
+     `ft.py colab-zip` and upload the one file it writes to Google Drive as
+     `MyDrive/tennis_finetune/tennis_finetune_colab.zip`; the notebook unpacks it
+     (everything it reads or writes on Drive lives in that folder). Its
      settings cell has `HOLDOUT` (`mixed_v1` by default), the seed, the
      augmentations, `--score-every` and `--oversample-absent`; every run's
-     outputs go to `MyDrive/tennis_finetune_runs/<TAG>/`, and a run whose
+     outputs go to `MyDrive/tennis_finetune/runs/<TAG>/`, and a run whose
      folder holds a `checkpoint.pt` is resumed. `SELECTION_RUN` set to a
      finished held-out run's `TAG` makes it the `--all-clips` run that
      follows that run's recipe (`EPOCHS` 0 takes its best epoch).

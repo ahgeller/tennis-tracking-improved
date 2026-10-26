@@ -5,7 +5,11 @@ import pytest
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from finetune.training.loop import evaluate_loss, fresh_model, gridtracknet_loss, save_weights, train_epoch
+from finetune.training.dataset import make_target
+from finetune.training.loop import (LOSSES, evaluate_loss, fresh_model, gridtracknet_loss, heatmap_loss, save_weights,
+                                    train_epoch, unit_loss)
+from tennis_tracker import heatmapnet
+from tennis_tracker.ball_models import load_ball_model
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
 from tests._helpers import blank_template
 
@@ -43,3 +47,47 @@ def test_a_fresh_model_trains_evaluates_and_round_trips_through_the_npz_layout(t
     with torch.inference_mode():
         probe = torch.rand(1, 3 * FRAMES_PER_UNIT, HEIGHT, WIDTH)
         assert torch.allclose(reloaded(probe), model.eval()(probe), atol=5e-3)   # the tracker loads in float16
+
+
+def test_heatmap_loss_is_finite_and_lower_for_the_right_answer_than_a_wrong_one():
+    """CenterNet's focal loss against the Gaussian target: a prediction with its peak at the ball
+    scores below one that peaks elsewhere and below a flat one; a target with no ball at all is
+    finite (the positive count is clamped to one); nothing takes log(0)."""
+    target = make_target([[960.0, 540.0], None, None, None, None], 1920, 1080, heatmapnet.ARCH).unsqueeze(0)
+    flat = torch.full_like(target, 0.1)
+    right = flat.clone()
+    right[0, 0] = target[0, 0].clamp(min=0.1)                         # the heat as labelled, offsets right
+    right[0, 1, 54, 96], right[0, 2, 54, 96] = target[0, 1, 54, 96], target[0, 2, 54, 96]
+    wrong = flat.clone()
+    wrong[0, 0, 10, 10] = 0.95
+    assert torch.isfinite(heatmap_loss(flat, target))
+    assert heatmap_loss(right, target) < heatmap_loss(flat, target) < heatmap_loss(wrong, target)
+    assert torch.isfinite(heatmap_loss(torch.ones_like(target), target)) and torch.isfinite(heatmap_loss(torch.zeros_like(target), target))
+    assert torch.isfinite(heatmap_loss(flat, torch.zeros_like(target)))
+    prediction = flat.clone().requires_grad_(True)
+    heatmap_loss(prediction, target).backward()
+    assert torch.isfinite(prediction.grad).all()
+    assert LOSSES == {"gridtracknet": gridtracknet_loss, "heatmap_s4": heatmap_loss}
+    assert unit_loss(fresh_model(torch.device("cpu"), heatmapnet.ARCH), right, target) == heatmap_loss(right, target)
+
+
+@pytest.mark.filterwarnings("ignore:Converting a tensor with requires_grad")
+def test_a_fresh_heatmapnet_trains_evaluates_and_round_trips_through_the_pt_record(tmp_path):
+    """fresh_model builds the architecture asked for, the loop runs it with its own loss, and
+    save_weights writes the .pt record (no NPZ template read) that load_ball_model brings back."""
+    device = torch.device("cpu")
+    model = fresh_model(device, heatmapnet.ARCH)
+    assert isinstance(model, heatmapnet.HeatmapNet) and model.training
+    images = torch.rand(1, 3 * FRAMES_PER_UNIT, 96, 160)
+    target = make_target([[100.0, 50.0], None, None, None, None], 160, 96, heatmapnet.ARCH)[:, :24, :40].unsqueeze(0)
+    loader = DataLoader(TensorDataset(images, target), batch_size=1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    loss = train_epoch(model, loader, optimizer, scaler, device, epoch=1, epochs=1, max_steps=1)
+    assert np.isfinite(loss) and np.isfinite(evaluate_loss(model, loader, device, max_steps=1))
+    save_weights(model, tmp_path / "no_template.npz", tmp_path / "out" / "weights.pt")
+    reloaded = load_ball_model(tmp_path / "out" / "weights.pt", device)
+    assert not reloaded.training and not (tmp_path / "out" / "weights.npz").exists()
+    for name, tensor in model.state_dict().items():                      # exact, after the tracker's float16
+        expected = tensor.half() if tensor.is_floating_point() else tensor
+        assert torch.equal(reloaded.state_dict()[name], expected), name

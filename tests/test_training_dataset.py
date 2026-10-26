@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 import torch
 
-from finetune.training.dataset import Augmenter, make_sampler, make_target, photometric_augment, unit_weights
+from finetune.training.dataset import (HEAT_SIGMA_CELLS, Augmenter, gaussian_heat, make_sampler, make_target,
+                                       photometric_augment, unit_weights)
+from tennis_tracker import heatmapnet
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
 
 SIZE = (64, 36)
@@ -20,6 +22,38 @@ def test_target_marks_the_cell_and_its_offsets_and_nothing_for_an_absent_ball():
     assert float(target[6, 0, 0]) == 1.0 and float(target[7, 0, 0]) == 0.0 == float(target[8, 0, 0])
     assert float(target[9, GRID_ROWS - 1, GRID_COLS - 1]) == 1.0                    # clamped into the last cell
     assert 0.0 <= float(target[10, GRID_ROWS - 1, GRID_COLS - 1]) < 1.0
+
+
+def test_the_heatmap_target_is_a_gaussian_peaking_at_one_with_offsets_at_the_peak_only():
+    """heatmap_s4: the heat is exactly 1 at the ball's cell on the 192x108 grid and falls off as a
+    Gaussian of one cell (cut at three), the offsets are written at that cell alone, an absent ball
+    is all zeros, and the gridtracknet target is untouched by the switch."""
+    points = [[965.0, 545.0], None, [0.0, 0.0], [1919.0, 1079.0], None]      # grid (96.5, 54.5): cell (54, 96), offsets 0.5
+    target = make_target(points, 1920, 1080, heatmapnet.ARCH)
+    rows, cols = heatmapnet.GRID_ROWS, heatmapnet.GRID_COLS
+    assert target.shape == (FRAMES_PER_UNIT * 3, rows, cols) == (15, 108, 192)
+    heat = target[0]
+    assert float(heat[54, 96]) == 1.0 and float(heat.max()) == 1.0 and int((heat == 1.0).sum()) == 1
+    assert float(heat[54, 97]) == pytest.approx(np.exp(-0.5 / HEAT_SIGMA_CELLS ** 2))
+    assert float(heat[53, 95]) == pytest.approx(np.exp(-1.0 / HEAT_SIGMA_CELLS ** 2))
+    assert float(heat[54, 99]) == pytest.approx(np.exp(-4.5)) and float(heat[54, 100]) == 0.0       # three sigmas, then cut
+    assert 0.0 < float(heat[57, 96]) and float(heat[58, 96]) == 0.0
+    assert float(target[1].sum()) == float(target[1, 54, 96]) == pytest.approx(0.5)              # offsets at the peak only
+    assert float(target[2].sum()) == float(target[2, 54, 96]) == pytest.approx(0.5)
+    assert float(target[3:6].sum()) == 0.0                                                          # frame 1: no ball
+    assert float(target[6, 0, 0]) == 1.0 and float(target[6].sum()) > 1.0                            # a corner peak, clipped
+    assert float(target[9, rows - 1, cols - 1]) == 1.0
+    assert torch.equal(make_target(points, 1920, 1080), make_target(points, 1920, 1080, "gridtracknet"))
+    assert make_target(points, 1920, 1080).shape == (15, GRID_ROWS, GRID_COLS)
+    with pytest.raises(ValueError, match="unknown ball-detector architecture"):
+        make_target(points, 1920, 1080, "yolo")
+
+
+def test_gaussian_heat_takes_the_maximum_where_two_peaks_overlap():
+    grid = np.zeros((9, 9), np.float32)
+    gaussian_heat(grid, 4, 4)
+    gaussian_heat(grid, 4, 5)
+    assert float(grid[4, 4]) == 1.0 == float(grid[4, 5]) and float(grid[4, 3]) == pytest.approx(np.exp(-0.5))
 
 
 # --------------------------------------------------------------------------- the sampler
