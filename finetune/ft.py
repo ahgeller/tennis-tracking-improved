@@ -312,6 +312,8 @@ def run_cli(argv: List[str]) -> int:
     p = subparsers.add_parser("colab-zip", help="build the one zip the Colab notebook unpacks: videos, labels, "
                                                "clips.csv and the other records, the tracker's weights and the trainer's code")
     p.add_argument("--out", help=f"where to write it (default: {DEFAULT_OUT.relative_to(ROOT).as_posix()})")
+    p.add_argument("--code-only", action="store_true",
+                   help="just the records and the code, as tennis_finetune_code.zip: the notebook lays it over the big zip")
     p.set_defaults(func=cmd_colab_zip)
 
     args, rest = parser.parse_known_args(argv)

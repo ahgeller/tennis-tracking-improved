@@ -156,19 +156,22 @@ def write_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.
 def read_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
                     scaler: torch.amp.GradScaler) -> Checkpoint:
     """Load the states ``write_checkpoint`` recorded at `path` into `model`, `optimizer`, `scaler`
-    and torch's RNG, and return the progress they belong to. A missing or unreadable file is a
-    ValueError, the one ``--resume`` reports."""
+    and torch's RNG, and return the progress they belong to. A missing or unreadable file, or one
+    without the fields ``write_checkpoint`` records, is a ValueError, the one ``--resume`` reports."""
     try:
         state = torch.load(path, map_location="cpu", weights_only=True)
     except (OSError, RuntimeError, ValueError, pickle.UnpicklingError, EOFError) as error:
         raise ValueError(f"--resume needs a readable {CHECKPOINT} in {path.parent} ({error})") from error
-    model.load_state_dict(state["model"])
-    optimizer.load_state_dict(state["optimizer"])
-    if state["scaler"]:                 # a disabled (CPU) scaler saves nothing, and an enabled one refuses nothing
-        scaler.load_state_dict(state["scaler"])
-    torch.set_rng_state(state["torch_rng"])
-    best_metrics = None if state["best_metrics"] is None else DetectorMetrics(**state["best_metrics"])
-    return Checkpoint(state["epoch"], state["best_epoch"], best_metrics, state["best_loss_epoch"], state["best_loss"])
+    try:
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        if state["scaler"]:             # a disabled (CPU) scaler saves nothing, and an enabled one refuses nothing
+            scaler.load_state_dict(state["scaler"])
+        torch.set_rng_state(state["torch_rng"])
+        best_metrics = None if state["best_metrics"] is None else DetectorMetrics(**state["best_metrics"])
+        return Checkpoint(state["epoch"], state["best_epoch"], best_metrics, state["best_loss_epoch"], state["best_loss"])
+    except (KeyError, TypeError, RuntimeError) as error:
+        raise ValueError(f"{path} is not a checkpoint this trainer wrote ({error!r})") from error
 
 
 def read_run_config(run_dir: Path) -> dict:
@@ -204,15 +207,17 @@ def results_row(epoch: int, train_loss: float, val_loss: Optional[float], second
 
 
 def keep_results_through(results: Path, epoch: int) -> None:
-    """Cut ``results.csv`` back to the rows up to `epoch`, the checkpoint's: an interruption between
-    an epoch's row and its checkpoint leaves a row the resumed run writes again."""
+    """Cut ``results.csv`` back to the whole rows up to `epoch`, the checkpoint's: an interruption
+    between an epoch's row and its checkpoint leaves a row the resumed run writes again, and one
+    during the row leaves a fragment (fewer columns, or an epoch number cut short) that goes too."""
     rows: List[List[str]] = []
     if results.is_file():
         with results.open(newline="", encoding="utf-8") as handle:
-            rows = [row for row in csv.reader(handle) if row and row[0] != RESULTS_COLUMNS[0]]
+            rows = [row for row in csv.reader(handle)
+                    if len(row) == len(RESULTS_COLUMNS) and row[0].isdigit() and int(row[0]) <= epoch]
     with atomic_csv(results) as writer:
         writer.writerow(RESULTS_COLUMNS)
-        writer.writerows(row for row in rows if int(row[0]) <= epoch)
+        writer.writerows(rows)
 
 
 def best_scored_epoch(results: Path) -> Tuple[int, Optional[DetectorMetrics]]:

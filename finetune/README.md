@@ -60,8 +60,7 @@ not — `ft.py import all` recreates them.
 
 | source (`clips.csv`) | clips | label frames | visible | what it is |
 |---|---:|---:|---:|---|
-| `custom` | 11 | 4,106 | 3,844 | your archive clips video1–10, 12 (fixed camera, 1080p; video12 is 720p) |
-| `custom-uncorrected` | 1 | 300 | 245 | `video11`: 768×432 PNGs from the TrackNetV5 prep, labels never click-corrected — hold-out/eval only |
+| `custom` | 13 | 6,243 | 5,666 | your own camera: the archive clips video1–10 and 12 (fixed camera, 1080p; video12 is 720p), `video11` (768×432 PNGs from the TrackNetV5 prep) and the Pomona clip (added to the manifest by hand on 2026-10-25, not by the importer). `ft.py import all` tags video11 `custom-uncorrected` (machine labels, hold-out only); its labels were reviewed by hand and the row retagged `custom` on 2026-10-25, so re-import it only with that in mind |
 | `prof` | 41 | 9,292 | 9,068 | the public **TrackNet tennis** set (NYCU, `DATASETS.md` #3) from `Desktop\prof\Dataset`: broadcast rallies from an elevated camera behind the baseline, 1280×720 @ 30 FPS, one JPEG per frame. Imported as **`video13`–`video53`** so it sits under `video12` in the clip lists — the source tag, not the name, is what says it is not your camera. A partial copy: games 2, 4, 5, 6, 7 and 10 of 10 (**game10 is the published test split** — hold it out if you ever compare against published numbers) |
 | `grid` | 32 | 17,479 | 16,187 | a partial copy of GridTrackNet's public set (amateur phone + TV clips, 1080p); the full 100-match set is downloadable (`DATASETS.md` #1). 21 local matches ship labels without media. Four matches were mis-timed and are now fixed (2026-09-03): match49 and match50 are two later rallies of **match47's** video — the set ships all three as `gravel amature.mp4` — and match26 and match55 have frames missing from our copy, so their labels are re-timed in segments. `ft.py check --audit` is what finds this |
 | `tracknetv2-badminton` | 201 | 91,214 | 78,952 | **not imported by `all`** (removed 2026-08-31 as unneeded — `ft.py import tracknetv2` brings it back): the TrackNetV2 **badminton** set (V5Test's README called it tennis — it is not), broadcast shuttlecock rallies, 1280×720 @ 30 FPS. Cross-sport "tiny fast object" pre-training only |
@@ -170,7 +169,8 @@ separately). `ft.py check` flags files that break this rule.
      — `f` skips them but leaves them unreviewed, so the counter never moves
    - **mouse wheel** zooms smoothly about the mouse and the zoom stays; every
      new frame comes up centred on the guess with the pointer on it;
-     right-click re-centres
+     right-click re-centres; the mouse's side buttons step a frame (forward = next,
+     back = previous, like the arrow keys)
    - the window is resizable — drag it, maximise it, or press **m** for full
      screen; the picture is redrawn at whatever size you give it
    - `i j k l` nudge one pixel, `u` undo, `n`/`p` step, `s` save, `q` save + quit
@@ -275,7 +275,13 @@ separately). `ft.py check` flags files that break this rule.
      of their own.
    - Colab: `GridTrackNet_FineTune_Colab.ipynb` runs the same trainer. Run
      `ft.py colab-zip` and upload the one file it writes to the top of Google
-     Drive as `tennis_finetune_colab.zip`; the notebook unpacks it.
+     Drive as `tennis_finetune_colab.zip`; the notebook unpacks it. Its
+     settings cell has `HOLDOUT` (`mixed_v1` by default), the seed, the
+     augmentations, `--score-every` and `--oversample-absent`; every run's
+     outputs go to `MyDrive/tennis_finetune_runs/<TAG>/`, and a run whose
+     folder holds a `checkpoint.pt` is resumed. `SELECTION_RUN` set to a
+     finished held-out run's `TAG` makes it the `--all-clips` run that
+     follows that run's recipe (`EPOCHS` 0 takes its best epoch).
 
 5. **Use it** — `.\finetune.ps1 promote` copies the winner over
    `models/gridtracknet_weights_torch.npz` (the old file is kept as

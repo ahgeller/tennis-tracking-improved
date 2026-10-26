@@ -44,14 +44,19 @@ def temporary_for(path: Path) -> Path:
 @contextmanager
 def atomic_handle(path: Path, mode: str, **options) -> Iterator[IO]:
     """A handle opened with `mode` (and `options`, as ``Path.open`` takes them) on a temporary file
-    beside `path`, whose content lands at `path` only once it is complete and on disk."""
+    beside `path`, whose content lands at `path` only once it is complete and on disk. A write that
+    fails part-way leaves `path` as it was and no temporary."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = temporary_for(path)
-    with temporary.open(mode, **options) as handle:
-        yield handle
-        handle.flush()
-        os.fsync(handle.fileno())
-    replace_file(temporary, path)
+    try:
+        with temporary.open(mode, **options) as handle:
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        replace_file(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 @contextmanager

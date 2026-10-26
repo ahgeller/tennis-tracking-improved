@@ -4,7 +4,8 @@ train_gridtracknet.py imports a handful of finetune.* and tennis_tracker.* modul
 functions); the notebook's staging cell lists the files it needs as REQUIRED (``finetune.colab_zip.staged_files``
 reads it; ``ft.py colab-zip`` packs those files). This walks the trainer's internal import closure
 from the source and checks the two agree, so a new import in the trainer fails here instead of
-with ModuleNotFoundError on Colab."""
+with ModuleNotFoundError on Colab. The settings cell is checked for the trainer flags the notebook
+must pass: it runs both the held-out selection run and the ``--all-clips`` run that follows it."""
 import ast
 import json
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Iterator, Set
 from finetune.colab_zip import NOTEBOOK, staged_files
 from tennis_tracker.paths import ROOT
 
-PACKAGES = ("finetune", "tennis_tracker")
+PACKAGES = ("finetune", "tennis_tracker", "ball_in_play_selector")
 TRAINER = "finetune.training.train_gridtracknet"
 
 
@@ -81,3 +82,26 @@ def test_the_notebook_runs_the_trainer_as_a_module_from_the_staged_code():
     assert "'-m', 'finetune.training.train_gridtracknet'" in code
     assert "cwd=str(CODE)" in code
     assert "CODE / 'train_gridtracknet.py'" not in code        # no longer copied to code/ on its own
+
+
+def code_cell_starting(title: str) -> str:
+    """The source of the notebook's one code cell whose first line is `title`, parsed first (``!pip``
+    lines stand in as ``pass``) so a cell Colab could not run fails here."""
+    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    cells = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
+    matches = [source for source in cells if source.startswith(title + "\n")]
+    assert len(matches) == 1, f"{len(matches)} code cells start with {title!r}"
+    ast.parse(matches[0].replace("!pip", "pass  # pip"))
+    return matches[0]
+
+
+def test_the_settings_cell_exposes_the_all_clips_run():
+    """SELECTION_RUN names a finished held-out run on Drive; set, the cell passes --all-clips and
+    --selection-run to the trainer and leaves the held-out flags and --score-every out, and
+    EPOCHS 0 leaves --epochs to the selection run's best epoch."""
+    settings = code_cell_starting("#@title Training settings")
+    assert 'SELECTION_RUN = ""          #@param {type:"string"}' in settings
+    assert "'--all-clips', '--selection-run'" in settings
+    assert "if not (all_clips and EPOCHS == 0):" in settings
+    for held_out_only in ("'--holdout'", "'--val-clips'", "'--score-every'"):
+        assert settings.count(held_out_only) == 1 and settings.index(held_out_only) > settings.index("else:")

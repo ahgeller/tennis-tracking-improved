@@ -69,3 +69,15 @@ def test_a_missing_record_the_trainer_needs_is_an_error(workspace_dir, tmp_path,
 
 def test_the_default_output_sits_under_the_repository_output_folder():
     assert DEFAULT_OUT.name == "tennis_finetune_colab.zip" and DEFAULT_OUT.parent.name == "output"
+
+
+def test_code_only_holds_the_records_and_the_code_and_nothing_heavy(workspace_dir, tmp_path, capsys):
+    fill_workspace(workspace_dir)
+    out = tmp_path / "code.zip"
+    assert ft.run_cli(["colab-zip", "--code-only", "--out", str(out)]) == 0
+    with zipfile.ZipFile(out) as archive:
+        names = set(archive.namelist())
+    assert {f"{TOP}/clips.csv", f"{TOP}/review_status.json", f"{TOP}/holdouts.json"} <= names
+    assert names >= {f"{TOP}/code/{name}" for name in staged_files()}
+    assert not any(name.startswith((f"{TOP}/videos/", f"{TOP}/labels/", f"{TOP}/models/")) for name in names)
+    assert "tennis_finetune_code.zip" in capsys.readouterr().out

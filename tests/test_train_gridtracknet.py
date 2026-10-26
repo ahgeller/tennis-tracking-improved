@@ -530,7 +530,8 @@ def test_resume_continues_an_interrupted_run_to_the_uninterrupted_result(tmp_pat
     assert checkpoint["optimizer"]["state"] and "momentum_buffer" in checkpoint["optimizer"]["state"][0]
     assert float(checkpoint["model"]["convs.0.bias"][0]) == 2.0 and checkpoint["scaler"] == {}
     with (args.run_dir / "results.csv").open("a", encoding="utf-8", newline="") as handle:
-        handle.write("3,0.1,0.1,1,,,,,,,,,,\n")             # the interruption fell between epoch 3's row and its checkpoint
+        csv.writer(handle).writerow(training.results_row(3, 0.1, 0.1, 1.0, None, None))
+        # ^ the interruption fell between epoch 3's row and its checkpoint
     args, resumed, calls = scripted_run(tmp_path / "parts", ["--epochs", "4"], losses, val_losses[2:], scored[2:], resume=True)
     assert args.resume and calls == [args.run_dir / "last.npz"] * 2
     assert resumed._replace(best_path=whole.best_path) == whole
@@ -654,6 +655,37 @@ def test_pick_winner_records_a_scratch_run_whose_every_epoch_detected_nothing(tm
     assert Path(winner["winner"]) == args.run_dir / "best.npz" and winner["best_epoch"] == 1
     assert winner["metrics"]["recall"] == 0.0 and winner["metrics"]["median_px"] is None
     assert epoch_of(tmp_path / "save.npz") == 1
+
+
+def test_keep_results_through_drops_later_rows_and_fragments(tmp_path):
+    """A results.csv as an interruption can leave it: whole rows past the checkpoint's epoch, and
+    a last row cut short (fewer columns, or an epoch number missing its last digit, which must not
+    pass as an earlier epoch's row) all go; a missing file becomes the header alone."""
+    results = tmp_path / "results.csv"
+    rows = [training.results_row(epoch, 0.5, 0.25, 90.0, None, None) for epoch in range(1, 11)]
+    with results.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(training.RESULTS_COLUMNS)
+        writer.writerows(rows[:9])
+        handle.write("1")                                    # epoch 10's row, cut after its first character
+    training.keep_results_through(results, 9)
+    assert [row["epoch"] for row in results_of(tmp_path)] == [str(epoch) for epoch in range(1, 10)]
+    with results.open("a", encoding="utf-8", newline="") as handle:
+        handle.write(",".join(rows[9][:4]) + "\n")           # epoch 10's row, cut mid-way
+    training.keep_results_through(results, 7)
+    assert [row["epoch"] for row in results_of(tmp_path)] == [str(epoch) for epoch in range(1, 8)]
+    results.unlink()
+    training.keep_results_through(results, 0)
+    assert results.read_text(encoding="utf-8").splitlines() == [",".join(training.RESULTS_COLUMNS)]
+
+
+def test_a_checkpoint_from_elsewhere_is_refused_in_one_line(tmp_path):
+    """A readable torch file without the trainer's fields (a bare state dict, say) is the ValueError
+    --resume reports, not a KeyError traceback."""
+    model = fresh_model(torch.device("cpu"))
+    torch.save(model.state_dict(), tmp_path / "checkpoint.pt")
+    with pytest.raises(ValueError, match="not a checkpoint this trainer wrote"):
+        training.read_checkpoint(tmp_path / "checkpoint.pt", model, None, None)
 
 
 def test_resume_needs_a_checkpoint_and_the_run_it_belongs_to(tmp_path, capsys):

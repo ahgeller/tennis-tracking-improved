@@ -71,7 +71,9 @@ rendering. Outputs are an annotated MP4 and per-frame JSON. It is not a calibrat
   prior on the hints was measured and makes them worse (see the module docstring).
 - `finetune/ft.py`: workflow front door (launchers, script commands;
   `menu.py` is the interactive menu, `commands.py` has the in-process commands,
-  `interpreter.py` the venv hand-over). The rest of the package is four
+  `colab_zip.py` the `colab-zip` command, the one zip
+  `GridTrackNet_FineTune_Colab.ipynb` unpacks, `interpreter.py` the venv
+  hand-over). The rest of the package is four
   subpackages. `finetune/labeling/`: `label_tool.py` (manual edits: the
   actions the key table names, the window and the loop), split into
   `label_session.py` (the one owner of the sitting's state: the rows, the
@@ -108,8 +110,9 @@ rendering. Outputs are an annotated MP4 and per-frame JSON. It is not a calibrat
   agreement the audit and `realign.py` share; `import_data.py` (its importers;
   `import_sources.py` holds what they share) and `realign.py` (with the pure
   solver in `realign_solve.py`), source conversion and temporal realignment. `finetune/training/`:
-  `train_gridtracknet.py` (the training run: its command line, data, epochs and
-  the winner; `finetune/train_gridtracknet.py` at the old path only hands over
+  `train_gridtracknet.py` (the training run: its command line, data, epochs,
+  the per-epoch `checkpoint.pt` that `--resume` continues from, and the winner;
+  `finetune/train_gridtracknet.py` at the old path only hands over
   to it, for the command below), `loop.py` (the loss, one epoch, the validation
   loss and saving weights), `metrics.py` (the detector metric a run is judged
   by and the winner rule: `best.npz` is the epoch the metric prefers, scored after
@@ -179,34 +182,22 @@ runs. `check_parity.py` verifies a frozen Pomona benchmark; the September 7, 202
 worktree fails several of its gates. Do not silently refresh that baseline to
 make a change pass.
 
-## Label review status - October 18, 2026
+## Label review status - October 25, 2026
 
-The user has reviewed, by hand in the label tool:
+Every labelled clip in the workspace is reviewed and finished: the Pomona clip,
+`video1` through `video53`, and every `grid_match` clip with a label file
+(1 to 31 and 36 to 92, including the ones once listed as needing work).
+`finetune/review_status.json` lists all 86 under `verified_clips` and has an
+empty `in_progress_clips`; it is the one record of this, so a clip added later is
+unreviewed until it is added there. The user confirmed this on 2026-10-25 after
+watching `output/label_review_all.mp4`, a zoomed back-to-back pass over every
+label (rendered by a one-off script, not part of the package).
 
-- every video clip: `PomonaPitzer_Women_vs._UCSD-cut-merged-1778697988405` and
-  `video1` through `video53`, including `video3`, `video8`, `video11` and
-  `video12`, which were unreviewed before;
-- every GridTrackNet clip from `grid_match1` through `grid_match31` (1, 4, 7, 8,
-  16, 17, 19, 21, 22, 23, 24, 26, 31).
-
-`grid_match36` is in progress: it is "the one after grid_match31" from
-`review.txt`, and the user may have the label tool open on it, so never write
-its files. The user also said "done 33"; no `grid_match33` exists, so that is
-unresolved - do not guess what it means.
-
-Until the user says otherwise, do not test, compare, tune thresholds, or select
-models using `grid_match36` or the clips `review.txt` still lists as needing
-work: `grid_match37`, `grid_match40`, `grid_match47`, `grid_match49`,
-`grid_match50`, `grid_match55`, `grid_match73`, `grid_match78`, `grid_match85`,
-`grid_match86`, `grid_match87`, `grid_match89`, `grid_match92`. The remaining
-GridTrackNet clips above 31 (38, 42, 43, 44, 53) were never on that list, but
-the user has not said they are reviewed either. Reviewed clips may be used for
-measurement and validation; video13 and up remain the standard set.
-
-`review.txt` holds the user's original notes. These rules concern evaluation; do
-not silently rewrite labels or training exclusions as part of a review. Label
-files for grid_match and video13+ clips are gitignored, so back them up before
-any bulk change.
+Any reviewed clip may be used for measurement, validation and model selection;
+video13 and up remain the standard set. These rules concern evaluation; do not
+silently rewrite labels or training exclusions as part of a review. Label files
+for grid_match and video13+ clips are gitignored, so back them up before any
+bulk change.
 
 ## Data and change discipline
 
