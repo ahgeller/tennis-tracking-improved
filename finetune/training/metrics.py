@@ -1,6 +1,17 @@
 """The detector metric a training run is judged by: the raw GridTrackNet prepass over whole
 clips scored as ``evaluate_archive.py`` scores it (``DetectorMetrics``: recall / wrong-object /
-false-alarm), and the rule that says when a candidate beats the incumbent.
+false-alarm), and the two rules read from it.
+
+``epoch_score`` ranks the epochs of one run: recall minus the wrong-object rate minus the
+false-alarm rate, the three rates at equal weight (every correct ball is worth one, every
+wrong-object output and every false alarm costs one). ``best.npz`` is the scored epoch with the
+highest score, a scalar with no anchor, so an early epoch with odd rates (a scratch run's first
+scored epoch detected nothing: 0 / 0 / 0) cannot bar every later one, and a little recall is
+traded for a large false-alarm drop (R0's epoch 9, 0.936 / 0.007 / 0.230, beats its epoch 1,
+0.938 / 0.011 / 0.305). ``promotion_improves`` is the other question, asked once at the end of a
+fine-tune: do the best epoch's weights beat the weights it started from? It is a guard rail,
+asymmetric and anchored on the incumbent: a fine-tune with more wrong-object outputs or false
+alarms than its starting weights (beyond METRIC_SLACK) is not shipped, whatever its recall.
 
 The prepass is the tracker's own (``GridTrackNetBallDetector.detect_clip`` through
 ``finetune.data.detect``, the path ``evaluate_archive.py`` takes too), so the winner is judged on
@@ -59,9 +70,18 @@ def false_alarm_units(weights: Path, clips: List[Clip], samples: Sequence[Traini
                    for frame, point in zip(sample["indices"], sample["points"]))}
 
 
+def epoch_score(metrics: DetectorMetrics) -> float:
+    """The scalar an epoch is ranked by: recall minus the wrong-object rate minus the false-alarm
+    rate. Always finite: the three rates are shares (0 on an empty set), unlike the pixel
+    distances, which are NaN when nothing was detected and are not read here."""
+    return metrics.recall - metrics.wrong - metrics.false_alarm
+
+
 def promotion_improves(candidate: DetectorMetrics, incumbent: DetectorMetrics) -> bool:
     """Does the candidate beat the incumbent: more correct ball with no more wrong-object or
-    false-alarm outputs (within METRIC_SLACK, 1 frame in 200)? Asymmetric: a tie keeps the incumbent."""
+    false-alarm outputs (within METRIC_SLACK, 1 frame in 200)? Asymmetric: a tie keeps the
+    incumbent. The fine-tune's guard rail against its starting weights (``pick_winner``), not the
+    rule the epochs of a run are ranked by (``epoch_score``)."""
     if candidate.wrong > incumbent.wrong + METRIC_SLACK:
         return False
     if candidate.false_alarm > incumbent.false_alarm + METRIC_SLACK:

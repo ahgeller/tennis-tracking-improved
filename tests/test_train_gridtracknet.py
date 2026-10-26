@@ -3,8 +3,10 @@ path - which clips train, the per-clip frame cache, and the flip augmentation's 
 synthetic clips under tmp_path. No GPU, no real label or video."""
 import csv
 import json
+import math
 import os
 import random
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -377,7 +379,8 @@ def test_new_augmentations_draw_after_the_old_ones_so_old_runs_reproduce(tmp_pat
 
 def scripted_run(tmp_path, argv, train_losses, val_losses, scored, scoring=True, validate=True, resume=False):
     """``fit`` on a fresh CPU model with the epoch losses scripted and the held-out metric answered
-    from `scored` (recall per scored call, wrong 0); returns (args, selection, the metric calls).
+    from `scored` (per scored call: a recall, wrong and false alarm 0, or a (recall, wrong,
+    false_alarm) tuple); returns (args, selection, the metric calls).
     `scoring` False runs without scoring and `validate` False without a validation loader. `resume`
     continues the run dir's checkpoint instead of starting over: `train_losses` is indexed by
     epoch, so it stays the whole list, while `val_losses` and `scored` are the epochs left."""
@@ -398,7 +401,8 @@ def scripted_run(tmp_path, argv, train_losses, val_losses, scored, scoring=True,
 
     def score(weights):
         calls.append(weights)
-        return training.metrics_of(scored[len(calls) - 1], 0.0)
+        answer = scored[len(calls) - 1]
+        return training.metrics_of(*(answer if isinstance(answer, tuple) else (answer, 0.0)))
 
     def train_epoch(model, *_):
         with torch.no_grad():
@@ -552,6 +556,104 @@ def test_resume_at_the_last_epoch_runs_nothing_and_a_lower_epoch_count_is_refuse
     assert [row["epoch"] for row in results_of(args.run_dir)] == ["1", "2"] and epoch_of(args.run_dir / "last.npz") == 2
     with pytest.raises(ValueError, match="below the checkpoint's epoch 2"):
         scripted_run(tmp_path / "run", ["--epochs", "1"], [0.6, 0.4], [], [], resume=True)
+
+
+NOTHING = (0.0, 0.0, 0.0)                 # a scored epoch that detected nothing: recall, wrong, false alarm
+EARLY_SCRATCH = (0.050, 0.276, 0.236)     # the Colab scratch run's epoch 4: finds a little, costs more
+R0_EPOCH_1, R0_EPOCH_9 = (0.938, 0.011, 0.305), (0.936, 0.007, 0.230)
+
+
+def test_a_zero_detection_first_epoch_is_overtaken_by_a_later_epoch_that_finds_more_than_it_costs(tmp_path):
+    """The scratch run's failure: the first scored epoch detected nothing and, as the incumbent,
+    promotion_improves let nothing beat it. By epoch_score it is 0, an epoch costing more than it
+    finds ranks below it, and the first epoch worth something takes best.npz."""
+    args, selection, _ = scripted_run(tmp_path, ["--epochs", "3"], [0.6, 0.4, 0.3], [0.5, 0.3, 0.2],
+                                      [NOTHING, EARLY_SCRATCH, (0.5, 0.05, 0.1)])
+    assert not promotion_improves(training.metrics_of(0.5, 0.05, 0.1), training.metrics_of(*NOTHING))
+    assert selection.best_epoch == 3 and selection.best_metrics == training.metrics_of(0.5, 0.05, 0.1)
+    assert epoch_of(args.run_dir / "best.npz") == 3
+    assert [row["recall"] for row in results_of(args.run_dir)] == ["0.000000", "0.050000", "0.500000"]
+
+
+def test_a_little_less_recall_with_far_fewer_false_alarms_wins_and_a_tie_keeps_the_earlier_epoch(tmp_path):
+    """R0's question: epoch 1 had the most recall, epoch 9 far fewer false alarms. The scalar rule
+    takes the false-alarm drop, and the repeat of that result at epoch 3 does not move best.npz."""
+    args, selection, _ = scripted_run(tmp_path, ["--epochs", "3"], [0.6, 0.4, 0.3], [0.5, 0.3, 0.2],
+                                      [R0_EPOCH_1, R0_EPOCH_9, R0_EPOCH_9])
+    assert selection.best_epoch == 2 and epoch_of(args.run_dir / "best.npz") == 2
+    assert selection.best_metrics == training.metrics_of(*R0_EPOCH_9)
+
+
+def test_every_scored_epochs_weights_are_kept_unless_no_keep_epochs(tmp_path):
+    """epochs/epoch_NNN.npz for the scored epochs only (2 and 3 of a --score-every 2 run of three),
+    each the file its name says; --no-keep-epochs writes none."""
+    (tmp_path / "kept").mkdir(), (tmp_path / "dropped").mkdir()
+    args, _, _ = scripted_run(tmp_path / "kept",["--epochs", "3", "--score-every", "2"], [0.6, 0.4, 0.3],
+                              [0.5, 0.3, 0.2], [0.9, 0.8])
+    kept = args.run_dir / training.EPOCHS_DIR
+    assert sorted(path.name for path in kept.iterdir()) == ["epoch_002.npz", "epoch_003.npz"]
+    assert epoch_of(kept / "epoch_002.npz") == 2 and epoch_of(kept / "epoch_003.npz") == 3
+    assert training.epoch_weights(args.run_dir, 12) == kept / "epoch_012.npz"
+    args, _, _ = scripted_run(tmp_path / "dropped", ["--epochs", "3", "--no-keep-epochs"], [0.6, 0.4, 0.3],
+                              [0.5, 0.3, 0.2], [0.9, 0.8, 0.7])
+    assert not args.keep_epochs and not (args.run_dir / training.EPOCHS_DIR).exists()
+    assert epoch_of(args.run_dir / "best.npz") == 1
+
+
+def test_resume_derives_the_best_epoch_from_results_csv_not_from_the_checkpoint(tmp_path, capsys):
+    """A checkpoint whose stored best is another rule's choice (here epoch 1 by hand, over a
+    results.csv that ranks epoch 2 first) is corrected on resume: the best epoch comes from the
+    rows, best.npz is made the kept epoch_002.npz, and the run carries on from there."""
+    (tmp_path / "run").mkdir()
+    args, first, _ = scripted_run(tmp_path / "run", ["--epochs", "3"], [0.6, 0.4, 0.3, 0.2], [0.5, 0.3, 0.2],
+                                  [0.8, 0.9, 0.7])
+    assert first.best_epoch == 2
+    checkpoint = args.run_dir / training.CHECKPOINT
+    state = torch.load(checkpoint, weights_only=True)
+    state["best_epoch"], state["best_metrics"] = 1, training.metrics_of(0.8, 0.0)._asdict()
+    torch.save(state, checkpoint)
+    shutil.copy(args.run_dir / "last.npz", args.run_dir / "best.npz")              # the other rule's best.npz, epoch 3
+    assert training.best_scored_epoch(args.run_dir / "results.csv") == (2, training.metrics_of(0.9, 0.0))
+    capsys.readouterr()
+    args, resumed, calls = scripted_run(tmp_path / "run", ["--epochs", "4"], [0.6, 0.4, 0.3, 0.2], [0.1], [0.85],
+                                        resume=True)
+    assert calls == [args.run_dir / "last.npz"] and resumed.best_epoch == 2
+    assert resumed.best_metrics == training.metrics_of(0.9, 0.0) and epoch_of(args.run_dir / "best.npz") == 2
+    assert "[train] best epoch so far by results.csv: 2 (the checkpoint said 1); best.npz is now that epoch" in capsys.readouterr().out
+    assert torch.load(checkpoint, weights_only=True)["best_epoch"] == 2
+    assert training.best_scored_epoch(tmp_path / "none.csv") == (0, None)
+
+
+def test_resume_of_a_run_anchored_on_a_zero_epoch_without_kept_weights_takes_the_first_real_epoch(tmp_path, capsys):
+    """The run on Colab: checkpoint from the incumbent rule, best epoch 2 with zero metrics, no
+    epochs/ folder. Resumed, the zero epoch stays best (results.csv says so, and there is no kept
+    file to copy) until a later epoch scores more than it costs, which then takes best.npz."""
+    (tmp_path / "run").mkdir()
+    args, first, _ = scripted_run(tmp_path / "run", ["--epochs", "2", "--score-every", "2"], [0.6, 0.4, 0.3, 0.35, 0.3, 0.25],
+                                  [0.5, 0.3], [NOTHING])
+    assert first.best_epoch == 2 and epoch_of(args.run_dir / "best.npz") == 2
+    shutil.rmtree(args.run_dir / training.EPOCHS_DIR)
+    args, resumed, _ = scripted_run(tmp_path / "run", ["--epochs", "4", "--score-every", "2"],
+                                    [0.6, 0.4, 0.3, 0.35, 0.3, 0.25], [0.2, 0.25], [EARLY_SCRATCH], resume=True)
+    assert resumed.best_epoch == 2 and epoch_of(args.run_dir / "best.npz") == 2        # epoch 4 costs more than it finds
+    assert "best epoch so far by results.csv" not in capsys.readouterr().out
+    args, resumed, _ = scripted_run(tmp_path / "run", ["--epochs", "6", "--score-every", "2"],
+                                    [0.6, 0.4, 0.3, 0.35, 0.3, 0.25], [0.2, 0.2], [(0.5, 0.05, 0.1)], resume=True)
+    assert resumed.best_epoch == 6 and epoch_of(args.run_dir / "best.npz") == 6
+    assert [row["recall"] for row in results_of(args.run_dir)] == ["", "0.000000", "", "0.050000", "", "0.500000"]
+
+
+def test_pick_winner_records_a_scratch_run_whose_every_epoch_detected_nothing(tmp_path):
+    """Rates of zero and NaN pixel distances (no detection, no distance): winner.json is written
+    with null for the distances, the best epoch is the winner and nothing crashes."""
+    args, selection, _ = scripted_run(tmp_path, ["--epochs", "1", "--from-scratch", "--save", str(tmp_path / "save.npz")],
+                                      [0.6], [0.5], [NOTHING])
+    nothing = DetectorMetrics(100, 0.0, 0.0, 1.0, 100, 0.0, math.nan, math.nan)
+    training.pick_winner(args, [], ["video10"], selection._replace(best_metrics=nothing), torch.device("cpu"))
+    winner = json.loads((args.run_dir / "winner.json").read_text(encoding="utf-8"))
+    assert Path(winner["winner"]) == args.run_dir / "best.npz" and winner["best_epoch"] == 1
+    assert winner["metrics"]["recall"] == 0.0 and winner["metrics"]["median_px"] is None
+    assert epoch_of(tmp_path / "save.npz") == 1
 
 
 def test_resume_needs_a_checkpoint_and_the_run_it_belongs_to(tmp_path, capsys):

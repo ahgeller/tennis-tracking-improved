@@ -1,5 +1,6 @@
-"""finetune/training/metrics.py on its own: the winner rule, and the whole-clip measurement on a
-synthetic clip through the tracker's own prepass with a stand-in decoder."""
+"""finetune/training/metrics.py on its own: the epoch rule, the fine-tune guard rail, and the
+whole-clip measurement on a synthetic clip through the tracker's own prepass with a stand-in decoder."""
+import math
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,7 +9,8 @@ import torch
 from finetune.data.detector_metrics import DetectorMetrics
 from finetune.data.workspace import VideoMeta
 from finetune.training import metrics
-from finetune.training.metrics import FALSE_ALARM_CONF, METRIC_SLACK, false_alarm_units, promotion_improves, score_weights
+from finetune.training.metrics import (FALSE_ALARM_CONF, METRIC_SLACK, epoch_score, false_alarm_units,
+                                       promotion_improves, score_weights)
 from tennis_tracker.engines import ball_detectors
 from tests._helpers import Capture, cpu_detector, metric_probe
 
@@ -23,6 +25,20 @@ def test_promotion_improves_wants_more_recall_without_more_wrong_or_false_alarms
     assert promotion_improves(rates(0.90, 0.01 + METRIC_SLACK), rates(0.85, 0.01))  # within the slack
     assert not promotion_improves(rates(0.95, 0.05), rates(0.85, 0.01))
     assert not promotion_improves(rates(0.95, 0.01, 0.5), rates(0.85, 0.01, 0.1))
+
+
+def test_epoch_score_is_recall_less_wrong_less_false_alarm_and_needs_no_incumbent():
+    """The three rates at equal weight: R0's epoch 9 (a little less recall, far fewer false
+    alarms) outranks its epoch 1, which promotion_improves would never have let it do; an epoch
+    that detected nothing scores 0, below any epoch that finds more than it costs; and the score
+    stays finite when the pixel distances are NaN (nothing detected, no distance to measure)."""
+    assert epoch_score(rates(0.936, 0.007, 0.230)) == 0.936 - 0.007 - 0.230
+    assert epoch_score(rates(0.936, 0.007, 0.230)) > epoch_score(rates(0.938, 0.011, 0.305))
+    assert not promotion_improves(rates(0.936, 0.007, 0.230), rates(0.938, 0.011, 0.305))
+    nothing = DetectorMetrics(100, 0.0, 0.0, 1.0, 100, 0.0, math.nan, math.nan)
+    assert epoch_score(nothing) == 0.0 and not math.isnan(epoch_score(nothing))
+    assert epoch_score(rates(0.050, 0.276, 0.236)) < epoch_score(nothing) < epoch_score(rates(0.5, 0.1, 0.1))
+    assert not promotion_improves(rates(0.5, 0.1, 0.1), nothing)       # the incumbent rule: anchored on the zero epoch
 
 
 def test_score_weights_runs_the_trackers_prepass_with_the_threshold_as_its_confidence():

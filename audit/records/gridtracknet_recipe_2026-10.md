@@ -52,3 +52,17 @@ Full tables, the cell histogram and the per-source reading are in
   The checkpoint rule kept epoch 1 (highest recall) although false alarms fell by 0.075 by
   epoch 9; whether the rule should trade a little recall for a large false-alarm drop is an open
   question for the scratch retrain.
+- Settled on 2026-10-25, after the scratch run on Colab showed the incumbent rule failing
+  outright: its first scored epoch detected nothing (recall 0, wrong 0, false alarm 0), became the
+  incumbent, and `promotion_improves` (more recall with wrong and false alarm not up by more than
+  METRIC_SLACK) let nothing overtake it (epoch 4, 0.050 / 0.276 / 0.236, lost to "best epoch 2"),
+  so `best.npz` would have stayed a detector that detects nothing for all 80 epochs and been
+  saved as the winner. An incumbent-anchored rule is wrong for epoch selection in general: an
+  early epoch with odd rates anchors every later one. The epochs of a run are now ranked by the
+  scalar `epoch_score` = recall - wrong - false_alarm (equal weight: a correct ball is worth one,
+  a wrong-object output or a false alarm costs one; a tie keeps the earlier epoch), which also
+  answers the R0 question above: epoch 9 (0.936 / 0.007 / 0.230, score 0.699) now beats epoch 1
+  (0.938 / 0.011 / 0.305, score 0.622). `promotion_improves` remains the fine-tune guard rail at
+  the end of a run (the best epoch against the starting weights), where an anchor is the point.
+  Every scored epoch's weights are kept as `epochs/epoch_NNN.npz` so a run can be re-ranked or
+  re-scored after the fact, and a resumed run re-derives its best epoch from `results.csv`.
