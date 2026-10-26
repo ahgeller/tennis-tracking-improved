@@ -12,12 +12,7 @@ def test_assets_sit_under_the_repository_models_folder():
         assert asset.parent == paths.MODELS and asset.is_absolute()
 
 
-def test_config_defaults_and_the_workspace_use_the_same_files():
-    from finetune.data import workspace
-    from evaluation import archive as evaluate_archive
-
+def test_config_defaults_use_the_same_files():
     cfg = Config()
     assert (cfg.model_path, cfg.player_model_path, cfg.court_model_path) == (
         str(paths.GRIDTRACKNET_WEIGHTS), str(paths.PLAYER_ENGINE), str(paths.COURT_ENGINE))
-    assert workspace.current().repo_weights == paths.GRIDTRACKNET_WEIGHTS
-    assert evaluate_archive.MODELS["gridtracknet"] == paths.GRIDTRACKNET_WEIGHTS

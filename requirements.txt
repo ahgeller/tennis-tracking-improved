@@ -1,4 +1,4 @@
-# Runtime packages imported by the tracker, the fine-tuning workspace and the tests.
+# Runtime packages imported by the tracker and the tests.
 #
 # Pinned versions are the ones the October 2026 review ran with on Python
 # 3.10.19 / Windows / RTX 5080 (audit/records/snapshot.json, "versions").
@@ -10,21 +10,13 @@
 #     the PyTorch index for your CUDA version first, e.g.
 #       pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
 #   - FFmpeg (optional, faster NVENC/libx264 rendering) is an external binary.
-#   - The label tool (finetune/labeling/label_tool.py, ft.py label) needs an
-#     OpenCV whose windows are drawn by Qt, and refuses to start otherwise
-#     (finetune/labeling/label_cli.py). pip's Windows opencv-python wheel is
-#     not that build (it draws with WIN32UI), so for labeling, install
-#     conda-forge's OpenCV instead of the pin below:
-#       pip uninstall opencv-python
-#       conda install -c conda-forge opencv
-#     The tracker, evaluation and training only need cv2 itself, so pip's
-#     opencv-python is enough for them. finetune/ft.py looks for a conda
-#     environment with the Qt build (finetune/interpreter.py).
+#   - The tracker and evaluation only need cv2 itself, so pip's opencv-python is enough.
+#     (The label tool on the train branch needs conda-forge's Qt build instead.)
 
 # --- Required ------------------------------------------------------------------
-torch==2.10.0             # CUDA build; GridTrackNet inference, CUDA motion masks, training
+torch==2.10.0             # CUDA build; GridTrackNet inference, CUDA motion masks
 numpy==1.26.4
-opencv-python==4.9.0.*    # tracker, evaluation, training; the label tool needs conda-forge opencv (above)
+opencv-python==4.9.0.*    # tracker and evaluation
 # TensorRT engines (models/*.engine) are specific to the GPU and TensorRT
 # version that built them; rebuild with build_trt_engines.py after upgrading.
 tensorrt==10.15.1.29      # player and court engine backends

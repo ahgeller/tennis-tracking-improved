@@ -1,2 +1,0 @@
-# clips the trainer skips by default (ft.py check --audit --fix writes these; edit freely)
-# 2026-09-03: match26, 49, 50 and 55 were re-timed against the right video and taken off this list

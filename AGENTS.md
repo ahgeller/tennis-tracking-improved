@@ -2,10 +2,15 @@
 
 ## Purpose and entry points
 
-This is an offline GPU tennis-video tracker, plus a labeling and GridTrackNet
-fine-tuning workspace. `clean_tracker.py` runs detection, selection and optional
-rendering. Outputs are an annotated MP4 and per-frame JSON. It is not a calibrated
-3D ball-flight or line-calling system.
+This is an offline GPU tennis-video tracker. `clean_tracker.py` runs detection,
+selection and optional rendering. Outputs are an annotated MP4 and per-frame JSON.
+It is not a calibrated 3D ball-flight or line-calling system.
+
+The labelling and GridTrackNet fine-tuning workspace (`finetune/`, its launchers,
+the Colab notebook, the hand-corrected labels, and the scorers over those labels:
+`evaluate_archive.py`, `score_court_events.py`, `track_breaks.py`) lives on the
+`train` branch, which carries this tracker as well. This branch, `main`, is the
+tracker alone; do not add workspace code here.
 
 - `tennis_tracker/gridtracknet.py`: PyTorch port and NPZ loader. Five raw RGB
   frames at 768x432 become 15 input channels. Output is five confidence/x-offset/
@@ -22,9 +27,8 @@ rendering. Outputs are an annotated MP4 and per-frame JSON. It is not a calibrat
   backends. `player_detector.py`: TensorRT players with ByteTrack association.
   `court_detector.py`: court keypoints every N frames, last good result cached.
   `tennis_tracker/paths.py`: the model asset paths every consumer (Config
-  defaults, scripts, the workspace) spells once. `headless.py`: the one Config
-  and run for a caller that wants the tracker's answer and no video
-  (`evaluation/archive.py`, `pretrack.py`).
+  defaults, scripts) spells once. `headless.py`: the one Config and run for a
+  caller that wants the tracker's answer and no video.
 - `tennis_tracker/pipeline.py`: orders the stages, calls the selector and, with
   `--court` (`Config.court_events`, implied by the minimap), the court events,
   reports. `run_context.py`: data the stages pass each other (`CourtEvents`:
@@ -51,92 +55,11 @@ rendering. Outputs are an annotated MP4 and per-frame JSON. It is not a calibrat
   and timing report.
 - `ball_in_play_selector/`: candidate association (`association.py`), Kalman
   state, track scoring, timeline selection, bounded recovery, trajectory refit.
-- `finetune/refiner/refine.py`: model-free sub-pixel ball suggestions for the label tool
-  (candidates chosen by trajectory, trust score); `motion_blobs.py` measures what moved
-  on one frame (the change map, its motion centroid and blobs).
-- `finetune/refiner/cnn_refiner.py`: small CNN, trained only on frames the user reviewed, that places
-  those suggestions where the user clicks (`refiner_training.py` runs the training: the folds,
-  the "sure" threshold and the promotion check, on crops `refiner_crops.py` gathers, leaving out
-  `exclude.txt` clips and the clips `review_status.json` lists as in progress (`in_progress_clips`),
-  and networks `refiner_fitting.py` fits and scores; `hints.py`
-  is their command line, the script `ft.py hints` runs). Versions live in
-  `finetune/models/refiner/` (all kept, `current.txt` names the active one); retrain with
-  `ft.py hints train` or menu option 10. Its self-check decides "trusted" (threshold set on
-  folds of clips it never saw); refine.py still finds the ball and decides ball/no ball.
-  In the label tool an unreviewed frame's suggestion is the mark SPACE takes (sure ones
-  always, unsure ones within 3 px of the draft; see `Suggestions.offer_for` in
-  `label_hints.py` for the measurement);
-  `x` keeps the draft, `y` takes a hint beside a reviewed label. `ft.py hints sheet <clip>`
-  (`refiner_sheet.py`) renders a zoomed PNG of where two versions disagree, for judging marks by eye. A trajectory
-  prior on the hints was measured and makes them worse (see the module docstring).
-- `finetune/ft.py`: workflow front door (launchers, script commands;
-  `menu.py` is the interactive menu, `commands.py` has the in-process commands,
-  `colab_zip.py` the `colab-zip` command, the one zip
-  `GridTrackNet_FineTune_Colab.ipynb` unpacks, `interpreter.py` the venv
-  hand-over). The rest of the package is four
-  subpackages. `finetune/labeling/`: `label_tool.py` (manual edits: the
-  actions the key table names, the window and the loop), split into
-  `label_session.py` (the one owner of the sitting's state: the rows, the
-  cursor and its walk, the view geometry, the toggles, the suggestions, which
-  the views and handlers read and write directly),
-  `label_cli.py` (its command line), `label_store.py` (a clip's rows and
-  sidecars), `label_source.py` (one clip of a labelling run, and the prefetcher
-  that decodes ahead of the cursor), `label_window.py` (window plumbing and the
-  key tables), `label_cursor.py` (parking the OS pointer on the ball),
-  `label_keys.py` (what the keys do), `label_mouse.py` (what the mouse does),
-  `label_frame_view.py` (the single-frame picture and HUD), `label_grid.py` and
-  `label_sheet.py` (the grid and trajectory-sheet views, each owning its state,
-  picture and keys), `label_draw.py` (the filters, marks and text every view
-  draws with) and `label_hints.py` (the suggestions). `finetune/refiner/`: the
-  suggestion model above (`refine.py` with `motion_blobs.py`, `cnn_refiner.py` with its torch network class in
-  `refiner_network.py`, `refiner_training.py` with `refiner_crops.py` and `refiner_fitting.py`,
-  `refiner_sheet.py`, `hints.py`). `finetune/data/`: `labels.py`, the label
-  file format; `label_check.py`, checks a label file against its video's facts;
-  `label_audit.py`, checks labels against the raw detector; `label_flags.py`, the frames an
-  audit flagged for a person (the flag sidecar the label tool and the menu read); `detect.py`,
-  the raw GridTrackNet prepass over one clip (torch only when a detector is built), which
-  the audit, `realign.py`, `pretrack.py`, `evaluation/archive.py` and the trainer's winner
-  metric all run; `bounce_labels.py`, the landing labels (`labels/<clip>_bounces.csv`, the
-  frames where the ball landed, `frame_###.5` for a landing between two frames, points
-  optional) the label tool's `/` key writes and the court-event scorer reads;
-  `workspace.py`, where the workspace keeps things and a clip's video
-  facts, and the one place `clips.csv` and `exclude.txt` are read and written
-  (`TENNIS_WORKSPACE` relocates the workspace); `detector_metrics.py`, the detector metric (`DetectorMetrics`);
-  `data_policy.py`, which clips may be trained, validated or scored on;
-  `holdouts.py`, the named held-out sets of whole recordings in `finetune/holdouts.json`
-  (`mixed_v1`: prof games 4 and 7, video1 to 10 and three grid matches, 24 clips), which
-  the trainer's `--holdout NAME` holds out and the evaluator's `--holdout NAME` scores;
-  `fileio.py`, atomic workspace writes; `alignment.py`, the one label-vs-detector
-  agreement the audit and `realign.py` share; `import_data.py` (its importers;
-  `import_sources.py` holds what they share) and `realign.py` (with the pure
-  solver in `realign_solve.py`), source conversion and temporal realignment. `finetune/training/`:
-  `train_gridtracknet.py` (the training run: its command line, data, epochs,
-  the per-epoch `checkpoint.pt` that `--resume` continues from, and the winner;
-  `finetune/train_gridtracknet.py` at the old path only hands over
-  to it, for the command below), `loop.py` (the loss, one epoch, the validation
-  loss and saving weights), `metrics.py` (the detector metric a run is judged
-  by and the winner rule: `best.npz` is the epoch the metric prefers, scored after
-  every `--score-every` epoch, and `false_alarm_units`, the hard negatives), `clips.py`
-  (which clips it trains on and holds out: `--val-clips`, `--holdout NAME`, or nothing
-  with `--all-clips`), `frame_cache.py` (the per-clip cache of frames and training
-  units: lossless 768x432 PNGs through `gridtracknet.resize_to_model`, the tracker's
-  own resize, keyed on the video, about 8 GB for the 64 trainable clips, measured
-  7.9 GB), `dataset.py`
-  (targets, the named augmentations behind `--augment`, the Dataset and the sampler
-  with `--oversample-absent` and `--oversample-false-alarms`) and `pretrack.py` (drafts).
-  `audit/records/gridtracknet_recipe_2026-10.md` is the ledger of the recipe runs.
 - `evaluation/`: `validate.py` scores a tracking JSON against annotations in native
-  pixels (`check_parity` freezes its numbers), `archive.py` scores the detector or
-  the pipeline on workspace clips with `finetune/data/detector_metrics.py` (`pipeline_score.py`
-  scores one pipeline run's clip; raw mode also prints a `macro` per-clip-mean line, one
-  `source=<name>` line per source, the count beside each false-alarm rate and, with
-  `--cell-histogram`, recall by position within the grid cell), `court_events_score.py`
-  scores a `--court` pipeline run's landings against the landing labels (tiers, a 0.1 s
-  match, `--compare`, and `--recompute` to rerun the event stages on a run's frames without
-  the GPU), `parity.py` is the Pomona gate, `compare_eval_logs.py` sets two evaluator logs
-  side by side and `track_breaks.py` buckets a pipeline run's misses by cause.
-  `validate_tracking.py`, `evaluate_archive.py`, `score_court_events.py`, `track_breaks.py`
-  and `check_parity.py` at the root are thin entry points to them.
+  pixels (`check_parity` freezes its numbers); `parity.py` is the Pomona gate.
+  `validate_tracking.py` and `check_parity.py` at the root are thin entry points
+  to them.
+- `build_trt_engines.py`: YOLO checkpoint to ONNX to TensorRT engine.
 
 ## Environment and commands
 
@@ -148,88 +71,51 @@ environment, not copy this user-specific path into application code.
 Runtime dependencies include CUDA PyTorch, NumPy, OpenCV and TensorRT;
 BoxMOT supplies player tracking. FilterPy is not one: the selector's Kalman filter
 is NumPy (`ball_in_play_selector/physics.py`), and `tests/test_ball_kalman.py` only
-compares against FilterPy when it is installed. pip's `opencv-python` serves the
-tracker, but the label tool needs conda-forge's Qt build of OpenCV (see
-`requirements.txt`). CatBoost is needed for `--court`. Ultralytics is
-used by engine export. FFmpeg/NVENC can accelerate rendering. Versions and model/
-source hashes for the review are in `audit/records/snapshot.json`. There is no complete
-locked installation manifest. TensorRT engines may be GPU/version specific.
+compares against FilterPy when it is installed. CatBoost is needed for `--court`.
+Ultralytics is used by engine export. FFmpeg/NVENC can accelerate rendering.
+Versions and model/source hashes for the review are in `audit/records/snapshot.json`.
+There is no complete locked installation manifest. TensorRT engines may be
+GPU/version specific.
 
 ```powershell
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m pytest -q
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --self-test
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' finetune/train_gridtracknet.py --self-test
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --no-video --tracking-json output/new_review_tracking.json
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --court --no-video --tracking-json output/new_review_court_events.json
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode raw --clips video13
 ```
 
 `python -m pytest -q` (pytest required) runs every test: all suites live in
 `tests/` (`pytest.ini` sets `testpaths` and puts the root on the import path),
 use synthetic inputs only and need no GPU. `clean_tracker.py --self-test` runs
 the selector, court-event, ROI and GridTrackNet modules from `tests/` through
-pytest; `train_gridtracknet.py --self-test` is also run by
-`tests/test_train_gridtracknet.py`. Put new tests in `tests/` as plain pytest
-functions (fixtures and `parametrize`, not `unittest.TestCase`), shared synthetic
-fixtures in `tests/_helpers.py`. `audit/` keeps the review's reports and
-verification scripts; `audit/records/` holds their logs and results, and
+pytest. Put new tests in `tests/` as plain pytest functions (fixtures and
+`parametrize`, not `unittest.TestCase`), shared synthetic fixtures in
+`tests/_helpers.py`. `audit/` keeps the review's reports and verification
+scripts; `audit/records/` holds their logs and results, and
 `audit/records/review_checks_2026-09.py.txt` is the September 2026 defect
 reproduction script, kept as text: it no longer runs.
 
-Always specify `--archive finetune` for workspace evaluation: the evaluator can
-otherwise prefer a separate Desktop archive. Use distinct output paths for new
-runs. `check_parity.py` verifies a frozen Pomona benchmark; the September 7, 2026
-worktree fails several of its gates. Do not silently refresh that baseline to
-make a change pass.
+Use distinct output paths for new runs. `check_parity.py` verifies a frozen Pomona
+benchmark; the September 7, 2026 worktree fails several of its gates. Do not
+silently refresh that baseline to make a change pass.
 
-## Label review status - October 25, 2026
-
-Every labelled clip in the workspace is reviewed and finished: the Pomona clip,
-`video1` through `video53`, and every `grid_match` clip with a label file
-(1 to 31 and 36 to 92, including the ones once listed as needing work).
-`finetune/review_status.json` lists all 86 under `verified_clips` and has an
-empty `in_progress_clips`; it is the one record of this, so a clip added later is
-unreviewed until it is added there. The user confirmed this on 2026-10-25 after
-watching `output/label_review_all.mp4`, a zoomed back-to-back pass over every
-label (rendered by a one-off script, not part of the package).
-
-Any reviewed clip may be used for measurement, validation and model selection;
-video13 and up remain the standard set. These rules concern evaluation; do not
-silently rewrite labels or training exclusions as part of a review. Label files
-for grid_match and video13+ clips are gitignored, so back them up before any
-bulk change.
-
-## Data and change discipline
-
-Label CSVs use `frame_###,ball_x,ball_y`, native image pixels, zero-based source
-frame indices, and a top-right sentinel for invisible balls. Labels on 60 FPS
-clips may use either odd or even phase. Missing labels are not absent-ball
-labels. Reviewed, edited and suspect flags live in sidecar JSON files.
-
-Preserve hand edits, phase, source mapping and backups. The worktree already had
-uncommitted edits to training/labeling tools, labels, manifests and Config before
-this review. Do not revert those or promote/retrain weights as incidental cleanup.
-`clips.csv` notes, `exclude.txt` and review sidecars convey different things:
-passing the format checker does not establish annotation correctness.
-
-Labels clicked in the label tool before commit 307f632 (2026-10-18) sat about half a
-pixel up-left of the ball; commit 8c36b5e moved them back (backups:
-`<csv>.before_halfpixel_fix`). Do not apply that correction again.
+## Change discipline
 
 Keep RGB detector inputs unchanged unless an experiment explicitly changes the
 model contract. Keep observations distinguishable from fitted positions. Short
 unsupported gaps should remain absent. Physics is presently an image-space
 prior; do not present its extrapolations as measured 3D positions or speeds.
 
+Do not promote or retrain weights as incidental cleanup; the weights in `models/`
+are produced on the `train` branch. Architecture experiments remain separate from
+correctness fixes; do not promote a model implicitly.
+
 See `audit/PROJECT_REVIEW.md` before modifying evaluation, prepass publication,
-label frame identity, realignment pins, motion masks or physics.
-`audit/records/review_checks_2026-09.py.txt` records how the September 2026
-defects were reproduced; its pointer to `tests/test_fixes.py` is out of date: the
-tests that assert the fixes live next to each module's tests
-(`tests/test_<module>.py`). Convert relevant checks to desired-behavior
-regression tests when making fixes. The user has now authorized
-fixing the reviewed defects and running validation. Architecture experiments
-remain separate from the correctness fixes; do not promote a model implicitly.
+motion masks or physics. `audit/records/review_checks_2026-09.py.txt` records
+how the September 2026 defects were reproduced; its pointer to
+`tests/test_fixes.py` is out of date: the tests that assert the fixes live next
+to each module's tests (`tests/test_<module>.py`). Convert relevant checks to
+desired-behavior regression tests when making fixes.
 
 The disabled manual perspective scaling, homography gravity, color gate,
 flicker suppression and raw-component experiments were subsequently removed.

@@ -35,8 +35,7 @@ unresolved detector gap remains a gap instead of becoming a long predicted path.
 
 - Python 3.10 and an NVIDIA CUDA GPU
 - CUDA-enabled PyTorch (install it from the PyTorch index for your CUDA version)
-- NumPy, OpenCV (pip's `opencv-python` is enough for the tracker; the label tool
-  needs the Qt build from conda-forge, see below)
+- NumPy, OpenCV (pip's `opencv-python` is enough)
 - TensorRT 10 for the player and court engines
 - BoxMOT for player tracking (required with the player engine; unset the engine path to run without players)
 - CatBoost, only for `--court`
@@ -51,17 +50,6 @@ unresolved detector gap remains a gap instead of becoming a long predicted path.
 ```powershell
 pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
-```
-
-The label tool (`python finetune/ft.py label <clip>`) draws its windows with Qt
-and refuses to start on any other OpenCV build. pip's Windows `opencv-python`
-wheel is not the Qt build (it reports WIN32UI), so for labeling, use a conda
-environment with conda-forge's OpenCV in its place; `finetune/ft.py` looks for
-such an environment by itself:
-
-```powershell
-pip uninstall opencv-python
-conda install -c conda-forge opencv
 ```
 
 FilterPy is not needed: the selector's Kalman filter is plain NumPy.
@@ -100,22 +88,10 @@ python clean_tracker.py --device 1 --conf 0.55
 ## Fine-tuning GridTrackNet
 
 The bundled GridTrackNet weights contain the latest fine-tuned checkpoint used
-to produce the demo.
-
-`finetune.bat` (or `.\finetune.ps1`) opens the fine-tuning workspace and runs
-`finetune/ft.py`, which covers importing clips, labelling, checking labels,
-scoring the detector, training and promoting the winner:
-
-```powershell
-.\finetune.ps1 status                       what is labelled and which model is current
-.\finetune.ps1 add C:\clips\rally7.mp4      copy a video in and pre-label it
-.\finetune.ps1 label rally7                 click-correct the labels
-.\finetune.ps1 train --holdout mixed_v1     fine-tune; keeps the epoch and the model the held-out clips prefer
-```
-
-The videos and caches the workspace builds are regenerable and stay untracked;
-`finetune/labels/` keeps the hand-corrected own-camera labels. See
-`finetune/README.md` for the full loop and `finetune/DATASETS.md` for sources.
+to produce the demo. The labelling and training workspace that produced them
+(the label tool, the trainer, the Colab notebook, the hand-corrected labels and
+the detector scorers over those labels) lives on the `train` branch, which
+carries this tracker as well.
 
 ## Validation
 
@@ -132,26 +108,18 @@ Evaluate against annotations:
 python clean_tracker.py --no-video --annotations sample\pomona_annotations.json
 ```
 
-Score the detector (or the full pipeline) on the hand-labelled clips with
-`evaluate_archive.py`. `--archive` chooses the label set; pass it explicitly
-so the result does not depend on `$TENNIS_ARCHIVE` or other machine state:
-
-```powershell
-python evaluate_archive.py --archive finetune --mode raw --clips video13
-```
-
 `check_parity.py` is a strict gate against the frozen Pomona benchmark, and
 `validate_tracking.py` scores an exported tracking JSON against hand labels.
+Scoring the detector or the pipeline on the workspace's hand-labelled clips
+(`evaluate_archive.py`) is on the `train` branch.
 
 ## Project structure
 
 ```text
 clean_tracker.py                         Command-line entry point
-evaluate_archive.py                      Detector/pipeline scoring on hand-labelled clips (evaluation/archive.py,
-                                         pipeline_score.py scores one pipeline run's clip)
 validate_tracking.py                     Tracking JSON vs. hand labels (evaluation/validate.py)
 check_parity.py                          Frozen Pomona benchmark gate (evaluation/parity.py)
-evaluation/                              The scorers behind those three entry points
+evaluation/                              The scorer and the gate behind those two entry points
 build_trt_engines.py                     YOLO checkpoint -> ONNX -> TensorRT engine builder
 requirements.txt                         Python packages (see Requirements)
 tennis_tracker/pipeline.py               Run entry point: orders the stages, calls the selector
@@ -196,36 +164,6 @@ models/gridtracknet_weights_torch.npz    GridTrackNet inference weights
 models/ctb_regr_bounce.cbm               CatBoost bounce model (--court)
 models/                                  Player and court TensorRT engines
 sample/                                  Sample video and validation annotations
-finetune.bat / finetune.ps1              Front door for the fine-tuning workspace
-finetune/ft.py                           Front door for the labelling and training workflow
-finetune/menu.py                         Its interactive menu
-finetune/commands.py, interpreter.py     Its in-process commands and the venv hand-over
-finetune/labeling/label_tool.py          Manual label editing (label_session holds its state; label_cli,
-                                         label_store, label_source, label_window, label_cursor, label_keys,
-                                         label_mouse, label_frame_view, label_grid, label_sheet, label_draw and
-                                         label_hints hold its other pieces)
-finetune/refiner/refine.py, cnn_refiner.py  Sub-pixel label suggestions and the CNN that places them
-finetune/refiner/motion_blobs.py         What moved on one frame: change map, motion centroid, blobs
-finetune/refiner/refiner_sheet.py        A zoomed sheet of where two versions of that CNN disagree
-finetune/refiner/refiner_training.py     Training that CNN on the frames you have reviewed
-finetune/refiner/refiner_crops.py        The crops of those frames; refiner_fitting.py fits and scores one network
-finetune/refiner/hints.py                Their command line (ft.py hints: train, list, use, sheet)
-finetune/data/labels.py                  Label file format; label_check.py checks a file, label_audit.py
-                                         audits labels against the detector, label_flags.py keeps the
-                                         frames an audit flagged for a person
-finetune/data/workspace.py, fileio.py    Workspace layout, clip facts, atomic writes
-finetune/data/data_policy.py             Which clips may be trained, validated or scored on
-finetune/data/import_data.py, realign.py Source conversion and temporal realignment (realign_solve.py
-                                         is the offset solver)
-finetune/data/import_sources.py          What the dataset importers share
-finetune/data/detect.py                  The raw GridTrackNet prepass over one clip
-finetune/training/train_gridtracknet.py  Training; loop.py is the training loop, metrics.py the
-                                         detector metric a run is judged by (data/detector_metrics.py scores it)
-finetune/training/clips.py               Which clips the trainer uses and holds out
-finetune/training/frame_cache.py         The per-clip frame cache and its training units
-finetune/training/dataset.py             Grid targets, augmentation, Dataset and sampler
-finetune/training/pretrack.py            Drafts from the raw GridTrackNet prepass
-finetune/labels/                         Hand-corrected own-camera labels
 tests/                                   Synthetic regression tests (pytest)
 audit/                                   Review reports and verification scripts
 audit/records/                           Their logs and results (records, not code)

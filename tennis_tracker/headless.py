@@ -1,5 +1,5 @@
 """Running the tracker from another program with nothing drawn: one ``Config`` for every caller
-that scores or drafts from the pipeline's answer (``evaluation.archive``, ``finetune.training.pretrack``),
+that scores or drafts from the pipeline's answer (the workspace scorers on the ``train`` branch),
 and the shape the tracking JSON gives that answer, built from the ``RunResult`` instead of
 re-read from disk.
 """

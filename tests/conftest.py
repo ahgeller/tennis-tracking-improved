@@ -18,23 +18,6 @@ from tennis_tracker.paths import ROOT  # noqa: E402  (needs the bootstrap above)
 assert ROOT == _REPOSITORY, "tests/ must sit directly under the repository tennis_tracker.paths names"
 
 
-@pytest.fixture
-def workspace_dir(tmp_path, monkeypatch):
-    """Point the fine-tuning workspace (``finetune.data.workspace``) at a fresh folder under tmp_path,
-    with empty ``labels/`` and ``videos/`` and the tracker's weights redirected to ``models/tracker.npz``
-    under it. The finetune modules read every path from ``workspace.current()`` when called, so
-    replacing that one function moves all of them; no real label, video or model is touched.
-    Returns the folder."""
-    from finetune.data import workspace
-
-    root = tmp_path / "workspace"
-    (root / "labels").mkdir(parents=True)
-    (root / "videos").mkdir()
-    relocated = workspace.Workspace(root, repo_weights=root / "models" / "tracker.npz")
-    monkeypatch.setattr(workspace, "current", lambda: relocated)
-    return root
-
-
 class _NoOpStream:
     """Stands in for ``torch.cuda.Stream``; every method is a no-op."""
 
