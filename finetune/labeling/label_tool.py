@@ -55,6 +55,7 @@ class Tool:
         self.client = None                     # last client size seen; a change re-fits and re-measures
         self.mouse = CursorPlacer(session, self.pump)   # parks the OS pointer on the ball (Windows); see label_cursor
         self.viewport = win.ViewportGuard()    # keeps the Qt window's own zoom at x1
+        self.side_buttons = win.SideButtons()  # the mouse's forward/back buttons, read as the arrows
         self.frame_view = FrameView(session, self)      # the single-frame picture and HUD; see label_frame_view
         self.grid_view = GridView(session, self)        # TAB's page of crops; see label_grid
         self.sheet_view = SheetView(session, self)      # w's trajectory sheet; see label_sheet
@@ -614,11 +615,13 @@ class Tool:
         return gliding
 
     def next_key(self, gliding: bool) -> int:
-        """A key pumped out of the queue earlier, else what highgui delivers in one short wait."""
+        """A key pumped out of the queue earlier, else what highgui delivers in one short wait, else
+        the arrow a mouse side button pressed meanwhile stands for (highgui never reports those)."""
         if self.pending_key != -1:
             key, self.pending_key = self.pending_key, -1
             return key
-        return cv2.waitKeyEx(8 if gliding else 30)
+        key = cv2.waitKeyEx(8 if gliding else 30)
+        return key if key != -1 else self.side_buttons.key()
 
     def idle(self, gliding: bool) -> bool:
         """What a tick with no key does: notice a closed window (True: the loop ends), decode

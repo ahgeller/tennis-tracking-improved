@@ -19,7 +19,8 @@ WM_MOUSEWHEEL = 0x020A
 SPI_GETWORKAREA = 0x0030
 SWP_NOZORDER = 0x0004
 VK_SHIFT = 0x10
-KEY_DOWN = 0x8000              # the high bit of GetKeyState
+VK_XBUTTON1, VK_XBUTTON2 = 0x05, 0x06    # the mouse's side buttons: back (nearer the wrist) and forward
+KEY_DOWN = 0x8000              # the high bit of GetKeyState and GetAsyncKeyState
 VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN = 37, 38, 39, 40      # what waitKeyEx gives for the arrows here
 KEYS_NEXT = {VK_RIGHT, 2555904, 83, 0x01000014}         # Win32 / Qt (this build) / GTK / Qt raw
 KEYS_PREV = {VK_LEFT, 2424832, 81, 0x01000012}
@@ -164,6 +165,36 @@ def non_character_key(code: int) -> bool:
     """Is `code` an F-key, Insert, Delete or a page key that only looks like a printable one?"""
     return (_user32 is not None and code in NON_CHARACTER_KEYS
             and bool(_user32.GetKeyState(code) & KEY_DOWN))
+
+
+class SideButtons:
+    """The mouse's two side buttons, read as the arrow keys: forward (the upper, further one on a
+    thumb pair) is the right arrow, a frame on; back is the left arrow, a frame back.
+
+    highgui reports left, right and middle presses and nothing else, so these are polled from the
+    main loop with GetAsyncKeyState, once per tick, and a press is the edge from up to down. Only
+    presses made with the tool's window in front count: the same buttons mean back and forward
+    in a browser behind it."""
+
+    def __init__(self) -> None:
+        self.down = {VK_XBUTTON1: False, VK_XBUTTON2: False}
+
+    def key(self) -> int:
+        """The arrow key a side button pressed since the last call stands for, else -1."""
+        if _user32 is None:
+            return -1
+        pressed = -1
+        for button, arrow in ((VK_XBUTTON1, VK_LEFT), (VK_XBUTTON2, VK_RIGHT)):
+            down = bool(_user32.GetAsyncKeyState(button) & KEY_DOWN)
+            if down and not self.down[button] and pressed == -1 and self.window_in_front():
+                pressed = arrow
+            self.down[button] = down
+        return pressed
+
+    @staticmethod
+    def window_in_front() -> bool:
+        hwnd = find_window()
+        return bool(hwnd) and _user32.GetForegroundWindow() == hwnd
 
 
 def post_wheel(delta: int, screen: Tuple[int, int]) -> bool:
