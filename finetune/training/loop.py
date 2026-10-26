@@ -31,7 +31,9 @@ def gridtracknet_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.T
 
 
 def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> None:
-    """Write the model in the .npz layout the tracker loads (template supplies BN stats)."""
+    """Write the model in the .npz layout the tracker loads: every convolution and every
+    BatchNorm layer's gamma, beta and running mean and variance come from ``model``; ``template``
+    supplies whatever else the layout carries."""
     with np.load(template) as source:
         arrays = {name: source[name] for name in source.files}
     for index, conv in enumerate(model.convs):
@@ -53,6 +55,8 @@ def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> N
 
 
 def fresh_model(device: torch.device) -> GridTrackNet:
+    """A float32 network to train from scratch: Kaiming convolutions, BatchNorm at Keras's
+    defaults (gamma 1, beta 0, running mean 0, running variance 1), in train mode."""
     model = GridTrackNet()
     for conv in model.convs:
         torch.nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
@@ -61,17 +65,23 @@ def fresh_model(device: torch.device) -> GridTrackNet:
 
 
 def evaluate_loss(model, loader, device, max_steps=None) -> float:
+    """The mean loss over the loader in eval mode (the running BatchNorm statistics, which
+    stay as they are); the model's mode is restored afterwards."""
+    was_training = model.training
     model.eval()
     total, steps = 0.0, 0
-    with torch.inference_mode():
-        for images, target in loader:
-            images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-                loss = gridtracknet_loss(model(images), target)
-            total += float(loss)
-            steps += 1
-            if max_steps and steps >= max_steps:
-                break
+    try:
+        with torch.inference_mode():
+            for images, target in loader:
+                images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
+                with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+                    loss = gridtracknet_loss(model(images), target)
+                total += float(loss)
+                steps += 1
+                if max_steps and steps >= max_steps:
+                    break
+    finally:
+        model.train(was_training)
     return total / max(steps, 1)
 
 

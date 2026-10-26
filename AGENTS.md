@@ -10,7 +10,8 @@ rendering. Outputs are an annotated MP4 and per-frame JSON. It is not a calibrat
 - `tennis_tracker/gridtracknet.py`: PyTorch port and NPZ loader. Five raw RGB
   frames at 768x432 become 15 input channels. Output is five confidence/x-offset/
   y-offset grids at 48x27. Width-axis normalization reproduces the upstream export;
-  its values are buffers, not trainable BatchNorm parameters.
+  it is Keras BatchNormalization on that axis: gamma and beta train, mean and
+  variance are running statistics (buffers).
 - `tennis_tracker/engines/`: `ball_detectors.py`, the progressive GridTrackNet
   prepass and the single-frame TensorRT ball engine. At about 60 FPS, even and
   odd phases each run at about 30 FPS. Preserve source-frame indices and

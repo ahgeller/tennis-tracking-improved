@@ -8,6 +8,7 @@ import cv2
 from tennis_tracker import gridtracknet
 from tennis_tracker.gridtracknet import (
     BN_EPSILON,
+    BN_MOMENTUM,
     GRID_COLS,
     GRID_ROWS,
     HEIGHT,
@@ -120,8 +121,8 @@ def test_load_model_maps_npz_layers_and_kernel_orientation(tmp_path):
         np.testing.assert_array_equal(conv.bias.detach().float().numpy(), arrays[f"{name}/{name}/bias:0"])
     for index, layer in enumerate(model.batch_norms):
         name = "batch_normalization" if index == 0 else f"batch_normalization_{index}"
-        np.testing.assert_array_equal(layer.gamma.float().numpy(), arrays[f"{name}/{name}/gamma:0"])
-        np.testing.assert_array_equal(layer.beta.float().numpy(), arrays[f"{name}/{name}/beta:0"])
+        np.testing.assert_array_equal(layer.gamma.detach().float().numpy(), arrays[f"{name}/{name}/gamma:0"])
+        np.testing.assert_array_equal(layer.beta.detach().float().numpy(), arrays[f"{name}/{name}/beta:0"])
         np.testing.assert_array_equal(layer.mean.float().numpy(), arrays[f"{name}/{name}/moving_mean:0"])
         np.testing.assert_array_equal(layer.variance.float().numpy(), arrays[f"{name}/{name}/moving_variance:0"])
 
@@ -136,16 +137,96 @@ def test_load_model_rejects_npz_missing_a_layer(tmp_path):
 
 
 def test_width_batchnorm_normalizes_each_column_separately():
-    layer = WidthBatchNorm(4)
-    layer.mean.copy_(torch.tensor([0.0, 1.0, 2.0, 3.0]))
-    layer.gamma.fill_(2.0)
-    layer.beta.fill_(1.0)
+    layer = WidthBatchNorm(4).eval()
+    with torch.no_grad():
+        layer.mean.copy_(torch.tensor([0.0, 1.0, 2.0, 3.0]))
+        layer.gamma.fill_(2.0)
+        layer.beta.fill_(1.0)
     value = torch.ones((1, 1, 2, 4))
     out = layer(value)
     expected = (1.0 - torch.tensor([0.0, 1.0, 2.0, 3.0])) / (1.0 + BN_EPSILON) ** 0.5 * 2.0 + 1.0
     assert out.shape == value.shape
     torch.testing.assert_close(out[0, 0, 0], expected)
     torch.testing.assert_close(out[0, 0, 1], expected)
+
+
+def _arbitrary_layer(width: int = 6) -> WidthBatchNorm:
+    """A layer whose four arrays are all different and nowhere near the defaults."""
+    layer = WidthBatchNorm(width)
+    generator = torch.Generator().manual_seed(3)
+    with torch.no_grad():
+        layer.gamma.copy_(torch.rand(width, generator=generator) + 0.5)
+        layer.beta.copy_(torch.rand(width, generator=generator) - 0.5)
+        layer.mean.copy_(torch.rand(width, generator=generator) * 2)
+        layer.variance.copy_(torch.rand(width, generator=generator) + 0.1)
+    return layer
+
+
+def test_width_batchnorm_trains_gamma_and_beta_and_keeps_the_statistics_as_buffers():
+    layer = WidthBatchNorm(6)
+    assert {name for name, _ in layer.named_parameters()} == {"gamma", "beta"}
+    assert {name for name, _ in layer.named_buffers()} == {"mean", "variance"}
+    assert all(tensor.dtype == torch.float32 for tensor in layer.state_dict().values())
+    torch.testing.assert_close(layer.gamma.detach(), torch.ones(6))       # Keras's defaults
+    torch.testing.assert_close(layer.beta.detach(), torch.zeros(6))
+    torch.testing.assert_close(layer.mean, torch.zeros(6))
+    torch.testing.assert_close(layer.variance, torch.ones(6))
+
+
+def test_width_batchnorm_in_train_mode_normalises_each_column_over_the_batch():
+    """Train mode uses the batch's own statistics over N, C and H: every width column of the
+    output has mean 0 and (biased) variance 1 at the default gamma and beta, whatever the
+    running statistics say."""
+    layer = _arbitrary_layer()
+    with torch.no_grad():
+        layer.gamma.fill_(1.0)
+        layer.beta.fill_(0.0)
+    layer.train()
+    value = torch.randn((4, 3, 5, 6), generator=torch.Generator().manual_seed(1)) * 3 + 2
+    out = layer(value)
+    assert out.shape == value.shape and out.dtype == torch.float32
+    torch.testing.assert_close(out.mean(dim=(0, 1, 2)), torch.zeros(6), atol=1e-5, rtol=0)
+    torch.testing.assert_close(out.var(dim=(0, 1, 2), unbiased=False), torch.ones(6), atol=2e-3, rtol=0)
+
+
+def test_width_batchnorm_moves_the_running_statistics_by_the_keras_momentum_rule():
+    """``moving = moving * 0.99 + batch * 0.01``, the batch mean and the unbiased batch variance
+    (what the fused Keras op hands its running variance)."""
+    layer = _arbitrary_layer().train()
+    mean_before, variance_before = layer.mean.clone(), layer.variance.clone()
+    value = torch.randn((4, 3, 5, 6), generator=torch.Generator().manual_seed(2)) * 3 + 2
+    layer(value)
+    batch_mean = value.mean(dim=(0, 1, 2))
+    batch_variance = value.var(dim=(0, 1, 2), unbiased=True)
+    torch.testing.assert_close(layer.mean, mean_before * BN_MOMENTUM + batch_mean * (1 - BN_MOMENTUM))
+    torch.testing.assert_close(layer.variance, variance_before * BN_MOMENTUM + batch_variance * (1 - BN_MOMENTUM))
+    assert BN_MOMENTUM == 0.99          # Keras's default, which upstream trained with
+
+
+def test_width_batchnorm_in_eval_mode_applies_the_running_statistics_unchanged():
+    """Eval mode is the exported inference: the stored statistics in the formula the port always
+    used, and nothing moves."""
+    layer = _arbitrary_layer().eval()
+    state = {name: tensor.clone() for name, tensor in layer.state_dict().items()}
+    value = torch.randn((2, 3, 4, 6), generator=torch.Generator().manual_seed(4)) * 3 + 2
+    out = layer(value)
+    shape = (1, 1, 1, -1)
+    expected = ((value - state["mean"].view(shape)) * torch.rsqrt(state["variance"].view(shape) + BN_EPSILON)
+                * state["gamma"].view(shape) + state["beta"].view(shape))
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+    for name, tensor in layer.state_dict().items():
+        torch.testing.assert_close(tensor, state[name], atol=0, rtol=0)
+    half = _arbitrary_layer().eval().half()         # the tracker's FP16 path
+    assert half(value.half()).dtype == torch.float16
+
+
+def test_width_batchnorm_gamma_and_beta_receive_gradients():
+    layer = _arbitrary_layer().train()
+    value = torch.randn((2, 3, 4, 6), generator=torch.Generator().manual_seed(5))
+    (layer(value) * torch.arange(6.0)).square().sum().backward()
+    assert layer.gamma.grad is not None and layer.gamma.grad.abs().sum() > 0
+    assert layer.beta.grad is not None and layer.beta.grad.abs().sum() > 0
+    assert not layer.mean.requires_grad and not layer.variance.requires_grad
 
 
 def test_decode_predictions_places_cell_offsets_in_output_pixels():
