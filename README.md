@@ -93,16 +93,67 @@ the weights file. Nothing else changes: same video, same JSON, same selector.
 | weights file | network | status |
 |---|---|---|
 | `.npz` (default: `models/gridtracknet_weights_torch.npz`) | GridTrackNet, 48x27 grid | the bundled detector |
-| `.pt` | HeatmapNet, 192x108 heat map (`tennis_tracker/heatmapnet.py`) | candidate, being trained on the `train` branch |
+| `.pt` naming `heatmap_s4` | HeatmapNet, 192x108 heat map (`tennis_tracker/heatmapnet.py`) | candidate, trained on the `train` branch |
+| `.pt` naming `memory_s4` | MemoryNet, HeatmapNet plus a memory carried between units (`tennis_tracker/memorynet.py`) | candidate, fine-tuned from a HeatmapNet winner |
 
 ```powershell
 python clean_tracker.py --input path	o\match.mp4                        bundled GridTrackNet
 python clean_tracker.py --input path	o\match.mp4 --weights best.pt      the heat-map network
 ```
 
-Both are kept only until the held-out comparison picks one; the loser is then
-removed and the winner becomes the default. The training playbook with that
-comparison is the README of the `train` branch.
+The tracker picks by the suffix and, for a `.pt`, by the `arch` the file names
+inside. All three are kept only until the held-out comparison picks one; the
+losers are then removed and the winner becomes the default. The training
+playbook with that comparison is the README of the `train` branch; the section
+below says what to delete for each loser (the trainer items live on `train`).
+
+## Keeping one network
+
+Three architectures exist so that one can be chosen; the two that lose are
+deleted, not kept behind a flag. For each, the whole of it is:
+
+- `gridtracknet`: `tennis_tracker/gridtracknet.py` stays (its loader, resize and
+  decoder serve every architecture); its entry in `tennis_tracker/ball_models.py`
+  (`GRIDTRACKNET` in `ARCHITECTURES`, `MODEL_CLASSES`, `WEIGHTS_SUFFIX`, `_MODULES`,
+  the `.npz` branch of `arch_of`), the `GridTrackNet` class and its NPZ `load_model`,
+  `gridtracknet_loss` in `finetune/training/loop.py` with the `.npz` branch of
+  `save_weights` and the Kaiming branch of `fresh_model`, the one-hot branch of
+  `dataset.make_target`, the `.npz` template handling of `--weights` in the trainer
+  (`resolve_arch`), the `ARCH` option in the notebook, `ft.py promote`, and
+  `tests/test_gridtracknet.py` with the GridTrackNet cases of the trainer tests.
+- `heatmap_s4`: `tennis_tracker/heatmapnet.py` (the `HeatmapNet` class; the `.pt`
+  record functions move to the surviving `.pt` architecture's module if that is
+  `memory_s4`, which subclasses it, so the class then stays as its base), its entry
+  in `ball_models` (`HEATMAP_S4` in `ARCHITECTURES`, `MODEL_CLASSES`,
+  `WEIGHTS_SUFFIX`, `_MODULES`), `HEATMAP_S4` in `loop.LOSSES` (the loss itself
+  stays if `memory_s4` survives), the trainer's `--arch` choice and the parent
+  start (`memorynet.PARENT_ARCH`, `from_heatmap`, `args.starting_arch`) if
+  `memory_s4` goes too, the notebook `ARCH` option and its parent-start check,
+  and `tests/test_heatmapnet.py` with the heatmap cases of the trainer tests.
+- `memory_s4`: `tennis_tracker/memorynet.py`, `tests/test_memorynet.py`, its entry
+  in `ball_models` (`MEMORY_S4` in `ARCHITECTURES`, `MODEL_CLASSES`,
+  `WEIGHTS_SUFFIX`, `_MODULES`) and the `STATEFUL` flag of the contract, the
+  stateful branch of the prepass (`_run_stateful`, `units_per_call` and
+  `flush(update_states)` in `tennis_tracker/engines/ball_detectors.py`, with
+  `StatefulStandInModel` and its test), `MEMORY_S4` in `loop.LOSSES` with
+  `chain_loss` and the stateful branch of `batch_loss`, the chains in
+  `dataset.py` (`CHAIN`, `TrainingChain`, `build_chains`, `chain_units`,
+  `chain_weights`, `ChainDataset`; the one-draw `Augmentation` stays, it is how
+  the unit dataset draws too), the trainer's `--arch` choice, `--chain`, the
+  parent start and the chain data path in `train`, `chain` in `RECIPE_FIELDS`
+  and `config.json`, the notebook `ARCH` option and its parent-start check, and
+  the chain cases of the trainer, dataset and loop tests.
+
+In every case `read_record` with `arch=None` and `arch_of`'s record read stay
+only while two `.pt` architectures share the suffix; with one left, `arch_of`
+can go back to the suffix alone.
+
+The winner's weights are promoted by copying them over the default path in
+`tennis_tracker/paths.py` (`GRIDTRACKNET_WEIGHTS`, what `Config.model_path`
+defaults to); for a `.pt` winner that default's suffix changes to `.pt` (and the
+file's name with it, say `models/ball_detector.pt`), the bundled `.npz` is
+retired, and `ft.py promote` learns the new file. Record the promotion in
+`audit/records/gridtracknet_recipe_2026-10.md` with the stage 3 numbers.
 
 ## Fine-tuning GridTrackNet
 

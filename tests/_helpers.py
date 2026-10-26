@@ -116,21 +116,37 @@ def cpu_detector(decode, conf: float = 0.5, frame_tensor=None) -> "CpuGridTrackN
 
 class StandInModel:
     """A callable standing in for the ball model, carrying the contract the detector reads off a
-    real one (``ball_models``: GridTrackNet's ``ARCH``, grid and channel count)."""
+    real one (``ball_models``: GridTrackNet's ``ARCH``, grid and channel count, stateless)."""
 
     ARCH, GRID_COLS, GRID_ROWS = GridTrackNet.ARCH, GridTrackNet.GRID_COLS, GridTrackNet.GRID_ROWS
     INPUT_CHANNELS, FRAMES_PER_UNIT = GridTrackNet.INPUT_CHANNELS, GridTrackNet.FRAMES_PER_UNIT
+    STATEFUL = False
 
     def __init__(self, forward):
         self.forward = forward
 
-    def __call__(self, batch):
-        return self.forward(batch)
+    def __call__(self, batch, state=None):
+        return self.forward(batch) if state is None else self.forward(batch, state)
+
+
+class StatefulStandInModel(StandInModel):
+    """A ``STATEFUL`` stand-in (MemoryNet's contract): ``forward(batch, state)`` returns
+    ``(output, new_state)``, and every call is recorded as ``(batch, state)`` in ``calls``."""
+
+    ARCH, STATEFUL = "memory_s4", True
+
+    def __init__(self, forward):
+        super().__init__(forward)
+        self.calls = []
+
+    def __call__(self, batch, state=None):
+        self.calls.append((batch, state))
+        return self.forward(batch, state)
 
 
 class CpuGridTrackNet(GridTrackNetBallDetector):
     """The real constructor, run on the CPU with an injected model (a callable, wrapped in
-    ``StandInModel``), decoder and frame encoder.
+    ``StandInModel`` unless it already is one), decoder and frame encoder.
 
     The constructor insists on CUDA and loads weights from disk; both are
     replaced for its duration only. ``on_publish`` sees every prefix the
@@ -138,10 +154,12 @@ class CpuGridTrackNet(GridTrackNetBallDetector):
     """
 
     def __init__(self, cfg, model, decode, frame_tensor, on_publish=None):
+        if not isinstance(model, StandInModel):
+            model = StandInModel(model)
         with patch.object(torch.cuda, "is_available", return_value=True), \
              patch.object(torch, "device", return_value=torch.device("cpu")), \
              patch.object(torch.cuda, "synchronize"), \
-             patch.object(ball_detectors, "load_ball_model", return_value=StandInModel(model)):
+             patch.object(ball_detectors, "load_ball_model", return_value=model):
             super().__init__("unused.npz", cfg)
         self._decode = decode
         self._frame_tensor = frame_tensor
