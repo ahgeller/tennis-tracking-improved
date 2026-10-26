@@ -1,7 +1,9 @@
 """The one zip the Colab notebook unpacks: ``python finetune/ft.py colab-zip``.
 
-``GridTrackNet_FineTune_Colab.ipynb`` runs the trainer on Google Drive. It unpacks a single
-``tennis_finetune_colab.zip`` whose entries all sit under ``tennis_finetune/``:
+``GridTrackNet_FineTune_Colab.ipynb`` runs the trainer on Google Drive, where everything it reads
+or writes sits in the one folder ``MyDrive/tennis_finetune/`` (the zips, and ``runs/<TAG>/`` for
+the outputs). It unpacks a single ``tennis_finetune_colab.zip`` whose entries all sit under
+``tennis_finetune/``:
 
     tennis_finetune/videos/<every video in the workspace>
     tennis_finetune/labels/<every file in the workspace labels folder>
@@ -143,7 +145,7 @@ def build_colab_zip(out: Path = DEFAULT_OUT, code_only: bool = False) -> Path:
         print(f"  {section:8s} {len(files):5d} files  {sum(p.stat().st_size for p in files.values()) / 2**20:8.1f} MB")
     print(f"{out}: {len(plan.entries)} entries, {stored / 2**20:.1f} MB stored, {time.perf_counter() - started:.1f} s")
     name = DEFAULT_CODE_OUT.name if code_only else DEFAULT_OUT.name
-    print(f"next: upload it to the top of Google Drive as {name} and run the notebook")
+    print(f"next: upload it to MyDrive/tennis_finetune/ as {name} and run the notebook")
     return out
 
 

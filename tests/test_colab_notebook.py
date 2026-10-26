@@ -116,3 +116,35 @@ def test_the_settings_cell_drops_the_learning_rate_on_a_resume_whose_lr_differs(
     assert "(config.get('lr_schedule') or [{'lr': config.get('lr')}])[-1]['lr']" in settings
     assert "if LR != rate:" in settings
     assert "# Adadelta; 0.3 for a gentle fine-tune. On a resume it may be lowered (not raised)" in settings
+
+
+def test_the_settings_cell_exposes_the_architecture_and_names_the_files_by_it():
+    """ARCH picks the network: the cell passes --arch and gives --save the architecture's suffix
+    (.pt for heatmap_s4). START_WEIGHTS is a name in the zip's models/ folder or a path under
+    runs/ on Drive (an earlier run's best.pt), and a fine-tune's must carry the architecture's
+    suffix, said early, which the trainer refuses anyway; the staging cell lists the two modules
+    the switch imports."""
+    settings = code_cell_starting("#@title Training settings")
+    assert 'ARCH = "gridtracknet"       #@param ["gridtracknet", "heatmap_s4"]' in settings
+    assert "'--arch', ARCH," in settings and "'--save', str(RUN / ('winner' + SUFFIX))" in settings
+    assert "SUFFIX = '.pt' if ARCH == 'heatmap_s4' else '.npz'" in settings
+    assert "START = DATA / 'models' / START_WEIGHTS" in settings and "START = WORK / START_WEIGHTS" in settings
+    assert "'--weights', str(START)," in settings and "'--weights', str(DATA" not in settings
+    assert "if MODE == 'finetune' and START.suffix != SUFFIX:" in settings
+    assert {"tennis_tracker/heatmapnet.py", "tennis_tracker/ball_models.py"} <= set(staged_files())
+
+
+def test_everything_on_drive_lives_under_one_folder():
+    """The notebook reads the zips from and writes the runs to MyDrive/tennis_finetune/ alone:
+    nothing at the top of Drive, and the missing-zip message names the folder."""
+    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    code = "".join("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code")
+    text = "".join("".join(cell["source"]) for cell in notebook["cells"])
+    assert "DRIVE_DIR = DRIVE / 'tennis_finetune'" in code
+    assert "ZIP = DRIVE_DIR / 'tennis_finetune_colab.zip'" in code
+    assert "CODE_ZIP = DRIVE_DIR / 'tennis_finetune_code.zip'" in code
+    assert "WORK = DRIVE_DIR / 'runs'" in code
+    assert "to the folder MyDrive/tennis_finetune/ in your Google Drive first" in code
+    assert code.count("DRIVE / ") == 1                     # DRIVE_DIR itself: no other path hangs off the top of Drive
+    assert "tennis_finetune_runs" not in text and "top of your Google Drive" not in text
+    assert "MyDrive/tennis_finetune/runs/<TAG>/" in text

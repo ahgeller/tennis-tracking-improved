@@ -52,6 +52,7 @@ def test_the_zip_holds_every_section_the_notebook_unpacks(workspace_dir, tmp_pat
     assert "[skip] no exclude.txt" in out_text
     assert re.search(r"videos\s+2 files", out_text) and re.search(r"labels\s+6 files", out_text) and re.search(r"records\s+3 files", out_text)
     assert "MB stored" in out_text and "tennis_finetune_colab.zip" in out_text
+    assert "next: upload it to MyDrive/tennis_finetune/ as tennis_finetune_colab.zip" in out_text
 
 
 def test_a_missing_record_the_trainer_needs_is_an_error(workspace_dir, tmp_path, capsys):
@@ -80,4 +81,4 @@ def test_code_only_holds_the_records_and_the_code_and_nothing_heavy(workspace_di
     assert {f"{TOP}/clips.csv", f"{TOP}/review_status.json", f"{TOP}/holdouts.json"} <= names
     assert names >= {f"{TOP}/code/{name}" for name in staged_files()}
     assert not any(name.startswith((f"{TOP}/videos/", f"{TOP}/labels/", f"{TOP}/models/")) for name in names)
-    assert "tennis_finetune_code.zip" in capsys.readouterr().out
+    assert "next: upload it to MyDrive/tennis_finetune/ as tennis_finetune_code.zip" in capsys.readouterr().out
