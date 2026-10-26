@@ -574,13 +574,11 @@ def train(args: argparse.Namespace) -> None:
         print(f"[data] {len(flagged)} of {len(train_units)} training units hold a no-ball frame the starting "
               f"weights fired on at conf>={FALSE_ALARM_CONF:.2f}: "
               f"sampled x{args.oversample_false_alarms:g}")
+    weights, draws = unit_weights(train_units, oversample, args.oversample_absent, args.oversample_false_alarms, flagged), args.epoch_units
     if args.chain:
-        weights = chain_weights(train_examples, unit_weights(train_units, oversample, args.oversample_absent,
-                                                            args.oversample_false_alarms, flagged))
-        sampler = weighted_sampler(weights, None if args.epoch_units is None else -(-args.epoch_units // args.chain))
-    else:
-        sampler = make_sampler(train_units, oversample, args.epoch_units, args.oversample_absent,
-                               args.oversample_false_alarms, flagged)
+        # A chain's weight is the mean of its units' and it counts its units toward --epoch-units.
+        weights, draws = chain_weights(train_examples, weights), None if draws is None else -(-draws // args.chain)
+    sampler = weighted_sampler(weights, draws)
     train_loader = DataLoader(dataset(args.data_dir, train_examples, augment=True, augmentations=args.augment, arch=args.arch),
                               batch_size=args.batch_size,
                               shuffle=sampler is None, sampler=sampler, num_workers=args.workers,

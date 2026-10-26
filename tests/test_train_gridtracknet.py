@@ -131,9 +131,10 @@ def test_train_fine_tunes_a_heatmap_winner_from_its_pt(tmp_path, capsys):
     def fit(args, model, *rest):
         received["model"] = model
         return training.Selection(args.run_dir / "best.pt", 1, training.metrics_of(0.9, 0.0), 1, 0.1)
-    manifest = {"train": [{"clip": "a"}], "val": [{"clip": "b"}], "validation_clips": ["b"]}
+    unit = {"clip": "a", "source": "custom", "points": [[1.0, 1.0]]}
+    manifest = {"train": [unit], "val": [{**unit, "clip": "b"}], "validation_clips": ["b"]}
     with patch.object(training, "prepare_data", return_value=manifest), patch.object(training, "DataLoader"), \
-            patch.object(training, "UnitDataset"), patch.object(training, "make_sampler", return_value=None), \
+            patch.object(training, "UnitDataset"), \
             patch.object(training, "fit", side_effect=fit), patch.object(training, "pick_winner"):
         assert training.main(["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"),
                               "--run-dir", str(tmp_path / "run"), "--arch", "heatmap_s4", "--weights", str(start),
