@@ -71,7 +71,7 @@ def test_heatmap_loss_is_finite_and_lower_for_the_right_answer_than_a_wrong_one(
     assert unit_loss(fresh_model(torch.device("cpu"), heatmapnet.ARCH), right, target) == heatmap_loss(right, target)
 
 
-@pytest.mark.filterwarnings("ignore:Converting a tensor with requires_grad")
+@pytest.mark.filterwarnings("ignore:Converting a tensor with requires_grad")   # train_epoch reads the loss as a float
 def test_a_fresh_heatmapnet_trains_evaluates_and_round_trips_through_the_pt_record(tmp_path):
     """fresh_model builds the architecture asked for, the loop runs it with its own loss, and
     save_weights writes the .pt record (no NPZ template read) that load_ball_model brings back."""

@@ -9,6 +9,7 @@ class Config:
     # paths
     input_video: str = r"input_videos/TMP.mp4"
     output_video: str = "output_videos/prof_test.mp4"
+    # The ball detector, by suffix: .npz GridTrackNet, .pt HeatmapNet (``ball_models``), .engine TensorRT.
     model_path: str = str(GRIDTRACKNET_WEIGHTS)
 
     # Ball detector

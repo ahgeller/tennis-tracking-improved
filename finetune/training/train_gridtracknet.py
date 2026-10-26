@@ -175,9 +175,10 @@ def lower_learning_rate(optimizer: torch.optim.Optimizer, schedule: List[dict], 
 
 
 class Selection(NamedTuple):
-    """What the epochs left behind: the epoch the detector metric chose (``best.npz``) with its
-    metrics, and the epoch of the lowest validation loss (``best_loss.npz``), for the record. A
-    run with nothing held out (``--all-clips``) scores nothing: its result is ``last.npz``, the
+    """What the epochs left behind: the epoch the detector metric chose (``best.npz``, or ``best.pt``:
+    every file carries the architecture's suffix) with its metrics, and the epoch of the lowest
+    validation loss (``best_loss.npz``), for the record. A run with nothing held out
+    (``--all-clips``) scores nothing: its result is ``last.npz``, the
     final epoch, the metrics are None and the loss fields keep their starting values (epoch 0,
     an infinite loss), since no validation loss was ever measured."""
     best_path: Path
@@ -319,7 +320,7 @@ def best_scored_epoch(results: Path) -> Tuple[int, Optional[DetectorMetrics]]:
     return best_epoch, best_metrics
 
 
-def epoch_weights(run_dir: Path, epoch: int, suffix: str = ".npz") -> Path:
+def epoch_weights(run_dir: Path, epoch: int, suffix: str) -> Path:
     """Where a scored epoch's weights are kept: ``<run_dir>/epochs/epoch_NNN<suffix>``, the suffix
     the architecture's (``weights_suffix``)."""
     return run_dir / EPOCHS_DIR / f"epoch_{epoch:03d}{suffix}"
@@ -337,7 +338,7 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
         score: Optional[Callable[[Path], DetectorMetrics]], progress: Checkpoint = START) -> Selection:
     """Run the epochs after `progress` (``START``, or the checkpoint ``--resume`` read; one past
     ``--epochs`` is a ValueError, one at it leaves nothing to run). After each one ``last.npz`` is
-    written, ``results.csv`` gets its row and ``checkpoint.pt`` is rewritten; on a scored epoch
+    written (every file here carries the architecture's suffix, ``.pt`` for a HeatmapNet), ``results.csv`` gets its row and ``checkpoint.pt`` is rewritten; on a scored epoch
     (every ``--score-every``, and always the last) ``score(last.npz)`` measures the held-out
     detector metric, the weights are kept as ``epochs/epoch_NNN.npz`` (unless
     ``--no-keep-epochs``) and ``best.npz`` becomes the scored epoch with the highest
@@ -429,7 +430,7 @@ def read_selection_run(run_dir: Path) -> dict:
 
 
 def record_recipe_result(args: argparse.Namespace, selection: Selection, selection_run: Optional[dict]) -> None:
-    """The end of an ``--all-clips`` run: ``last.npz`` is copied to ``--save`` and ``winner.json``
+    """The end of an ``--all-clips`` run: the last epoch's weights are copied to ``--save`` and ``winner.json``
     says the weights were chosen by recipe, with the selection run's details beside, not by a
     measurement of these weights, which saw every clip."""
     copy_atomic(selection.best_path, args.save)
@@ -672,8 +673,8 @@ def build_parser() -> argparse.ArgumentParser:
     held_out.add_argument("--holdout", metavar="NAME",
                           help="Hold out a named set of whole recordings from the workspace's holdouts.json (e.g. mixed_v1)")
     held_out.add_argument("--all-clips", action="store_true",
-                          help="Hold out nothing and score nothing: train the recipe on every clip and take last.npz "
-                               "(for the deployable weights, once a recipe was chosen on a held-out set)")
+                          help="Hold out nothing and score nothing: train the recipe on every clip and take the last "
+                               "epoch (for the deployable weights, once a recipe was chosen on a held-out set)")
     parser.add_argument("--selection-run", type=Path, metavar="DIR",
                         help="With --all-clips: the held-out run whose recipe this follows; its best epoch is the "
                              "default --epochs and its details are copied into winner.json")
@@ -702,9 +703,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=SEED, help=f"The augmentation and sampling seed (default {SEED})")
     parser.add_argument("--score-every", type=int, default=1, metavar="K",
                         help="Score the held-out clips with the detector metric every K epochs (the last epoch always); "
-                             "best.npz is the scored epoch with the highest recall - wrong - false_alarm")
+                             "best.npz (best.pt) is the scored epoch with the highest recall - wrong - false_alarm")
     parser.add_argument("--no-keep-epochs", dest="keep_epochs", action="store_false",
-                        help="Do not keep every scored epoch's weights as epochs/epoch_NNN.npz in --run-dir (31 MB each, "
+                        help="Do not keep every scored epoch's weights as epochs/epoch_NNN.npz (.pt) in --run-dir (31 MB each, "
                              "about 1.2 GB for 40 scored epochs; kept by default so any epoch can be re-scored with "
                              "evaluate_archive.py --gridtracknet-weights or chosen by another rule later)")
     parser.add_argument("--workers", type=int, default=2)

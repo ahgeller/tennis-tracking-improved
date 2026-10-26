@@ -1,10 +1,10 @@
-"""The detector metric a training run is judged by: the raw GridTrackNet prepass over whole
-clips scored as ``evaluate_archive.py`` scores it (``DetectorMetrics``: recall / wrong-object /
+"""The detector metric a training run is judged by: the raw five-frame prepass (GridTrackNet, or
+HeatmapNet for ``.pt`` weights) over whole clips scored as ``evaluate_archive.py`` scores it (``DetectorMetrics``: recall / wrong-object /
 false-alarm), and the two rules read from it.
 
 ``epoch_score`` ranks the epochs of one run: recall minus the wrong-object rate minus the
 false-alarm rate, the three rates at equal weight (every correct ball is worth one, every
-wrong-object output and every false alarm costs one). ``best.npz`` is the scored epoch with the
+wrong-object output and every false alarm costs one). ``best.npz`` (``best.pt``) is the scored epoch with the
 highest score, a scalar with no anchor, so an early epoch with odd rates (a scratch run's first
 scored epoch detected nothing: 0 / 0 / 0) cannot bar every later one, and a little recall is
 traded for a large false-alarm drop (R0's epoch 9, 0.936 / 0.007 / 0.230, beats its epoch 1,

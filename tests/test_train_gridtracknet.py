@@ -744,7 +744,7 @@ def test_every_scored_epochs_weights_are_kept_unless_no_keep_epochs(tmp_path):
     kept = args.run_dir / training.EPOCHS_DIR
     assert sorted(path.name for path in kept.iterdir()) == ["epoch_002.npz", "epoch_003.npz"]
     assert epoch_of(kept / "epoch_002.npz") == 2 and epoch_of(kept / "epoch_003.npz") == 3
-    assert training.epoch_weights(args.run_dir, 12) == kept / "epoch_012.npz"
+    assert training.epoch_weights(args.run_dir, 12, ".npz") == kept / "epoch_012.npz"
     args, _, _ = scripted_run(tmp_path / "dropped", ["--epochs", "3", "--no-keep-epochs"], [0.6, 0.4, 0.3],
                               [0.5, 0.3, 0.2], [0.9, 0.8, 0.7])
     assert not args.keep_epochs and not (args.run_dir / training.EPOCHS_DIR).exists()
