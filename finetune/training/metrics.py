@@ -1,5 +1,5 @@
-"""The detector metric a training run is judged by: the raw five-frame prepass (GridTrackNet, or
-HeatmapNet for ``.pt`` weights) over whole clips scored as ``evaluate_archive.py`` scores it (``DetectorMetrics``: recall / wrong-object /
+"""The detector metric a training run is judged by: the raw five-frame prepass (GridTrackNet,
+HeatmapNet or MemoryNet, by the weights) over whole clips scored as ``evaluate_archive.py`` scores it (``DetectorMetrics``: recall / wrong-object /
 false-alarm), and the two rules read from it.
 
 ``epoch_score`` ranks the epochs of one run: recall minus the wrong-object rate minus the
@@ -16,7 +16,8 @@ alarms than its starting weights (beyond METRIC_SLACK) is not shipped, whatever 
 The prepass is the tracker's own (``GridTrackNetBallDetector.detect_clip`` through
 ``finetune.data.detect``, the path ``evaluate_archive.py`` takes too), so the winner is judged on
 exactly what the tracker will do: the same five-frame units per phase, the same trailing window,
-the same first-answer-wins rule and y offset. There is no second copy of that protocol here.
+the same first-answer-wins rule and y offset, and for a stateful model the same memory carried
+along each phase. There is no second copy of that protocol here.
 """
 
 from __future__ import annotations

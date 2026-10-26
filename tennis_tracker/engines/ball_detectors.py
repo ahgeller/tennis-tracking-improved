@@ -1,12 +1,13 @@
-"""Ball detector backends: the five-frame prepass (GridTrackNet or HeatmapNet) and the
-single-frame TensorRT engine.
+"""Ball detector backends: the five-frame prepass (GridTrackNet, HeatmapNet or MemoryNet) and
+the single-frame TensorRT engine.
 
 Both sit behind ``BallDetectorBackend``: ``GridTrackNetBallDetector`` (the default, a
 five-frame temporal model run as a whole-clip prepass; ``_prepass`` keeps source-frame
 indices and temporal order; the model is whichever ``ball_models.load_ball_model`` builds
-for ``Config.model_path``, GridTrackNet for ``.npz`` and HeatmapNet for ``.pt``) and the
-single-frame Ultralytics TensorRT engine (``Config.model_path`` ending in ``.engine``),
-driven through ``TensorRTRuntimeSession`` from ``engine_session``.
+for ``Config.model_path``, GridTrackNet for ``.npz`` and HeatmapNet or MemoryNet for ``.pt``,
+a ``STATEFUL`` model's memory carried along each phase) and the single-frame Ultralytics
+TensorRT engine (``Config.model_path`` ending in ``.engine``), driven through
+``TensorRTRuntimeSession`` from ``engine_session``.
 """
 from __future__ import annotations
 
@@ -94,10 +95,16 @@ class CachedDetections:
 class GridTrackNetBallDetector(BallDetectorBackend):
     """Run the five-frame model at its native 30-FPS cadence.
 
-    The model is GridTrackNet or HeatmapNet by ``weights_path``'s suffix
-    (``ball_models.load_ball_model``); both take the same 15-channel unit and
+    The model is GridTrackNet, HeatmapNet or MemoryNet by ``weights_path``
+    (``ball_models.load_ball_model``); all take the same 15-channel unit and
     answer in the same layout, so everything here reads the model's own
-    ``INPUT_CHANNELS`` and grid and nothing asks which it holds.
+    ``INPUT_CHANNELS`` and grid and nothing asks which it holds. A ``STATEFUL``
+    model (MemoryNet) also takes and returns a memory: the prepass runs each
+    phase's units in temporal order carrying that phase's state from the clip's
+    start, one unit per phase per inference call, and the trailing window reads
+    the state without updating it; a stateless model's units are batched four
+    to a call. Which frames are answered, in which order, and when they are
+    published is the same either way.
 
     ``prepare_video`` decodes the whole clip once (by default on a worker
     thread, see ``Config.gridtracknet_prepass_background``) and caches one
@@ -205,17 +212,28 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         units: List[List[_PrepassFrame]] = [[] for _ in range(source_stride)]
         recent: List[Deque[_PrepassFrame]] = [deque(maxlen=5) for _ in range(source_stride)]
         batches: List[_PrepassUnit] = []
+        # A stateful model carries one memory per phase and sees one unit per phase per
+        # call: the phases complete their units in turn, so a batch of ``source_stride``
+        # units holds each phase once. A stateless model's units are batched four at a time.
+        stateful = self.model.STATEFUL
+        units_per_call = source_stride if stateful else _UNITS_PER_INFERENCE
+        states: List[Optional[torch.Tensor]] = [None] * source_stride
         frame_index = inference_calls = detected = 0
         started = time.perf_counter()
         y_offset = self.cfg.gridtracknet_y_offset_px * height / _REFERENCE_HEIGHT_PX
         radius = max(_MIN_BOX_RADIUS_PX, _BOX_RADIUS_FRAC * np.hypot(width, height))
 
-        def flush() -> None:
+        def flush(update_states: bool = True) -> None:
             nonlocal inference_calls, detected
             if not batches:
                 return
             with torch.inference_mode():
-                output = self.model(torch.stack([item[0] for item in batches]))
+                batch = torch.stack([item[0] for item in batches])
+                if stateful:
+                    phases = [indices[0] % source_stride for _, indices in batches]
+                    output = _run_stateful(self.model, batch, phases, states, update_states)
+                else:
+                    output = self.model(batch)
                 decoded = self._decode(output, width, height, self.cfg.conf)
             detected += _store_decoded(batches, decoded, finalized, cached, y_offset, radius)
             inference_calls += 1
@@ -243,11 +261,11 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                     if len(unit) == 5:
                         batches.append((torch.cat([value for value, _ in unit]), [index for _, index in unit]))
                         unit.clear()
-                        if len(batches) == _UNITS_PER_INFERENCE:
+                        if len(batches) == units_per_call:
                             flush()
                     frame_index += 1
                 batches.extend(_trailing_windows(units, recent))
-                flush()
+                flush(update_states=False)          # the trailing windows read the states; nothing follows them
                 if stream is not None:
                     stream.synchronize()
                 else:
@@ -341,6 +359,26 @@ def _store_decoded(batches: List[_PrepassUnit], decoded: List[GridPoint], finali
             cached[source_index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
             detected += 1
     return detected
+
+
+def _run_stateful(model: Any, batch: torch.Tensor, phases: List[int], states: List[Optional[torch.Tensor]],
+                  update: bool) -> torch.Tensor:
+    """One inference call of a ``STATEFUL`` model on `batch`, whose rows are units of distinct
+    `phases`: each row takes its phase's entry of `states` (None before the phase's first unit,
+    the model's zeros) and, when `update`, leaves the new state behind for the phase's next unit.
+    Returns the model's output; the states are updated in place."""
+    if len(set(phases)) != len(phases):
+        raise RuntimeError(f"a stateful model takes one unit per phase per call, not phases {phases}")
+    if all(states[phase] is None for phase in phases):
+        state = None
+    else:
+        known = next(entry for entry in states if entry is not None)
+        state = torch.cat([torch.zeros_like(known) if states[phase] is None else states[phase] for phase in phases])
+    output, new_state = model(batch, state)
+    if update:
+        for row, phase in enumerate(phases):
+            states[phase] = new_state[row:row + 1]
+    return output
 
 
 def _trailing_windows(units: List[List[_PrepassFrame]], recent: List[Deque[_PrepassFrame]]) -> List[_PrepassUnit]:

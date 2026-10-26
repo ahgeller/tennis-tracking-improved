@@ -74,14 +74,22 @@ def test_pt_round_trip_restores_every_tensor_and_loads_in_eval_fp16(tmp_path):
 
 
 def test_other_pt_files_are_refused_by_name(tmp_path):
+    """read_record returns any record of the right shape and refuses another architecture only
+    when asked for one (the loader asks; ball_models.arch_of does not); a bare state dict and an
+    unreadable file are refused either way."""
     torch.save(HeatmapNet().state_dict(), tmp_path / "bare.pt")
     with pytest.raises(ValueError, match="not a heatmap_s4 weights file"):
         load_model(tmp_path / "bare.pt", CPU)
+    with pytest.raises(ValueError, match="not a ball-detector weights file \\(arch None\\)"):
+        read_record(tmp_path / "bare.pt")
     torch.save({"arch": "something_else", "state_dict": {}}, tmp_path / "other.pt")
-    with pytest.raises(ValueError, match="arch 'something_else'"):
-        read_record(tmp_path / "other.pt")
+    assert read_record(tmp_path / "other.pt")["arch"] == "something_else"
+    with pytest.raises(ValueError, match="not a heatmap_s4 weights file \\(arch 'something_else'\\)"):
+        read_record(tmp_path / "other.pt", "heatmap_s4")
     (tmp_path / "garbage.pt").write_bytes(b"not a torch file")
     with pytest.raises(ValueError, match="not a readable heatmap_s4 weights file"):
+        read_record(tmp_path / "garbage.pt", "heatmap_s4")
+    with pytest.raises(ValueError, match="not a readable ball-detector weights file"):
         read_record(tmp_path / "garbage.pt")
 
 

@@ -352,7 +352,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="Pipeline mode: also compute the court events (landings, contacts, rally legs) and "
                              "write them into each clip's tracking JSON for score_court_events.py (needs CatBoost)")
     parser.add_argument("--gridtracknet-weights",
-                        help="Score other five-frame weights, a GridTrackNet .npz or a HeatmapNet .pt: raw mode runs the "
+                        help="Score other five-frame weights, a GridTrackNet .npz or a HeatmapNet / MemoryNet .pt: raw mode runs the "
                              "detector on them, pipeline mode the tracker")
     parser.add_argument("--gridtracknet-stride", type=int, default=None,
                         help="Force the frame spacing fed to GridTrackNet (1 = consecutive frames even at 60 FPS)")
