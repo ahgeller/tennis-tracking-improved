@@ -19,18 +19,26 @@ tags every clip with a source so you can pick, hold out and oversample by source
 
 After every scored epoch (``--score-every``, the last epoch always) the weights are
 scored on the held-out clips with the detector metric ``evaluate_archive.py`` reports
-(recall / wrong-object / false-alarm), and ``best.npz`` is the epoch that metric
-prefers (``promotion_improves``; a tie keeps the earlier epoch), not the one with the
-lowest validation loss (kept as ``best_loss.npz`` for the record). The run ends by
-setting that best epoch against the starting weights on the same clips, and the
-winner is copied to ``--save`` so the tracker always points at the best model.
+(recall / wrong-object / false-alarm), and ``best.npz`` is the scored epoch with the
+highest ``epoch_score`` (recall minus the wrong-object rate minus the false-alarm rate;
+a tie keeps the earlier epoch), not the one with the lowest validation loss (kept as
+``best_loss.npz`` for the record). Every scored epoch's weights are also kept as
+``epochs/epoch_NNN.npz`` (31 MB each; ``--no-keep-epochs`` drops them), so another rule
+can be applied after the fact and any epoch re-scored with ``evaluate_archive.py
+--gridtracknet-weights``. A fine-tune ends by setting the best epoch against the
+starting weights on the same clips (``promotion_improves``, the guard rail against
+shipping a fine-tune with more wrong outputs than the weights it started from); a
+``--from-scratch`` run has no such baseline and the best epoch is the winner. The winner
+is copied to ``--save`` so the tracker always points at the best model.
 
 Every epoch also leaves ``checkpoint.pt`` in the run dir (the model, optimizer and
 GradScaler states with the epoch and the best-so-far bookkeeping), and ``--resume``
 carries an interrupted run on from it with the same options (``--epochs`` may be raised;
-a Colab runtime recycled mid-run no longer costs the epochs done). The seed of every
-epoch's batch draws is ``--seed`` plus the epoch, so a resumed run draws the batches
-the uninterrupted one would have; see ``fit``.
+a Colab runtime recycled mid-run no longer costs the epochs done). The best epoch so far
+is re-derived from ``results.csv`` on resume, not read from the checkpoint, so a run
+begun under an older rule carries on under this one. The seed of every epoch's batch
+draws is ``--seed`` plus the epoch, so a resumed run draws the batches the uninterrupted
+one would have; see ``fit``.
 
 ``--all-clips`` is the other kind of run: once a recipe (the flags and the epoch count)
 has been chosen on a held-out set, train it on every clip with nothing held out and no
@@ -49,7 +57,7 @@ import pickle
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, NamedTuple, Optional, Sequence
+from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -67,12 +75,13 @@ from finetune.training.dataset import (AUGMENTATIONS, Augmenter, UnitDataset, ma
                                        photometric_augment, unit_weights)
 from finetune.training.frame_cache import build_units, prepare_data
 from finetune.training.loop import evaluate_loss, fresh_model, gridtracknet_loss, save_weights, train_epoch
-from finetune.training.metrics import FALSE_ALARM_CONF, false_alarm_units, promotion_improves, score_weights
+from finetune.training.metrics import FALSE_ALARM_CONF, epoch_score, false_alarm_units, promotion_improves, score_weights
 
 SEED = 7                   # every run draws the same augmentation and sampling sequence unless --seed says otherwise
 DEFAULT_EPOCHS = 10
 RESULTS_COLUMNS = ("epoch", "train_loss", "val_loss", "seconds", "score_seconds", *DetectorMetrics._fields)
 CHECKPOINT = "checkpoint.pt"
+EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz, unless --no-keep-epochs
 RUN_OUTCOMES = ("epochs", "false_alarm_units")     # the config.json fields a --resume may differ in, see same_run
 
 # --------------------------------------------------------------------------- the run
@@ -119,7 +128,10 @@ class Checkpoint(NamedTuple):
     """Where a run stood when an epoch ended: the epoch just finished and the best-so-far
     bookkeeping ``fit`` carries from one epoch to the next (the fields ``Selection`` reports).
     ``checkpoint.pt`` records it beside the model, optimizer and GradScaler states, and
-    ``--resume`` picks the run up from it; ``START`` is a run that has not begun."""
+    ``--resume`` picks the run up from it; ``START`` is a run that has not begun. The best
+    epoch and its metrics are recorded for the reader but not trusted on resume: ``fit``
+    re-derives them from ``results.csv`` (``best_scored_epoch``), so a checkpoint written under
+    an earlier selection rule carries on under the current one."""
     epoch: int
     best_epoch: int
     best_metrics: Optional[DetectorMetrics]
@@ -203,6 +215,36 @@ def keep_results_through(results: Path, epoch: int) -> None:
         writer.writerows(row for row in rows if int(row[0]) <= epoch)
 
 
+def best_scored_epoch(results: Path) -> Tuple[int, Optional[DetectorMetrics]]:
+    """The scored epoch ``results.csv`` ranks highest by ``epoch_score`` (a tie keeps the earlier
+    epoch) with its metrics, or (0, None) when no row was scored: the best-so-far a run starts
+    or resumes from, derived from the rows rather than from the checkpoint's bookkeeping."""
+    best_epoch, best_metrics = 0, None
+    if not results.is_file():
+        return best_epoch, best_metrics
+    with results.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if not row.get("recall"):
+                continue
+            metrics = DetectorMetrics(**{field: (int if field in ("visible", "invisible") else float)(row[field])
+                                         for field in DetectorMetrics._fields})
+            if best_metrics is None or epoch_score(metrics) > epoch_score(best_metrics):
+                best_epoch, best_metrics = int(row["epoch"]), metrics
+    return best_epoch, best_metrics
+
+
+def epoch_weights(run_dir: Path, epoch: int) -> Path:
+    """Where a scored epoch's weights are kept: ``<run_dir>/epochs/epoch_NNN.npz``."""
+    return run_dir / EPOCHS_DIR / f"epoch_{epoch:03d}.npz"
+
+
+def metrics_record(metrics: DetectorMetrics) -> dict:
+    """The metrics as ``winner.json`` stores them: a NaN pixel distance (nothing was detected,
+    so there was no distance to measure) becomes null, which is JSON, where NaN is not."""
+    return {field: None if isinstance(value, float) and math.isnan(value) else value
+            for field, value in metrics._asdict().items()}
+
+
 def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoader, val_loader: Optional[DataLoader],
         optimizer: torch.optim.Optimizer, scaler: torch.amp.GradScaler, device: torch.device,
         score: Optional[Callable[[Path], DetectorMetrics]], progress: Checkpoint = START) -> Selection:
@@ -210,9 +252,17 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
     ``--epochs`` is a ValueError, one at it leaves nothing to run). After each one ``last.npz`` is
     written, ``results.csv`` gets its row and ``checkpoint.pt`` is rewritten; on a scored epoch
     (every ``--score-every``, and always the last) ``score(last.npz)`` measures the held-out
-    detector metric and ``best.npz`` follows it by ``promotion_improves`` (a tie keeps the earlier
-    epoch); ``best_loss.npz`` follows the validation loss. With nothing held out (``val_loader``
-    and ``score`` None) the epochs only run, and ``last.npz`` is the result.
+    detector metric, the weights are kept as ``epochs/epoch_NNN.npz`` (unless
+    ``--no-keep-epochs``) and ``best.npz`` becomes the scored epoch with the highest
+    ``epoch_score`` (a tie keeps the earlier epoch); ``best_loss.npz`` follows the validation
+    loss. With nothing held out (``val_loader`` and ``score`` None) the epochs only run, and
+    ``last.npz`` is the result.
+
+    The best epoch so far is derived from the rows ``results.csv`` keeps through `progress`
+    (``best_scored_epoch``), not read from the checkpoint, so a resumed run ranks its earlier
+    epochs by the current rule; when that epoch's weights are in ``epochs/``, ``best.npz`` is
+    made that file (otherwise it stays what the interrupted run left, which an earlier rule may
+    have chosen, until a better epoch scores).
 
     Each epoch seeds torch with ``--seed`` plus its number before drawing its batches, so the
     sampler's draws and the loader workers' seeds are the epoch's own, not the run's history's,
@@ -225,7 +275,14 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
     results = args.run_dir / "results.csv"
     keep_results_through(results, progress.epoch)
     last_path, best_path, best_loss_path = (args.run_dir / name for name in ("last.npz", "best.npz", "best_loss.npz"))
-    _, best_epoch, best_metrics, best_loss_epoch, best_loss = progress
+    best_loss_epoch, best_loss = progress.best_loss_epoch, progress.best_loss
+    best_epoch, best_metrics = best_scored_epoch(results)
+    if best_epoch and best_epoch != progress.best_epoch:
+        kept = epoch_weights(args.run_dir, best_epoch)
+        if kept.is_file():
+            copy_atomic(kept, best_path)
+        print(f"[train] best epoch so far by results.csv: {best_epoch} (the checkpoint said {progress.best_epoch}); "
+              + ("best.npz is now that epoch" if kept.is_file() else f"{kept.name} was not kept, best.npz stays as it was"))
     for epoch in range(progress.epoch + 1, args.epochs + 1):
         started = time.perf_counter()
         torch.manual_seed(args.seed + epoch)
@@ -241,7 +298,9 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
             scoring = time.perf_counter()
             metrics = score(last_path)
             score_seconds = time.perf_counter() - scoring
-            if best_metrics is None or promotion_improves(metrics, best_metrics):
+            if args.keep_epochs:
+                copy_atomic(last_path, epoch_weights(args.run_dir, epoch))
+            if best_metrics is None or epoch_score(metrics) > epoch_score(best_metrics):
                 best_epoch, best_metrics = epoch, metrics
                 copy_atomic(last_path, best_path)
         with results.open("a", encoding="utf-8", newline="") as handle:    # one line per epoch, appended
@@ -250,7 +309,8 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
                          Checkpoint(epoch, best_epoch, best_metrics, best_loss_epoch, best_loss))
         validated = "" if val_loss is None else f" val={val_loss:.6f}"
         scored = (f" | held-out recall={metrics.recall:.3f} wrong={metrics.wrong:.3f} falseAlarm={metrics.false_alarm:.3f}"
-                  f" ({score_seconds / 60:.1f} min) | best epoch {best_epoch}" if metrics is not None else "")
+                  f" score={epoch_score(metrics):+.3f} ({score_seconds / 60:.1f} min) | best epoch {best_epoch}"
+                  if metrics is not None else "")
         print(f"[train] epoch {epoch}: train={train_loss:.6f}{validated} ({seconds / 60:.1f} min){scored}", flush=True)
     if score is None:
         return Selection(last_path, args.epochs, None, best_loss_epoch, best_loss)
@@ -289,8 +349,10 @@ def record_recipe_result(args: argparse.Namespace, selection: Selection, selecti
 def pick_winner(args: argparse.Namespace, clips: List[Clip], val_clips: List[str], selection: Selection,
                 device: torch.device) -> None:
     """Keep the best model by the metric that matters, not just the loss: the best epoch's weights
-    (already scored while training) win only when they beat the starting weights on the held-out
-    clips (see `promotion_improves`)."""
+    (the highest ``epoch_score`` while training) are the winner of a ``--from-scratch`` run, and of
+    a fine-tune only when they beat the starting weights on the held-out clips (the guard rail
+    ``promotion_improves``). A run whose every scored epoch detected nothing still records its
+    best epoch: rates of zero and no pixel distance (null) in ``winner.json``."""
     trained = selection.best_metrics
     print(f"[eval] best.npz (epoch {selection.best_epoch}) on {val_clips}: {trained}")
     winner, winner_stats = selection.best_path, trained
@@ -300,12 +362,12 @@ def pick_winner(args: argparse.Namespace, clips: List[Clip], val_clips: List[str
         val_only = [entry for entry in clips if entry[0] in val_clips]
         baseline = score_weights(args.weights, val_only, device)
         print(f"[eval] starting weights on {val_clips}: {baseline}")
-        record["starting_weights"] = {"path": str(args.weights), "metrics": baseline._asdict()}
+        record["starting_weights"] = {"path": str(args.weights), "metrics": metrics_record(baseline)}
         if not promotion_improves(trained, baseline):
             winner, winner_stats = args.weights, baseline
     copy_atomic(winner, args.save)
     write_atomic(args.run_dir / "winner.json",
-                 json.dumps({"winner": str(winner), "metrics": winner_stats._asdict(), **record}, indent=2))
+                 json.dumps({"winner": str(winner), "metrics": metrics_record(winner_stats), **record}, indent=2))
     print(f"[done] best model -> {args.save}  (from {winner.name}: {winner_stats})")
     if winner == selection.best_path:
         print("[done] promote it with: python finetune/ft.py promote")
@@ -406,6 +468,8 @@ def self_test() -> None:
     expect(bool(torch.isfinite(loss) and torch.isfinite(prediction.grad).all()), "a finite loss and gradient")
     expect(promotion_improves(metrics_of(0.90, 0.01), metrics_of(0.85, 0.01)), "more recall at equal wrong wins")
     expect(not promotion_improves(metrics_of(0.95, 0.05), metrics_of(0.85, 0.01)), "more wrong loses")
+    expect(epoch_score(metrics_of(0.936, 0.007, 0.230)) > epoch_score(metrics_of(0.938, 0.011, 0.305)),
+           "a large false-alarm drop outranks a little recall")
     even = {index: [1.0, 1.0] for index in range(0, 20, 2)}
     expect(build_units(even, 2)[:2] == [[0, 2, 4, 6, 8], [4, 6, 8, 10, 12]], "even-phase units")
     odd = {index: None for index in range(1, 20, 2)}
@@ -481,7 +545,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=SEED, help=f"The augmentation and sampling seed (default {SEED})")
     parser.add_argument("--score-every", type=int, default=1, metavar="K",
                         help="Score the held-out clips with the detector metric every K epochs (the last epoch always); "
-                             "best.npz is the scored epoch the metric prefers")
+                             "best.npz is the scored epoch with the highest recall - wrong - false_alarm")
+    parser.add_argument("--no-keep-epochs", dest="keep_epochs", action="store_false",
+                        help="Do not keep every scored epoch's weights as epochs/epoch_NNN.npz in --run-dir (31 MB each, "
+                             "about 1.2 GB for 40 scored epochs; kept by default so any epoch can be re-scored with "
+                             "evaluate_archive.py --gridtracknet-weights or chosen by another rule later)")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--prep-workers", type=int, default=4, help="Parallel clips while extracting the frame cache")
     parser.add_argument("--device", default="cuda")

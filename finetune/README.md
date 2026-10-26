@@ -47,7 +47,8 @@ finetune/
   clips.csv   one row per clip: source, group, size, fps, stride, label counts (written by import_data.py)
   holdouts.json  named held-out sets of whole recordings (`mixed_v1`), for --holdout
   models/     gridtracknet_best.npz   the winner of the last training run
-  runs/       <tag>/results.csv, config.json, winner.json, best.npz, best_loss.npz, last.npz, checkpoint.pt (for --resume)
+  runs/       <tag>/results.csv, config.json, winner.json, best.npz, best_loss.npz, last.npz, checkpoint.pt (for --resume),
+              <tag>/epochs/epoch_NNN.npz  every scored epoch's weights (31 MB each; --no-keep-epochs drops them)
   cache/      768x432 lossless PNG frames (the tracker's own resize), one folder per clip; keyed on the video, a label edit only adds frames (safe to delete; about 8 GB for the 64 trainable clips, measured 7.9 GB)
 ```
 
@@ -243,20 +244,26 @@ separately). `ft.py check` flags files that break this rule.
    - After every scored epoch (`--score-every K`, default every epoch, the
      last one always) the weights are scored on the held-out clips with the
      detector metric `evaluate_archive.py` reports, and `runs/<tag>/best.npz`
-     is the epoch that metric prefers (a tie keeps the earlier epoch), not the
-     lowest validation loss (`best_loss.npz`, kept for the record);
-     `results.csv` has the losses, the metric and the timings per epoch. The
-     run ends by setting that epoch against the starting weights on the same
-     clips, and only the winner is written to `models/gridtracknet_best.npz`.
-     A run that lowers recall or adds wrong-object detections cannot replace a
-     good model. `winner.json` records the decision (`selected_by`,
-     `best_epoch`). `--seed` changes the augmentation and sampling draws
-     (default 7) for a second opinion on a narrow margin.
+     is the scored epoch with the highest `recall - wrong - false_alarm` (a
+     tie keeps the earlier epoch), not the lowest validation loss
+     (`best_loss.npz`, kept for the record); `results.csv` has the losses, the
+     metric and the timings per epoch, and every scored epoch's weights are
+     kept as `epochs/epoch_NNN.npz` (31 MB each; `--no-keep-epochs` drops
+     them) so any epoch can be re-scored on the PC with `evaluate_archive.py
+     --gridtracknet-weights` or picked by another rule later. A fine-tune ends
+     by setting the best epoch against the starting weights on the same clips,
+     and only the winner is written to `models/gridtracknet_best.npz`: a
+     fine-tune that lowers recall or adds wrong-object detections cannot
+     replace a good model (a `--from-scratch` run has no starting weights to
+     beat; its best epoch is the winner). `winner.json` records the decision
+     (`selected_by`, `best_epoch`). `--seed` changes the augmentation and
+     sampling draws (default 7) for a second opinion on a narrow margin.
    - Every epoch also rewrites `runs/<tag>/checkpoint.pt` (the model, optimizer
      and scaler states with the epoch and the best-so-far bookkeeping), and
      `--resume --run-dir runs/<tag>` carries an interrupted run on from it with
      the same options (`--epochs` may be raised; anything else that differs
-     is refused), keeping `results.csv` and the `best.npz` choice. A run
+     is refused), keeping `results.csv`; the best epoch so far is re-derived
+     from its rows by the current rule, not read from the checkpoint. A run
      started without `--resume` in a folder that holds one starts over. On
      Colab, where a runtime can be recycled mid-run, keep `--run-dir` on
      Drive and resume.
