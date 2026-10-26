@@ -1,239 +1,163 @@
-# Triton Ball Tennis
+# Triton Ball Tennis: training branch
 
-A GPU tennis-video tracker built around GridTrackNet temporal ball detection,
-TensorRT player and court detection, and conservative motion/physics recovery.
-It produces an annotated MP4 and per-frame tracking JSON.
+This branch holds everything the tracker on `main` does not need to run: the
+labelling workspace, the trainer, the Colab notebook and the scorers. This
+README is the training playbook. The tracker itself is documented on `main`;
+the workspace commands (import, label, check, audit) are in `finetune/README.md`.
 
-## Demo
+Everything below runs in the notebook `finetune/GridTrackNet_FineTune_Colab.ipynb`
+on a Colab GPU (A100 if you can get one) with the data zip on Google Drive. The PC
+is used to build the zips and to score the results.
 
-[![GridTrackNet tennis tracking demo](media/tracking_demo.gif)](media/tracking_demo.mp4)
+## One-time setup
 
-The overlay distinguishes where each selected point came from:
+1. On the PC, from the repository root:
 
-- **Green (`DET`):** a position supported by a GridTrackNet detection (may be smoothed)
-- **Orange (`MOT`):** motion-supported recovery
-- **Cyan (`PHY`):** short bounded interpolation or physics recovery
+   ```powershell
+   & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' finetune/ft.py colab-zip
+   & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' finetune/ft.py colab-zip --code-only
+   ```
 
-Raw detector coordinates are preserved in the JSON `measurement` field; `x/y`
-are the selected, possibly smoothed position and `position_kind` distinguishes
-measurement, filtered and recovered positions. Recovery is deliberately conservative: an
-unresolved detector gap remains a gap instead of becoming a long predicted path.
+   The first writes `output/tennis_finetune_colab.zip` (videos, labels, records,
+   bundled weights, code; about 870 MB). The second writes the small
+   `output/tennis_finetune_code.zip` (code and records only).
+2. In Google Drive, make a folder `MyDrive/tennis_finetune/` and put both zips in
+   it. Every run's outputs land in `MyDrive/tennis_finetune/runs/<TAG>/`.
+3. Open the notebook in Colab, Runtime > Change runtime type > GPU.
 
-## Pipeline
+After a code change on the PC, rebuild only the code zip and replace it on Drive;
+the notebook lays it over the unpacked copy on every run. After new labels,
+rebuild the big zip.
 
-- GridTrackNet runs on raw RGB frames in five-frame temporal units at its native
-  30 FPS cadence (30 or 60 FPS input is supported).
-- Player and court models run through TensorRT.
-- Motion masks support selection and short recovery but are not used to alter
-  GridTrackNet's input.
-- The ball-in-play selector rejects static objects and implausible track switches,
-  closes safe one-frame holes, and exports the selected source for every frame.
-- The renderer draws a short anti-aliased trail without inventing points across
-  lost sections.
+## The settings that matter
 
-## Requirements
+| setting | what it is |
+|---|---|
+| `ARCH` | `gridtracknet` (the tracker's current net, `.npz`) or `heatmap_s4` (the stride-4 heat-map net, `.pt`) |
+| `MODE` | `scratch` trains a new network; `finetune` continues from `START_WEIGHTS` |
+| `START_WEIGHTS` | a file in the zip's `models/` folder or a path under `runs/` (say `heat1/best.pt`). A scratch run reads it only for the hard-negative prepass |
+| `HOLDOUT` | `mixed_v1`: 24 whole recordings never trained on, the honest test |
+| `SELECTION_RUN` | set to a finished run's `TAG` to train on every clip following that run's recipe |
+| `EPOCHS` | a ceiling; the best epoch is kept by the held-out metric. On a resume, raising it trains longer |
+| `LR` | Adadelta step. 1.0 from scratch, 0.3 for a fine-tune. May be lowered on a resume, never raised |
+| `AUGMENT` | `basic translate` is the recipe; `strong` is harsher colour and blur |
+| `TAG` | the run's folder. Keeping a `TAG` and pressing Run all resumes that run |
 
-- Python 3.10 and an NVIDIA CUDA GPU
-- CUDA-enabled PyTorch (install it from the PyTorch index for your CUDA version)
-- NumPy, OpenCV (pip's `opencv-python` is enough for the tracker; the label tool
-  needs the Qt build from conda-forge, see below)
-- TensorRT 10 for the player and court engines
-- BoxMOT for player tracking (required with the player engine; unset the engine path to run without players)
-- CatBoost, only for `--court`
-- SciPy and psutil, optional (motion-debug trail smoothing; automatic frame-cache sizing)
-- Ultralytics, only for exporting new engines with `build_trt_engines.py`
-- pytest, for the tests and `clean_tracker.py --self-test`
-- FFmpeg recommended for faster video encoding
+The trainer refuses to resume a run whose other settings changed, and says which.
 
-`requirements.txt` lists these with the versions the last review ran with
-(recorded in `audit/records/snapshot.json`); it is not a full lock file:
+## Stage 1: the selection run (held out, from scratch)
+
+This is the run that finds the best network and the best epoch, on recordings it
+has never seen.
+
+```
+ARCH = "heatmap_s4"        (or "gridtracknet" to repeat the old recipe)
+MODE = "scratch"
+START_WEIGHTS = "gridtracknet_weights_torch.npz"
+HOLDOUT = "mixed_v1"
+SELECTION_RUN = ""
+EPOCHS = 40
+LR = 1.0
+AUGMENT = "basic translate"
+SCORE_EVERY = 2
+TAG = "heat1"              (any new name)
+```
+
+Run all. Every scored epoch prints one table row: train loss, held-out recall,
+wrong, false alarm, median px, and which epoch is best so far.
+
+Reading the table:
+
+- Recall still climbing by a point every few epochs: let it run.
+- Recall flat for 10 epochs (within about 0.02) while false alarm swings:
+  the step is too big. Go to stage 2 now; the rest of the epochs are wasted.
+- `EPOCHS` reached while recall is still climbing: raise `EPOCHS`, keep the
+  `TAG`, Run all.
+
+## Stage 2: the rate drop (resume the same run)
+
+Interrupt the cell, then change only these and Run all:
+
+```
+LR = 0.1
+EPOCHS = (current epoch + 20)
+TAG = unchanged
+```
+
+The settings cell sees the checkpoint, sees that the rate went down, and adds
+`--lr-drop`. The log says `[train] learning rate 1 -> 0.1 from epoch N`. Expect the
+false-alarm column to settle within 4 to 6 epochs and recall to hold or gain a
+point. When the table is flat for 8 epochs, the run is done; `best.*` in the run
+folder is the winner.
+
+## Stage 3: judge the winner on the PC
+
+Download `best.pt` (or `best.npz`) from `MyDrive/tennis_finetune/runs/<TAG>/` and
+score it on the held-out set, per source, against the bundled weights:
 
 ```powershell
-pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
-pip install -r requirements.txt
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode raw --holdout mixed_v1 --gridtracknet-weights <best.pt> > output/<TAG>_raw.log
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode raw --holdout mixed_v1 > output/bundled_raw.log
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluation/compare_eval_logs.py output/bundled_raw.log output/<TAG>_raw.log
 ```
 
-The label tool (`python finetune/ft.py label <clip>`) draws its windows with Qt
-and refuses to start on any other OpenCV build. pip's Windows `opencv-python`
-wheel is not the Qt build (it reports WIN32UI), so for labeling, use a conda
-environment with conda-forge's OpenCV in its place; `finetune/ft.py` looks for
-such an environment by itself:
+The log has one `source=` line each for custom, prof and grid. The bundled
+weights trained on the custom clips, so compare on prof and grid; those are the
+only unseen numbers for both. The bar for a new architecture: at least 2 points
+more recall at equal or lower false alarm, and the same commands with
+`--mode pipeline` (the whole tracker, selector included) not worse.
+
+To run the tracker with the new weights on any video:
 
 ```powershell
-pip uninstall opencv-python
-conda install -c conda-forge opencv
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py -i <video.mp4> --weights <best.pt>
 ```
 
-FilterPy is not needed: the selector's Kalman filter is plain NumPy.
+## Stage 4: the deployable weights (every clip)
 
-The repository includes the GridTrackNet weight export, the CatBoost bounce
-model and the TensorRT engines used by the default pipeline. TensorRT engines
-are platform-specific and may need to be rebuilt for a different GPU or
-TensorRT version.
+The winner from stage 1 never saw the 24 held-out clips. For the weights you
+actually run, carry it on over all 86 clips. Fine-tuning the winner is cheaper
+than a full retrain and keeps what it learned:
 
-## Usage
-
-Run the bundled Pomona sample:
-
-```powershell
-python clean_tracker.py
+```
+ARCH = same as the selection run
+MODE = "finetune"
+START_WEIGHTS = "<selection TAG>/best.pt"
+HOLDOUT = ""
+SELECTION_RUN = "<selection TAG>"
+EPOCHS = 10
+LR = 0.3
+TAG = "<selection TAG>_all"
 ```
 
-Run another 30 or 60 FPS match:
+Run all. The result is `winner.pt` in the new run folder. These weights saw every
+labelled clip, so nothing can measure them any more; the only test left is the
+tracker on unlabelled footage.
 
-```powershell
-python clean_tracker.py --input path\to\match.mp4 --output output\tracking.mp4 --tracking-json output\tracking.json
-```
+If you would rather retrain on everything from nothing (same recipe, best epoch
+count, no held-out set), set `MODE = "scratch"`, `EPOCHS = 0` and the rest as
+above. It takes as long as stage 1 did.
 
-Export JSON without rendering a video:
+## Stage 5: new footage later
 
-```powershell
-python clean_tracker.py --input path\to\match.mp4 --tracking-json output\tracking.json --no-video
-```
+When you label new clips, do not fold them in blindly:
 
-Use another CUDA device or detector threshold:
+1. Score the current deployable weights on the new clips first, with
+   `evaluate_archive.py --archive finetune --mode raw --clips <new clips>`. That is
+   the honest number for footage the model never saw.
+2. Rebuild the big zip (`ft.py colab-zip`) and replace it on Drive.
+3. Fine-tune on everything: stage 4 with `START_WEIGHTS` set to the current
+   deployable file and a new `TAG`.
+4. A full retrain (stage 1 then 4) is only needed when the new footage changes
+   the picture, say a new camera or many new matches.
 
-```powershell
-python clean_tracker.py --device 1 --conf 0.55
-```
+Keep `finetune/holdouts.json` as it is; `mixed_v1` must stay unseen by every
+selection run so the stage 3 numbers remain comparable over time.
 
-## Fine-tuning GridTrackNet
+## Where things are
 
-The bundled GridTrackNet weights contain the latest fine-tuned checkpoint used
-to produce the demo.
-
-`finetune.bat` (or `.\finetune.ps1`) opens the fine-tuning workspace and runs
-`finetune/ft.py`, which covers importing clips, labelling, checking labels,
-scoring the detector, training and promoting the winner:
-
-```powershell
-.\finetune.ps1 status                       what is labelled and which model is current
-.\finetune.ps1 add C:\clips\rally7.mp4      copy a video in and pre-label it
-.\finetune.ps1 label rally7                 click-correct the labels
-.\finetune.ps1 train --holdout mixed_v1     fine-tune; keeps the epoch and the model the held-out clips prefer
-```
-
-The videos and caches the workspace builds are regenerable and stay untracked;
-`finetune/labels/` keeps the hand-corrected own-camera labels. See
-`finetune/README.md` for the full loop and `finetune/DATASETS.md` for sources.
-
-## Validation
-
-Run the deterministic tracking checks and the synthetic regression tests:
-
-```powershell
-python clean_tracker.py --self-test
-python -m pytest -q
-```
-
-Evaluate against annotations:
-
-```powershell
-python clean_tracker.py --no-video --annotations sample\pomona_annotations.json
-```
-
-Score the detector (or the full pipeline) on the hand-labelled clips with
-`evaluate_archive.py`. `--archive` chooses the label set; pass it explicitly
-so the result does not depend on `$TENNIS_ARCHIVE` or other machine state:
-
-```powershell
-python evaluate_archive.py --archive finetune --mode raw --clips video13
-```
-
-`check_parity.py` is a strict gate against the frozen Pomona benchmark, and
-`validate_tracking.py` scores an exported tracking JSON against hand labels.
-
-## Project structure
-
-```text
-clean_tracker.py                         Command-line entry point
-evaluate_archive.py                      Detector/pipeline scoring on hand-labelled clips (evaluation/archive.py,
-                                         pipeline_score.py scores one pipeline run's clip)
-validate_tracking.py                     Tracking JSON vs. hand labels (evaluation/validate.py)
-check_parity.py                          Frozen Pomona benchmark gate (evaluation/parity.py)
-evaluation/                              The scorers behind those three entry points
-build_trt_engines.py                     YOLO checkpoint -> ONNX -> TensorRT engine builder
-requirements.txt                         Python packages (see Requirements)
-tennis_tracker/pipeline.py               Run entry point: orders the stages, calls the selector
-tennis_tracker/run_context.py            Data the stages pass each other
-tennis_tracker/pass1.py                  Decode, motion evidence, ROIs and detections per frame
-tennis_tracker/frame_window.py           Previous/current/next frames for pass 1's temporal gate
-tennis_tracker/pass2.py                  Render the tracking and debug videos
-tennis_tracker/export.py                 What a run returns, and the tracking JSON export
-tennis_tracker/tracking_schema.py        The tracking JSON's shape, shared by the writer and the scorers
-tennis_tracker/motion.py                 CUDA background model and motion masks
-tennis_tracker/roi_tracking.py           ROI tracking for motion search
-tennis_tracker/headless.py               Running the tracker from another program, nothing drawn
-tennis_tracker/gridtracknet.py           GridTrackNet model and decoder
-tennis_tracker/video_io.py               Frame reader, video writer, CUDA uploads
-tennis_tracker/config.py                 The run's Config; paths.py: model asset paths, spelled once
-tennis_tracker/frame_rate.py             Frame-rate rules; utils.py: host-side helpers (FFmpeg, device)
-tennis_tracker/engines/                  The TensorRT engines and the detector backends:
-  ball_detectors.py                        GridTrackNet prepass and the TensorRT ball engine
-  player_detector.py                       TensorRT player detection with ByteTrack association
-  court_detector.py                        Court keypoint engine, run every N frames
-  engine_session.py                        TensorRT session shared by the engine backends
-  engine_files.py                          Engine files on disk: metadata, class names, I/O tensors
-  engine_boxes.py                          Decoding detection-engine outputs into boxes
-tennis_tracker/court/                    The court and what happens on it:
-  court_geometry.py                        Court keypoints, side guides, polygon, homography
-  court_scene.py                           CourtScene, the event types and the player-box queries
-  ball_turns.py                            Where the ball track turns: sample windows, short gaps
-  bounce_events.py                         CatBoost bounces and kinematic landing candidates
-  contact_events.py                        Player contacts
-  rally_legs.py                            Schematic rally legs on the court plane
-  court_drawing.py                         Court keypoints, lines, net line and polygon
-  court_minimap.py                         Court minimap drawing
-tennis_tracker/render/                   Drawing for pass 2:
-  rendering.py                             Frame drawing: canvas, markers, HUD
-  trails.py                                Ball, display-path and candidate-track trails
-  display_path.py                          The chosen track's display path
-  motion_debug.py                          Motion-debug video drawing: masks, selected ball
-  motion_trails.py                         Motion-debug video's raw-motion trails
-  summaries.py                             Console summaries printed at the end of a run
-ball_in_play_selector/                   Track construction, scoring, and recovery
-models/gridtracknet_weights_torch.npz    GridTrackNet inference weights
-models/ctb_regr_bounce.cbm               CatBoost bounce model (--court)
-models/                                  Player and court TensorRT engines
-sample/                                  Sample video and validation annotations
-finetune.bat / finetune.ps1              Front door for the fine-tuning workspace
-finetune/ft.py                           Front door for the labelling and training workflow
-finetune/menu.py                         Its interactive menu
-finetune/commands.py, interpreter.py     Its in-process commands and the venv hand-over
-finetune/labeling/label_tool.py          Manual label editing (label_session holds its state; label_cli,
-                                         label_store, label_source, label_window, label_cursor, label_keys,
-                                         label_mouse, label_frame_view, label_grid, label_sheet, label_draw and
-                                         label_hints hold its other pieces)
-finetune/refiner/refine.py, cnn_refiner.py  Sub-pixel label suggestions and the CNN that places them
-finetune/refiner/motion_blobs.py         What moved on one frame: change map, motion centroid, blobs
-finetune/refiner/refiner_sheet.py        A zoomed sheet of where two versions of that CNN disagree
-finetune/refiner/refiner_training.py     Training that CNN on the frames you have reviewed
-finetune/refiner/refiner_crops.py        The crops of those frames; refiner_fitting.py fits and scores one network
-finetune/refiner/hints.py                Their command line (ft.py hints: train, list, use, sheet)
-finetune/data/labels.py                  Label file format; label_check.py checks a file, label_audit.py
-                                         audits labels against the detector, label_flags.py keeps the
-                                         frames an audit flagged for a person
-finetune/data/workspace.py, fileio.py    Workspace layout, clip facts, atomic writes
-finetune/data/data_policy.py             Which clips may be trained, validated or scored on
-finetune/data/import_data.py, realign.py Source conversion and temporal realignment (realign_solve.py
-                                         is the offset solver)
-finetune/data/import_sources.py          What the dataset importers share
-finetune/data/detect.py                  The raw GridTrackNet prepass over one clip
-finetune/training/train_gridtracknet.py  Training; loop.py is the training loop, metrics.py the
-                                         detector metric a run is judged by (data/detector_metrics.py scores it)
-finetune/training/clips.py               Which clips the trainer uses and holds out
-finetune/training/frame_cache.py         The per-clip frame cache and its training units
-finetune/training/dataset.py             Grid targets, augmentation, Dataset and sampler
-finetune/training/pretrack.py            Drafts from the raw GridTrackNet prepass
-finetune/labels/                         Hand-corrected own-camera labels
-tests/                                   Synthetic regression tests (pytest)
-audit/                                   Review reports and verification scripts
-audit/records/                           Their logs and results (records, not code)
-output/                                  Generated videos, JSON, and reports (ignored)
-```
-
-## Current limitation
-
-GridTrackNet can still miss a blurred ball or select a player/background feature.
-The conservative selector prevents many false continuations, but correcting raw
-green detector errors requires fine-tuning the model on additional labeled clips.
+- `finetune/README.md`: importing, labelling, checking and auditing clips.
+- `finetune/training/train_gridtracknet.py`: the trainer; `--help` lists every flag.
+- `audit/records/gridtracknet_recipe_2026-10.md`: the ledger of runs and what each
+  one changed.
+- `AGENTS.md`: the map of the code.
