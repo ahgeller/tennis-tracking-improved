@@ -106,6 +106,63 @@ def test_a_memory_fine_tune_starts_from_its_parent_or_its_own_file_and_takes_the
     assert args.chain is None and "[train] --chain 3 is ignored: heatmap_s4 trains on single units" in capsys.readouterr().out
 
 
+def test_a_stride_two_fine_tune_starts_from_its_parent_or_its_own_file_on_single_units(tmp_path, capsys):
+    """--arch heatmap_s2 --weights <heatmap_s4 .pt> is the parent start (starting_arch heatmap_s4);
+    a heatmap_s2 .pt continues; a memory_s4 file is not its parent and is refused in the line that
+    names both files it could take; --chain is dropped with a line, as for heatmap_s4."""
+    parser = training.build_parser()
+    parent, own = pt_record(tmp_path / "heat.pt"), pt_record(tmp_path / "s2.pt", "heatmap_s2")
+    args = parser.parse_args(["--arch", "heatmap_s2", "--weights", str(parent), "--save", str(tmp_path / "w.pt")])
+    training.resolve_arch(args, None)
+    assert (args.arch, args.starting_arch, args.chain) == ("heatmap_s2", "heatmap_s4", None)
+    args = parser.parse_args(["--arch", "heatmap_s2", "--weights", str(own), "--save", str(tmp_path / "w.pt")])
+    training.resolve_arch(args, None)
+    assert (args.arch, args.starting_arch, args.chain) == ("heatmap_s2", "heatmap_s2", None)
+    assert capsys.readouterr().out == ""
+    args = parser.parse_args(["--arch", "heatmap_s2", "--weights", str(pt_record(tmp_path / "memory.pt", "memory_s4")),
+                              "--save", str(tmp_path / "w.pt")])
+    with pytest.raises(ValueError, match="is a memory_s4 file, but the starting model of a heatmap_s2 fine-tune must be a "
+                                         "heatmap_s2 one or its parent's, a heatmap_s4 one \\(.pt\\)"):
+        training.resolve_arch(args, None)
+    args = parser.parse_args(["--arch", "heatmap_s2", "--weights", str(parent), "--chain", "3", "--save", str(tmp_path / "w.pt")])
+    training.resolve_arch(args, None)
+    assert args.chain is None and "[train] --chain 3 is ignored: heatmap_s2 trains on single units" in capsys.readouterr().out
+    model = fresh_model(torch.device("cpu"), "heatmap_s2")
+    assert isinstance(model, model_class("heatmap_s2")) and model.training and (model.GRID_COLS, model.GRID_ROWS) == (384, 216)
+
+
+def test_train_builds_the_stride_two_network_from_its_parent_on_single_units(tmp_path, capsys):
+    """--arch heatmap_s2 --weights <heatmap .pt>: fit receives a HeatmapNetS2 whose shared layers
+    are the parent's, through the unit data path (no chains), with the parent-start line naming
+    what starts fresh and config.json recording no chain."""
+    from tennis_tracker.heatmapnet import HeatmapNet
+    from tennis_tracker.heatmapnet_s2 import HeatmapNetS2
+    videos, labels = workspace(tmp_path, ["a", "b"])
+    parent = HeatmapNet()
+    save_model(parent, tmp_path / "heat.pt")
+    received = {}
+
+    def fit(args, model, train_loader, *rest):
+        received["model"], received["loader"] = model, train_loader
+        return training.Selection(args.run_dir / "best.pt", 1, training.metrics_of(0.9, 0.0), 1, 0.1)
+    unit = {"clip": "a", "source": "custom", "points": [[1.0, 1.0]]}
+    manifest = {"train": [unit] * 3, "val": [dict(unit, clip="b")], "validation_clips": ["b"]}
+    with patch.object(training, "prepare_data", return_value=manifest), patch.object(training, "DataLoader", side_effect=lambda dataset, **kw: (dataset, kw)), \
+            patch.object(training, "build_chains") as built, patch.object(training, "fit", side_effect=fit), patch.object(training, "pick_winner"):
+        assert training.main(["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"),
+                              "--run-dir", str(tmp_path / "run"), "--arch", "heatmap_s2", "--weights", str(tmp_path / "heat.pt"),
+                              "--save", str(tmp_path / "winner.pt"), "--device", "cpu", "--epochs", "1"]) == 0
+    model = received["model"]
+    assert isinstance(model, HeatmapNetS2) and model.training and torch.equal(model.stem[0].weight, parent.stem[0].weight)
+    assert model.head.weight.shape[1] == 48 and not built.called
+    dataset, _ = received["loader"]
+    assert isinstance(dataset, UnitDataset) and dataset.arch == "heatmap_s2"
+    out = capsys.readouterr().out
+    assert f"[train] heatmap_s2 from its parent {tmp_path / 'heat.pt'}: the shared layers are copied, the stride-2 decoder " \
+           "block and the head start fresh" in out
+    assert json.loads((tmp_path / "run" / "config.json").read_text(encoding="utf-8"))["chain"] is None
+
+
 def test_a_scratch_run_reads_either_weights_for_the_prepass_but_gridtracknet_needs_its_template(tmp_path):
     parser = training.build_parser()
     args = parser.parse_args(["--arch", "heatmap_s4", "--from-scratch", "--weights", str(tmp_path / "grid.npz"),

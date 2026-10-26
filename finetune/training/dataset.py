@@ -4,8 +4,9 @@ for the stateful architecture) and the sampler that weights them by source and b
 (absent-ball frames, the frames the starting weights fired on).
 
 The target follows the architecture (``make_target``): GridTrackNet's one-hot cell on its 48x27
-grid, exactly as the upstream trainer has it; HeatmapNet's and MemoryNet's Gaussian heat map on
-their 192x108 grid (``HEAT_SIGMA_CELLS``), 1 at the ball's cell. All carry the offsets at the
+grid, exactly as the upstream trainer has it; the heat architectures' Gaussian heat map on their
+own grid (192x108 for HeatmapNet and MemoryNet, 384x216 for HeatmapNetS2; ``HEAT_SIGMA_CELLS``,
+in cells, so half as wide in pixels at stride 2), 1 at the ball's cell. All carry the offsets at the
 ball's cell only, and an absent ball is all zeros. The frames are the same five for every
 architecture, so every augmentation's 15-channel reshape serves each.
 
@@ -77,7 +78,7 @@ def gaussian_heat(target: np.ndarray, row: int, col: int, sigma: float = HEAT_SI
 
 def make_target(points, width: int, height: int, arch: str = GRIDTRACKNET) -> torch.Tensor:
     """The (15, rows, cols) target of a unit's five labels on `arch`'s grid: per frame the heat
-    grid (GridTrackNet: 1 at the ball's cell; HeatmapNet and MemoryNet: ``gaussian_heat`` around
+    grid (GridTrackNet: 1 at the ball's cell; the heat architectures: ``gaussian_heat`` around
     it, 1 at the cell) and the x and y offsets, the ball's fractional position in [0, 1) within
     its cell, written at that cell only. A frame without a ball (None) is all zeros."""
     grid_cols, grid_rows = model_class(arch).GRID_COLS, model_class(arch).GRID_ROWS
