@@ -1,5 +1,6 @@
 """Fine-tune (or train from scratch) the ball detector on the finetune workspace labels:
-GridTrackNet, or with ``--arch heatmap_s4`` the HeatmapNet of ``tennis_tracker/heatmapnet.py``.
+GridTrackNet, with ``--arch heatmap_s4`` the HeatmapNet of ``tennis_tracker/heatmapnet.py``, or
+with ``--arch memory_s4`` the MemoryNet of ``tennis_tracker/memorynet.py``.
 
 Data contract (same as the archive): ``videos/<clip>.mp4`` + ``labels/<clip>_ball.csv``
 with ``frame,ball_x,ball_y`` rows at 30 FPS cadence (every 2nd frame of a 60 FPS
@@ -16,6 +17,7 @@ tags every clip with a source so you can pick, hold out and oversample by source
     python finetune/training/train_gridtracknet.py --from-scratch --epochs 30   # train a fresh network on everything
     python finetune/training/train_gridtracknet.py --arch heatmap_s4 --from-scratch --holdout mixed_v1   # the second architecture
     python finetune/training/train_gridtracknet.py --arch heatmap_s4 --weights finetune/runs/h1/best.pt --all-clips --selection-run finetune/runs/h1
+    python finetune/training/train_gridtracknet.py --arch memory_s4 --weights finetune/runs/h1/best.pt --holdout mixed_v1   # the memory network from its parent
     python finetune/training/train_gridtracknet.py --all-clips --selection-run finetune/runs/r5 --augment basic translate
     python finetune/training/train_gridtracknet.py --resume --run-dir finetune/runs/r5   # carry on after an interruption
     python finetune/training/train_gridtracknet.py --resume --lr-drop --lr 0.1 --run-dir finetune/runs/r5   # ... at a lower rate
@@ -57,22 +59,34 @@ scoring, and take ``last.npz`` as the result; ``winner.json`` then says
 ``selected_by: "recipe"`` and copies in the selection run's details (``--selection-run``),
 since the deployable weights were never measured on footage they did not see.
 
-``--arch`` picks the network (``tennis_tracker.ball_models``): ``gridtracknet`` (the default)
-or ``heatmap_s4``, the stride-4 heat-map network, whose target is a Gaussian on its 192x108 grid
-and whose loss is the CenterNet focal loss (``dataset.make_target``, ``loop.heatmap_loss``).
-The scoring, the winner rule and the resume are the same: the metric is the tracker's own
-prepass, which loads either by the weights file's suffix, ``.npz`` for GridTrackNet and ``.pt``
-for HeatmapNet, and every file this trainer writes (``last``, ``best``, ``best_loss``,
-``epochs/epoch_NNN``, ``--save``) carries the architecture's suffix; a ``--save`` given with the
-other suffix is corrected, with a line saying so. ``--weights`` is the starting model of a
-fine-tune and must then be the architecture's own file (``.npz`` for GridTrackNet, ``.pt`` for
-HeatmapNet; another is refused in one line); with ``--from-scratch`` it is either architecture's
-and only feeds the hard-negative prepass of ``--oversample-false-alarms`` (a GridTrackNet scratch
-run still needs an ``.npz``, the template its weights are written into). ``config.json`` records
-``arch``, which a ``--resume`` without ``--arch`` continues with (one naming the other architecture
-is refused), and an ``--all-clips`` run inherits its selection run's architecture
-(``read_selection_run``), so a HeatmapNet winner can be fine-tuned on every clip, and later on new
-clips, from its ``.pt``.
+``--arch`` picks the network (``tennis_tracker.ball_models``): ``gridtracknet`` (the default),
+``heatmap_s4``, the stride-4 heat-map network, whose target is a Gaussian on its 192x108 grid
+and whose loss is the CenterNet focal loss (``dataset.make_target``, ``loop.heatmap_loss``), or
+``memory_s4``, HeatmapNet with a memory carried between consecutive units of one phase. The
+scoring, the winner rule and the resume are the same: the metric is the tracker's own prepass,
+which loads the network the weights file names (``.npz`` is GridTrackNet; a ``.pt`` record names
+``heatmap_s4`` or ``memory_s4`` inside, ``ball_models.arch_of``), and every file this trainer
+writes (``last``, ``best``, ``best_loss``, ``epochs/epoch_NNN``, ``--save``) carries the
+architecture's suffix; a ``--save`` given with the other suffix is corrected, with a line saying
+so. ``--weights`` is the starting model of a fine-tune and must then be the architecture's own
+file (``.npz`` for GridTrackNet, a ``.pt`` of its own architecture for the others; another is
+refused in one line), except that a ``memory_s4`` fine-tune may start from a ``heatmap_s4`` file,
+its parent: the shared layers are copied and the memory cell starts fresh
+(``memorynet.from_heatmap``), which is how the memory network is first trained. With
+``--from-scratch`` ``--weights`` is any architecture's and only feeds the hard-negative prepass of
+``--oversample-false-alarms`` (a GridTrackNet scratch run still needs an ``.npz``, the template
+its weights are written into). ``config.json`` records ``arch``, which a ``--resume`` without
+``--arch`` continues with (one naming another architecture is refused), and an ``--all-clips``
+run inherits its selection run's architecture (``read_selection_run``), so a HeatmapNet winner
+can be fine-tuned on every clip, and later on new clips, from its ``.pt``.
+
+A ``memory_s4`` run trains on chains (``dataset.build_chains``, ``dataset.ChainDataset``):
+``--chain`` consecutive non-overlapping units of one clip and phase (default ``dataset.CHAIN``, 4;
+the flag is ignored by the other architectures), the state None at the chain's start and carried
+through it, the loss the mean of the units' (``loop.chain_loss``), one augmentation draw per
+chain. A batch counts chains, a chain counts its units toward ``--epoch-units``, a chain's
+sampling weight is the mean of its units', and ``config.json`` records ``chain``, which a
+``--resume`` may not change.
 """
 
 from __future__ import annotations
@@ -94,15 +108,17 @@ from torch.utils.data import DataLoader
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tennis_tracker import heatmapnet
-from tennis_tracker.ball_models import ARCHITECTURES, GRIDTRACKNET, HEATMAP_S4, arch_of, load_ball_model, weights_suffix
+from tennis_tracker import heatmapnet, memorynet
+from tennis_tracker.ball_models import (ARCHITECTURES, GRIDTRACKNET, HEATMAP_S4, MEMORY_S4, arch_of, load_ball_model,
+                                        weights_suffix)
 from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH
 from finetune.data.detector_metrics import DetectorMetrics
 from finetune.data.fileio import atomic_binary, atomic_csv, copy_atomic, write_atomic
 from finetune.data import workspace as ws
 from finetune.training.clips import Clip, ClipSelection, find_clips, resolve_val_clips, validation_split
-from finetune.training.dataset import (AUGMENTATIONS, Augmenter, UnitDataset, make_sampler, make_target,
-                                       photometric_augment, unit_weights)
+from finetune.training.dataset import (AUGMENTATIONS, CHAIN, Augmenter, ChainDataset, UnitDataset, build_chains,
+                                       chain_units, chain_weights, make_sampler, make_target, photometric_augment,
+                                       unit_weights, weighted_sampler)
 from finetune.training.frame_cache import build_units, prepare_data
 from finetune.training.loop import evaluate_loss, fresh_model, gridtracknet_loss, heatmap_loss, save_weights, train_epoch
 from finetune.training.metrics import FALSE_ALARM_CONF, epoch_score, false_alarm_units, promotion_improves, score_weights
@@ -112,8 +128,8 @@ DEFAULT_EPOCHS = 10
 RESULTS_COLUMNS = ("epoch", "train_loss", "val_loss", "seconds", "score_seconds", *DetectorMetrics._fields)
 CHECKPOINT = "checkpoint.pt"
 EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz (or .pt), unless --no-keep-epochs
-RECIPE_FIELDS = ("arch", "augment", "oversample", "oversample_absent", "oversample_false_alarms", "epoch_units",
-                 "batch_size", "lr", "seed", "holdout", "validation_clips")      # what read_selection_run copies
+RECIPE_FIELDS = ("arch", "chain", "augment", "oversample", "oversample_absent", "oversample_false_alarms",
+                 "epoch_units", "batch_size", "lr", "seed", "holdout", "validation_clips")      # what read_selection_run copies
 RUN_OUTCOMES = ("epochs", "false_alarm_units")     # the config.json fields a --resume may differ in, see same_run
 RATE_FIELDS = ("lr", "lr_schedule")                # ... and the two same_run reads as the schedule, not field by field
 
@@ -136,7 +152,8 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
     ``--oversample-false-alarms`` weighted up; ``lr_schedule``: the rates the run has trained at,
     see ``lr_schedule_of``, by default the one ``--lr`` from epoch 1), as ``config.json`` records
     it. ``lr`` is the rate in force."""
-    return {"arch": args.arch or GRIDTRACKNET, "clips": names, "validation_clips": val_clips, "holdout": args.holdout,
+    return {"arch": args.arch or GRIDTRACKNET, "chain": args.chain, "clips": names,
+            "validation_clips": val_clips, "holdout": args.holdout,
             "val_clips": args.val_clips,
             "all_clips": args.all_clips, "selection_run": str(args.selection_run) if args.selection_run else None,
             "sources": args.sources, "cameras": args.cameras, "augment": sorted(set(args.augment)),
@@ -478,11 +495,15 @@ def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict], resume
     or of the selection run (an ``--all-clips`` run inherits it), else GridTrackNet; an ``--arch``
     that contradicts either is refused here, in one line that names the run (``same_run`` would
     refuse it too, but after ``--weights`` had been judged by the wrong architecture). A fine-tune
-    starts from ``--weights``, so they must be the architecture's own file (``weights_suffix``);
-    a ``--from-scratch`` run reads them only for the hard-negative prepass, which takes either
+    starts from ``--weights``, so they must be the architecture's own file (``weights_suffix``),
+    or for ``memory_s4`` its parent's (``memorynet.PARENT_ARCH``: the memory starts fresh); a
+    ``--from-scratch`` run reads them only for the hard-negative prepass, which takes any
     architecture's, except that a GridTrackNet scratch run needs the ``.npz`` as the template its
-    weights are written into. A mismatch is a ValueError. ``--save`` is then given the
-    architecture's suffix, with a line saying so when it had the other."""
+    weights are written into. A mismatch is a ValueError. ``args.starting_arch`` is left as the
+    architecture ``--weights`` holds (``arch_of``, which reads a ``.pt`` record), ``args.chain`` as
+    the chain length (``--chain`` or ``dataset.CHAIN`` for ``memory_s4``, None for the others, with
+    a line when a given one is dropped) and ``--save`` is given the architecture's suffix, with a
+    line saying so when it had the other."""
     inherited, source = None, ""
     if resumed is not None:
         inherited, source = arch_of_config(resumed), f"the run in {args.run_dir}, which trains"
@@ -494,11 +515,17 @@ def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict], resume
         raise ValueError(f"--arch {args.arch} does not follow {source} {inherited}; leave --arch out to inherit it")
     suffix = weights_suffix(args.arch)
     starting = arch_of(args.weights)                 # a suffix that is neither is refused here
-    if starting != args.arch and (not args.from_scratch or args.arch == GRIDTRACKNET):
+    parent_start = args.arch == MEMORY_S4 and starting == memorynet.PARENT_ARCH
+    if starting != args.arch and not parent_start and (not args.from_scratch or args.arch == GRIDTRACKNET):
         role = ("the template the trained weights are written into" if args.from_scratch
                 else f"the starting model of a {args.arch} fine-tune")
-        raise ValueError(f"--weights {args.weights} is a {starting} file, but {role} must be a {args.arch} one "
+        parent = f" or its parent's, a {memorynet.PARENT_ARCH} one" if args.arch == MEMORY_S4 else ""
+        raise ValueError(f"--weights {args.weights} is a {starting} file, but {role} must be a {args.arch} one{parent} "
                          f"({suffix})" + ("" if args.from_scratch else "; --from-scratch trains a new network instead"))
+    args.starting_arch = starting
+    if args.arch != MEMORY_S4 and args.chain is not None:
+        print(f"[train] --chain {args.chain} is ignored: {args.arch} trains on single units")
+    args.chain = (args.chain or CHAIN) if args.arch == MEMORY_S4 else None
     if args.save.suffix.lower() != suffix:
         corrected = args.save.with_suffix(suffix)
         print(f"[train] --save {args.save} is given {suffix}, the {args.arch} weights suffix: {corrected}")
@@ -532,25 +559,41 @@ def train(args: argparse.Namespace) -> None:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
 
+    train_examples, val_examples, train_units, dataset = manifest["train"], manifest["val"], manifest["train"], UnitDataset
+    if args.chain:
+        # The stateful architecture's example is a chain; the units are weighted one by one and
+        # a chain takes the mean, and the hard-negative prepass flags chain units.
+        train_examples, val_examples = build_chains(manifest["train"], args.chain), build_chains(manifest["val"], args.chain)
+        train_units, dataset = chain_units(train_examples), ChainDataset
+        print(f"[data] chains of {args.chain} units: {len(train_examples)} train / {len(val_examples)} val")
+        if not train_examples or (not args.all_clips and not val_examples):
+            raise ValueError(f"Need clips long enough for chains of {args.chain} units in both the training and validation split")
     flagged = set()
     if args.oversample_false_alarms != 1.0:
-        flagged = false_alarm_units(args.weights, clips, manifest["train"], device)
-        print(f"[data] {len(flagged)} of {len(manifest['train'])} training units hold a no-ball frame the starting "
+        flagged = false_alarm_units(args.weights, clips, train_units, device)
+        print(f"[data] {len(flagged)} of {len(train_units)} training units hold a no-ball frame the starting "
               f"weights fired on at conf>={FALSE_ALARM_CONF:.2f}: "
               f"sampled x{args.oversample_false_alarms:g}")
-    sampler = make_sampler(manifest["train"], oversample, args.epoch_units, args.oversample_absent,
-                           args.oversample_false_alarms, flagged)
-    train_loader = DataLoader(UnitDataset(args.data_dir, manifest["train"], augment=True, augmentations=args.augment,
-                                          arch=args.arch),
+    if args.chain:
+        weights = chain_weights(train_examples, unit_weights(train_units, oversample, args.oversample_absent,
+                                                            args.oversample_false_alarms, flagged))
+        sampler = weighted_sampler(weights, None if args.epoch_units is None else -(-args.epoch_units // args.chain))
+    else:
+        sampler = make_sampler(train_units, oversample, args.epoch_units, args.oversample_absent,
+                               args.oversample_false_alarms, flagged)
+    train_loader = DataLoader(dataset(args.data_dir, train_examples, augment=True, augmentations=args.augment, arch=args.arch),
                               batch_size=args.batch_size,
                               shuffle=sampler is None, sampler=sampler, num_workers=args.workers,
                               pin_memory=device.type == "cuda", persistent_workers=args.workers > 0)
     val_loader = None if args.all_clips else DataLoader(
-        UnitDataset(args.data_dir, manifest["val"], augment=False, arch=args.arch), batch_size=args.batch_size,
+        dataset(args.data_dir, val_examples, augment=False, arch=args.arch), batch_size=args.batch_size,
         num_workers=args.workers, pin_memory=device.type == "cuda")
     if args.from_scratch:
         model = fresh_model(device, args.arch)
         print(f"[train] fresh {args.arch} (random init, {model.GRID_COLS}x{model.GRID_ROWS} grid)")
+    elif args.starting_arch != args.arch:
+        model = memorynet.from_heatmap(args.weights, device)
+        print(f"[train] {args.arch} from its parent {args.weights}: the shared layers are copied, the memory starts fresh")
     else:
         model = load_ball_model(args.weights, device).float()
         print(f"[train] fine-tuning {args.arch} from {args.weights}")
@@ -573,7 +616,8 @@ def train(args: argparse.Namespace) -> None:
     write_atomic(args.run_dir / "config.json",
                  json.dumps(run_config(args, names, val_clips, oversample, len(flagged), schedule), indent=2))
     print(f"[train] arch={args.arch} device={device} epochs={args.epochs} batch={args.batch_size} seed={args.seed} "
-          f"units/epoch={len(train_loader) * args.batch_size} augment={sorted(set(args.augment))} "
+          f"units/epoch={len(train_loader) * args.batch_size * (args.chain or 1)} augment={sorted(set(args.augment))} "
+          + (f"chain={args.chain} " if args.chain else "")
           + ("nothing held out (--all-clips)" if args.all_clips else f"val={val_clips} score every {args.score_every}")
           + (f" oversample={oversample}" if oversample else ""))
     if args.all_clips:
@@ -616,6 +660,13 @@ def self_test() -> None:
     expect(build_units(odd, 2)[:2] == [[1, 3, 5, 7, 9], [5, 7, 9, 11, 13]], "odd-phase units")
     gapped = {index: None for index in range(0, 12) if index != 5}
     expect(all(5 not in window for window in build_units(gapped, 1)), "no unit across a label gap")
+    covered = [{"clip": "c", "source": "a", "indices": [s + 2 * k for k in range(5)], "size": [64, 36],
+                "frames": [f"frames/c/{s + 2 * k:06d}.png" for k in range(5)], "points": [None] * 5}
+               for s in range(1, 30, 4)]                           # odd-phase units at 1, 5, ..., 29: frames 1 to 37
+    chains = build_chains(covered, 2)
+    expect([[unit["indices"][0] for unit in chain["units"]] for chain in chains] == [[1, 11], [11, 21]],
+           "chains of consecutive units five frames apart from the clip's first")
+    expect(chain_weights(chains, [1.0, 3.0, 3.0, 5.0]) == [2.0, 4.0], "a chain's weight is its units' mean")
     expect(parse_oversample(["custom=4", "grid=0.5"]) == {"custom": 4.0, "grid": 0.5}, "--oversample parsing")
     units = [{"source": "a", "points": [None]}, {"source": "b", "points": [[1.0, 1.0]]}]
     sampler = make_sampler(units, {"b": 0.0}, None)
@@ -650,13 +701,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--videos", type=Path, default=layout.videos)
     parser.add_argument("--labels", type=Path, default=layout.labels)
     parser.add_argument("--arch", choices=ARCHITECTURES, default=None,
-                        help=f"The network: {GRIDTRACKNET} (the default; a --resume or --selection-run inherits its run's) or "
-                             f"{HEATMAP_S4}, the stride-4 heat-map network (its weights are .pt files)")
+                        help=f"The network: {GRIDTRACKNET} (the default; a --resume or --selection-run inherits its run's), "
+                             f"{HEATMAP_S4}, the stride-4 heat-map network, or {MEMORY_S4}, that network with a memory "
+                             "carried along each phase (both .pt files, naming their architecture inside)")
     parser.add_argument("--weights", type=Path, default=layout.repo_weights,
-                        help="The starting model of a fine-tune, the architecture's own file (.npz for gridtracknet, "
-                             f".pt for {HEATMAP_S4}); with --from-scratch, either architecture's, read only by the "
-                             "--oversample-false-alarms prepass (a gridtracknet scratch run still needs the .npz, "
-                             "the template it saves into)")
+                        help="The starting model of a fine-tune, the architecture's own file (.npz for gridtracknet, its "
+                             f"own .pt for {HEATMAP_S4} and {MEMORY_S4}; a {MEMORY_S4} fine-tune also starts from a "
+                             f"{HEATMAP_S4} file, its parent, with the memory fresh); with --from-scratch, any "
+                             "architecture's, read only by the --oversample-false-alarms prepass (a gridtracknet scratch "
+                             "run still needs the .npz, the template it saves into)")
+    parser.add_argument("--chain", type=int, default=None, metavar="K",
+                        help=f"{MEMORY_S4}: the consecutive units of one clip and phase an example chains, the state "
+                             f"carried through them (default {CHAIN}); ignored by the other architectures")
     parser.add_argument("--save", type=Path, default=layout.best_weights,
                         help="Where the winner is copied (default: the workspace's gridtracknet_best.npz); given the "
                              "other architecture's suffix, it is corrected to the right one")
@@ -737,6 +793,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     if args.selection_run and not args.all_clips:
         print("[error] --selection-run goes with --all-clips", file=sys.stderr)
+        return 1
+    if args.chain is not None and args.chain < 1:
+        print("[error] --chain must be at least 1", file=sys.stderr)
         return 1
     if args.lr_drop and not args.resume:
         print("[error] --lr-drop goes with --resume: it lowers the learning rate of the run being continued", file=sys.stderr)

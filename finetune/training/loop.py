@@ -1,10 +1,13 @@
 """The training loop proper: the loss of each architecture, a fresh network, one epoch of
 optimisation, the validation loss and writing the weights back in the layout the tracker loads
-(the .npz for GridTrackNet, the .pt record for HeatmapNet).
+(the .npz for GridTrackNet, the .pt record for HeatmapNet and MemoryNet).
 
 Which loss and which layout is read off the model's ``ARCH`` (the contract ``ball_models``
 spells), so the loop holds no architecture switch of its own: ``LOSSES`` maps the id to the
-loss, ``save_weights`` to the writer.
+loss, ``save_weights`` to the writer. A ``STATEFUL`` model (MemoryNet) is fed chains: a batch is
+``(B, K, 15, H, W)`` with a ``(B, K, 15, rows, cols)`` target, ``batch_loss`` forwards through the
+K units carrying the state (None at the chain's start) and averages the per-unit losses, and the
+backward pass runs through the whole chain (truncated at K).
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import numpy as np
 import torch
 
 from tennis_tracker import heatmapnet
-from tennis_tracker.ball_models import GRIDTRACKNET, HEATMAP_S4, model_class
+from tennis_tracker.ball_models import GRIDTRACKNET, HEATMAP_S4, MEMORY_S4, model_class, weights_suffix
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
 
 PROGRESS_EVERY = 200       # training steps between progress lines
@@ -43,12 +46,12 @@ def gridtracknet_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.T
 
 
 def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """HeatmapNet's loss: CenterNet's penalty-reduced focal loss on the heat channel against the
-    Gaussian target (``dataset.make_target``), where a cell at exactly 1 is a positive and every
-    other cell a negative whose penalty is reduced by ``(1 - heat) ** HEAT_BETA`` near the peak,
-    the sum normalised by the number of positives (at least one); plus ``OFFSET_LOSS_WEIGHT`` times
-    the L1 of the offsets at the peak cells, normalised the same way. The grid is the target's
-    own, so the loss does not care which stride the network answers at."""
+    """HeatmapNet's (and MemoryNet's) loss: CenterNet's penalty-reduced focal loss on the heat
+    channel against the Gaussian target (``dataset.make_target``), where a cell at exactly 1 is a
+    positive and every other cell a negative whose penalty is reduced by ``(1 - heat) ** HEAT_BETA``
+    near the peak, the sum normalised by the number of positives (at least one); plus
+    ``OFFSET_LOSS_WEIGHT`` times the L1 of the offsets at the peak cells, normalised the same way.
+    The grid is the target's own, so the loss does not care which stride the network answers at."""
     rows, cols = int(target.shape[-2]), int(target.shape[-1])
     prediction = prediction.float().reshape(-1, FRAMES_PER_UNIT, 3, rows, cols)
     target = target.reshape_as(prediction)
@@ -63,20 +66,41 @@ def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor
     return heat_loss + OFFSET_LOSS_WEIGHT * offset_loss
 
 
-LOSSES = {GRIDTRACKNET: gridtracknet_loss, HEATMAP_S4: heatmap_loss}
+LOSSES = {GRIDTRACKNET: gridtracknet_loss, HEATMAP_S4: heatmap_loss, MEMORY_S4: heatmap_loss}
 
 
 def unit_loss(model: torch.nn.Module, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """The loss of `model`'s architecture (``LOSSES`` by ``model.ARCH``) on one batch."""
+    """The loss of `model`'s architecture (``LOSSES`` by ``model.ARCH``) on one batch of units."""
     return LOSSES[model.ARCH](prediction, target)
 
 
+def chain_loss(model: torch.nn.Module, images: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """A ``STATEFUL`` model forwarded through a batch of chains, ``(B, K, 15, H, W)`` images and
+    ``(B, K, 15, rows, cols)`` targets: the state starts at None and is carried from unit to unit,
+    and the loss is the mean of the K per-unit losses, so the gradient reaches every unit's
+    answer and, through the states, every unit before it."""
+    state, losses = None, []
+    for step in range(images.shape[1]):
+        output, state = model(images[:, step], state)
+        losses.append(unit_loss(model, output, target[:, step]))
+    return torch.stack(losses).mean()
+
+
+def batch_loss(model: torch.nn.Module, images: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """The loss of one batch from the loader: ``unit_loss`` on the model's output for a stateless
+    model, ``chain_loss`` for a ``STATEFUL`` one."""
+    if model.STATEFUL:
+        return chain_loss(model, images, target)
+    return unit_loss(model, model(images), target)
+
+
 def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> None:
-    """Write the model in the layout the tracker loads for its architecture: a HeatmapNet as the
-    ``.pt`` record ``heatmapnet.save_model`` writes (`template` is not read); a GridTrackNet in the
-    .npz layout, where every convolution and every BatchNorm layer's gamma, beta and running mean
-    and variance come from ``model`` and ``template`` supplies whatever else the layout carries."""
-    if model.ARCH == HEATMAP_S4:
+    """Write the model in the layout the tracker loads for its architecture: a ``.pt`` architecture
+    (HeatmapNet, MemoryNet) as the record ``heatmapnet.save_model`` writes (`template` is not read);
+    a GridTrackNet in the .npz layout, where every convolution and every BatchNorm layer's gamma,
+    beta and running mean and variance come from ``model`` and ``template`` supplies whatever else
+    the layout carries."""
+    if weights_suffix(model.ARCH) == ".pt":
         heatmapnet.save_model(model, destination)
         return
     with np.load(template) as source:
@@ -102,8 +126,8 @@ def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> N
 def fresh_model(device: torch.device, arch: str = GRIDTRACKNET) -> torch.nn.Module:
     """A float32 network of `arch` to train from scratch, in train mode: a GridTrackNet with
     Kaiming convolutions and BatchNorm at Keras's defaults (gamma 1, beta 0, running mean 0,
-    running variance 1); a HeatmapNet as its own ``reset_parameters`` leaves it (Kaiming
-    convolutions, the heat head at its prior)."""
+    running variance 1); a HeatmapNet or MemoryNet as its own constructor leaves it (Kaiming
+    convolutions, the heat head at its prior, the memory's ``out`` at zero)."""
     model = model_class(arch)()
     if arch == GRIDTRACKNET:
         for conv in model.convs:
@@ -123,7 +147,7 @@ def evaluate_loss(model, loader, device, max_steps=None) -> float:
             for images, target in loader:
                 images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-                    loss = unit_loss(model, model(images), target)
+                    loss = batch_loss(model, images, target)
                 total += float(loss)
                 steps += 1
                 if max_steps and steps >= max_steps:
@@ -143,7 +167,7 @@ def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: i
         images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-            loss = unit_loss(model, model(images), target)
+            loss = batch_loss(model, images, target)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
