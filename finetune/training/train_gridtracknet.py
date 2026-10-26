@@ -15,6 +15,7 @@ tags every clip with a source so you can pick, hold out and oversample by source
     python finetune/training/train_gridtracknet.py --from-scratch --epochs 30   # train a fresh network on everything
     python finetune/training/train_gridtracknet.py --all-clips --selection-run finetune/runs/r5 --augment basic translate
     python finetune/training/train_gridtracknet.py --resume --run-dir finetune/runs/r5   # carry on after an interruption
+    python finetune/training/train_gridtracknet.py --resume --lr-drop --lr 0.1 --run-dir finetune/runs/r5   # ... at a lower rate
     python finetune/training/train_gridtracknet.py --self-test
 
 After every scored epoch (``--score-every``, the last epoch always) the weights are
@@ -39,6 +40,13 @@ is re-derived from ``results.csv`` on resume, not read from the checkpoint, so a
 begun under an older rule carries on under this one. The seed of every epoch's batch
 draws is ``--seed`` plus the epoch, so a resumed run draws the batches the uninterrupted
 one would have; see ``fit``.
+
+The one option a resume may change is the learning rate, and only downwards, with
+``--resume --lr-drop --lr 0.1``: the optimizer keeps its state (Adadelta's per-parameter
+accumulators) and goes on at the new rate from the next epoch, and ``config.json`` keeps the
+run's ``lr_schedule``, one ``{"epoch": N, "lr": value}`` entry per rate from epoch 1 on, so
+the history stays readable (``lr`` is the rate in force). A later resume at the lowered rate
+needs no flag; ``--lr-drop`` to a still lower rate adds an entry; see ``same_run``.
 
 ``--all-clips`` is the other kind of run: once a recipe (the flags and the epoch count)
 has been chosen on a held-out set, train it on every clip with nothing held out and no
@@ -83,6 +91,7 @@ RESULTS_COLUMNS = ("epoch", "train_loss", "val_loss", "seconds", "score_seconds"
 CHECKPOINT = "checkpoint.pt"
 EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz, unless --no-keep-epochs
 RUN_OUTCOMES = ("epochs", "false_alarm_units")     # the config.json fields a --resume may differ in, see same_run
+RATE_FIELDS = ("lr", "lr_schedule")                # ... and the two same_run reads as the schedule, not field by field
 
 # --------------------------------------------------------------------------- the run
 
@@ -97,18 +106,40 @@ def parse_oversample(items: Optional[List[str]]) -> Dict[str, float]:
 
 
 def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str], oversample: Dict[str, float],
-               flagged: int = 0) -> dict:
+               flagged: int = 0, lr_schedule: Optional[List[dict]] = None) -> dict:
     """What a run was: the clips, the held-out ones and how they were chosen, and every option that
     shaped the training (``flagged``: how many training units ``--oversample-false-alarms`` weighted
-    up), as ``config.json`` records it."""
+    up; ``lr_schedule``: the rates the run has trained at, see ``lr_schedule_of``, by default the
+    one ``--lr`` from epoch 1), as ``config.json`` records it. ``lr`` is the rate in force."""
     return {"clips": names, "validation_clips": val_clips, "holdout": args.holdout, "val_clips": args.val_clips,
             "all_clips": args.all_clips, "selection_run": str(args.selection_run) if args.selection_run else None,
             "sources": args.sources, "cameras": args.cameras, "augment": sorted(set(args.augment)),
             "oversample": oversample, "oversample_absent": args.oversample_absent,
             "oversample_false_alarms": args.oversample_false_alarms, "false_alarm_units": flagged,
             "epoch_units": args.epoch_units, "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
+            "lr_schedule": lr_schedule or [{"epoch": 1, "lr": args.lr}],
             "seed": args.seed, "score_every": args.score_every,
             "from_scratch": args.from_scratch, "weights": str(args.weights)}
+
+
+def lr_schedule_of(config: dict) -> List[dict]:
+    """The learning rates a run has trained at, from its ``config.json``: ``lr_schedule``, a list of
+    ``{"epoch": N, "lr": value}`` entries in epoch order, each the rate from that epoch on. A run
+    recorded before the schedule existed has one entry, its ``lr`` from epoch 1."""
+    return list(config.get("lr_schedule") or [{"epoch": 1, "lr": config.get("lr")}])
+
+
+def lower_learning_rate(optimizer: torch.optim.Optimizer, schedule: List[dict], lr: float, epoch: int) -> List[dict]:
+    """A ``--lr-drop`` taking effect: every parameter group of the resumed `optimizer` goes on at
+    `lr` from `epoch` (only ``lr`` changes; the state Adadelta keeps per parameter, its squared
+    gradient and update accumulators, stays as the checkpoint left it), one log line says so, and
+    the returned schedule is `schedule` with the new entry. ``same_run`` has already checked that
+    `lr` is below the schedule's latest rate."""
+    previous = schedule[-1]["lr"]
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+    print(f"[train] learning rate {previous:g} -> {lr:g} from epoch {epoch}", flush=True)
+    return [*schedule, {"epoch": epoch, "lr": lr}]
 
 
 class Selection(NamedTuple):
@@ -185,15 +216,32 @@ def read_run_config(run_dir: Path) -> dict:
         raise ValueError(f"--resume needs a readable config.json beside {run_dir / CHECKPOINT} ({error})") from error
 
 
-def same_run(saved: dict, current: dict) -> None:
+def same_run(saved: dict, current: dict, lr_drop: bool = False) -> None:
     """Refuse to resume a run with other options than it was started with: every ``config.json``
     field but the run's outcomes (``epochs``, which may be raised to train longer, and the
     hard-negative count the prepass found) must agree, or the first that differs names a
-    ValueError."""
+    ValueError. The learning rate is read through the schedule: ``current``'s ``lr`` must be the
+    rate `saved` was last training at (``lr_schedule_of``), unless `lr_drop` (``--lr-drop``) says
+    it is being lowered on purpose, in which case it must be lower. A raise is refused too: the
+    flag exists for the one deliberate move a long run has a case for, a smaller step once the
+    held-out numbers swing between epochs, and a run that went up and down would not be one recipe
+    its ``lr_schedule`` could be read as; start a new run for that. The same rate with the flag
+    is refused as well, so a flag left on by mistake does not pass silently."""
     for field in current:
-        if field not in RUN_OUTCOMES and saved.get(field) != current[field]:
+        if field in RUN_OUTCOMES or field in RATE_FIELDS:
+            continue
+        if saved.get(field) != current[field]:
             raise ValueError(f"--resume would continue a different run: config.json has {field}={saved.get(field)!r}, "
                              f"this run {field}={current[field]!r}")
+    rate, latest = current["lr"], lr_schedule_of(saved)[-1]["lr"]
+    if not lr_drop:
+        if rate != latest:
+            raise ValueError(f"--resume would continue a different run: config.json has lr={latest!r}, "
+                             f"this run lr={rate!r} (--lr-drop lowers it on purpose)")
+    elif rate >= latest:
+        raise ValueError(f"--lr-drop lowers the learning rate: config.json has lr={latest!r}, this run lr={rate!r}"
+                         + ("; it is not raised on a resume, start a new run for that" if rate > latest
+                            else ", the same, so there is nothing to drop"))
 
 
 def results_row(epoch: int, train_loss: float, val_loss: Optional[float], seconds: float,
@@ -325,7 +373,10 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
 def read_selection_run(run_dir: Path) -> dict:
     """What a held-out selection run decided, for the ``--all-clips`` run that follows its recipe:
     its ``winner.json`` (the best epoch and the held-out metrics) and the ``config.json`` fields
-    that make up the recipe. A folder without the two files is a ValueError."""
+    that make up the recipe, the learning rate as its schedule (``lr_schedule_of``: more than one
+    entry when the run lowered it with ``--lr-drop``, which the all-clips run does not replay; it
+    is recorded so a reader knows the recipe's rate changed). A folder without the two files is a
+    ValueError."""
     try:
         winner = json.loads((run_dir / "winner.json").read_text(encoding="utf-8"))
         config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
@@ -333,6 +384,7 @@ def read_selection_run(run_dir: Path) -> dict:
         raise ValueError(f"--selection-run {run_dir} has no readable winner.json and config.json ({error})") from error
     recipe = {key: config.get(key) for key in ("augment", "oversample", "oversample_absent", "oversample_false_alarms",
                                                 "epoch_units", "batch_size", "lr", "seed", "holdout", "validation_clips")}
+    recipe["lr_schedule"] = lr_schedule_of(config)
     return {"run": str(run_dir), "best_epoch": winner.get("best_epoch"), "selected_by": winner.get("selected_by"),
             "winner": winner.get("winner"), "metrics": winner.get("metrics"),
             "starting_weights": winner.get("starting_weights"), "recipe": recipe}
@@ -383,6 +435,10 @@ def pick_winner(args: argparse.Namespace, clips: List[Clip], val_clips: List[str
 def train(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)       # a fresh model's init draws from it; every epoch reseeds the loaders' draws, see fit
     selection_run = read_selection_run(args.selection_run) if args.selection_run else None
+    if selection_run and len(selection_run["recipe"]["lr_schedule"]) > 1:
+        steps = ", ".join(f"{entry['lr']:g} from epoch {entry['epoch']}" for entry in selection_run["recipe"]["lr_schedule"])
+        print(f"[train] the selection run lowered its learning rate ({steps}); this run trains at --lr {args.lr:g} "
+              "throughout, the schedule is not replayed")
     resumed = read_run_config(args.run_dir) if args.resume else None
     if args.epochs is None:
         args.epochs = resumed["epochs"] if resumed else (selection_run or {}).get("best_epoch") or DEFAULT_EPOCHS
@@ -391,7 +447,7 @@ def train(args: argparse.Namespace) -> None:
     val_clips = [] if args.all_clips else validation_split(clips, args.labels, args.val_clips, args.holdout)
     oversample = parse_oversample(args.oversample)
     if resumed is not None:
-        same_run(resumed, run_config(args, names, val_clips, oversample))
+        same_run(resumed, run_config(args, names, val_clips, oversample), args.lr_drop)
     manifest = prepare_data(clips, args.data_dir, val_clips, args.rebuild_data, args.prep_workers)
     if not args.all_clips and not manifest["val"]:
         raise ValueError("Need labelled clips in both the training and validation split")
@@ -428,15 +484,19 @@ def train(args: argparse.Namespace) -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     args.run_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = args.run_dir / CHECKPOINT
-    progress = START
+    progress, schedule = START, None
     if args.resume:
         progress = read_checkpoint(checkpoint, model, optimizer, scaler)
         print(f"[train] resuming {args.run_dir} after epoch {progress.epoch} of {args.epochs}"
               + (": the epochs are done, only the winner is left to pick" if progress.epoch == args.epochs else ""))
+        schedule = lr_schedule_of(resumed)
+        if args.lr_drop:
+            schedule = lower_learning_rate(optimizer, schedule, args.lr, progress.epoch + 1)
     elif checkpoint.exists():
         print(f"[train] {CHECKPOINT} found in {args.run_dir} and removed: the run starts over, --resume would have continued it")
         checkpoint.unlink()
-    write_atomic(args.run_dir / "config.json", json.dumps(run_config(args, names, val_clips, oversample, len(flagged)), indent=2))
+    write_atomic(args.run_dir / "config.json",
+                 json.dumps(run_config(args, names, val_clips, oversample, len(flagged), schedule), indent=2))
     print(f"[train] device={device} epochs={args.epochs} batch={args.batch_size} seed={args.seed} "
           f"units/epoch={len(train_loader) * args.batch_size} augment={sorted(set(args.augment))} "
           + ("nothing held out (--all-clips)" if args.all_clips else f"val={val_clips} score every {args.score_every}")
@@ -515,6 +575,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true",
                         help=f"Continue the run in --run-dir from its {CHECKPOINT} (written after every epoch) with the "
                              "same options; --epochs may be raised to train longer and defaults to the run's")
+    parser.add_argument("--lr-drop", action="store_true",
+                        help="With --resume: go on at a lower --lr than the run has trained at (the optimizer state is "
+                             "kept, config.json's lr_schedule records the change); a higher one is refused")
     held_out = parser.add_mutually_exclusive_group()
     held_out.add_argument("--val-clips", nargs="*", help="Held-out clip stems or globs (default: video10 if present, else the last clip)")
     held_out.add_argument("--holdout", metavar="NAME",
@@ -584,6 +647,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     if args.selection_run and not args.all_clips:
         print("[error] --selection-run goes with --all-clips", file=sys.stderr)
+        return 1
+    if args.lr_drop and not args.resume:
+        print("[error] --lr-drop goes with --resume: it lowers the learning rate of the run being continued", file=sys.stderr)
         return 1
     try:
         train(args)

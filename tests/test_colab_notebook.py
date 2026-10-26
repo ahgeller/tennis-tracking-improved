@@ -105,3 +105,14 @@ def test_the_settings_cell_exposes_the_all_clips_run():
     assert "if not (all_clips and EPOCHS == 0):" in settings
     for held_out_only in ("'--holdout'", "'--val-clips'", "'--score-every'"):
         assert settings.count(held_out_only) == 1 and settings.index(held_out_only) > settings.index("else:")
+
+
+def test_the_settings_cell_drops_the_learning_rate_on_a_resume_whose_lr_differs():
+    """A resume (checkpoint.pt in the run folder) whose LR is not the rate the run's config.json
+    was last training at (the latest lr_schedule entry, or lr for a run from before the schedule)
+    passes --lr-drop, and only then: the trainer refuses a raise and a drop to the same rate."""
+    settings = code_cell_starting("#@title Training settings")
+    assert settings.count("'--lr-drop'") == 1 and settings.index("'--lr-drop'") > settings.index("cmd.append('--resume')")
+    assert "(config.get('lr_schedule') or [{'lr': config.get('lr')}])[-1]['lr']" in settings
+    assert "if LR != rate:" in settings
+    assert "# Adadelta; 0.3 for a gentle fine-tune. On a resume it may be lowered (not raised)" in settings

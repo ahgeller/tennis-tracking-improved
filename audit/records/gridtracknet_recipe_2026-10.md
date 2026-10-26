@@ -66,3 +66,13 @@ Full tables, the cell histogram and the per-source reading are in
   the end of a run (the best epoch against the starting weights), where an anchor is the point.
   Every scored epoch's weights are kept as `epochs/epoch_NNN.npz` so a run can be re-ranked or
   re-scored after the fact, and a resumed run re-derives its best epoch from `results.csv`.
+- 2026-10-25: the trainer can now lower the learning rate on a resume (`--resume --lr-drop --lr 0.1`;
+  the optimizer's Adadelta accumulators are kept, only the rate changes, and `config.json` records
+  every rate as `lr_schedule`, one `{"epoch": N, "lr": value}` entry per rate from epoch 1; a raise
+  is refused). Why: the scratch run on Colab (Adadelta, lr 1.0 fixed, no schedule) had held-out
+  recall near 0.82 by epoch 24 while the false-alarm rate swung between scored epochs (0.14, 0.38,
+  0.21), the mark of a step that is now too large, and the plan is to stop near epoch 40 and carry
+  the same run on at 0.1 for the last stretch rather than start over. `winner.json` of a later
+  `--all-clips` run copies the schedule in (`selection_run.recipe.lr_schedule`) and the trainer
+  says the schedule is not replayed; whether the drop helps is not yet measured, and the matching
+  rule for the all-clips run (when to drop, and to what) is open until it is.

@@ -703,6 +703,7 @@ def test_resume_needs_a_checkpoint_and_the_run_it_belongs_to(tmp_path, capsys):
     assert "readable config.json" in capsys.readouterr().err
     config = training.run_config(training.build_parser().parse_args(argv), ["a", "b"], ["b"], {})
     config["epochs"], config["lr"] = 3, 0.3
+    del config["lr_schedule"]                      # a run recorded before the schedule existed: its lr is the rate
     (run_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
     assert training.main([*argv, "--resume"]) == 1
     assert "[error] --resume would continue a different run: config.json has lr=0.3, this run lr=1.0" in capsys.readouterr().err
@@ -749,6 +750,116 @@ def test_resume_through_main_keeps_the_run_and_raises_its_epochs(tmp_path, capsy
         assert torch.load(run_dir / "checkpoint.pt", weights_only=True)["epoch"] == 1
 
 
+def test_lower_learning_rate_changes_only_the_rate_and_keeps_adadeltas_accumulators(capsys):
+    """One Adadelta step leaves a squared-gradient and an update accumulator per parameter; the
+    drop sets every param group's lr, leaves that state untouched, prints its one line and
+    appends the entry to the schedule it was given."""
+    model = fresh_model(torch.device("cpu"))
+    optimizer = torch.optim.Adadelta(model.parameters(), lr=1.0, rho=0.95, eps=1e-7)
+    for parameter in model.parameters():
+        parameter.grad = torch.rand_like(parameter)
+    optimizer.step()
+    before = {id(p): {k: v.clone() for k, v in state.items()} for p, state in optimizer.state.items()}
+    assert before and all("square_avg" in state and "acc_delta" in state for state in before.values())
+    schedule = training.lower_learning_rate(optimizer, [{"epoch": 1, "lr": 1.0}], 0.1, 41)
+    assert schedule == [{"epoch": 1, "lr": 1.0}, {"epoch": 41, "lr": 0.1}]
+    assert [group["lr"] for group in optimizer.param_groups] == [0.1]
+    assert {id(p) for p in optimizer.state} == set(before)
+    for parameter, state in optimizer.state.items():
+        assert all(torch.equal(value, before[id(parameter)][key]) for key, value in state.items())
+    assert capsys.readouterr().out == "[train] learning rate 1 -> 0.1 from epoch 41\n"
+    assert training.lr_schedule_of({"lr": 0.3}) == [{"epoch": 1, "lr": 0.3}]          # a config.json from before the schedule
+    assert training.lr_schedule_of({"lr": 0.1, "lr_schedule": schedule}) == schedule
+
+
+def test_same_run_reads_the_learning_rate_through_the_schedule():
+    """The rate in force is the schedule's last entry: a resume at it passes with or without a
+    drop pending elsewhere, a different rate is refused unless --lr-drop lowers it, and the flag
+    refuses a raise and the same rate (nothing to drop)."""
+    config = training.run_config(training.build_parser().parse_args(["--lr", "0.1"]), ["a", "b"], ["b"], {},
+                                 lr_schedule=[{"epoch": 1, "lr": 1.0}, {"epoch": 41, "lr": 0.1}])
+    assert config["lr"] == 0.1 and config["lr_schedule"][-1] == {"epoch": 41, "lr": 0.1}
+    training.same_run(config, {**config, "epochs": 60})
+    with pytest.raises(ValueError, match=r"config.json has lr=0.1, this run lr=1.0 \(--lr-drop lowers it on purpose\)"):
+        training.same_run(config, {**config, "lr": 1.0})
+    training.same_run(config, {**config, "lr": 0.01}, lr_drop=True)
+    with pytest.raises(ValueError, match="--lr-drop lowers the learning rate: config.json has lr=0.1, this run lr=0.5"):
+        training.same_run(config, {**config, "lr": 0.5}, lr_drop=True)
+    with pytest.raises(ValueError, match="this run lr=0.1, the same, so there is nothing to drop"):
+        training.same_run(config, config, lr_drop=True)
+    with pytest.raises(ValueError, match="validation_clips"):                     # the other fields still have to agree
+        training.same_run(config, {**config, "lr": 0.01, "validation_clips": ["a"]}, lr_drop=True)
+    older = {**config, "lr": 0.3}
+    del older["lr_schedule"]                                                      # written before the schedule existed
+    training.same_run(older, {**config, "lr": 0.3})
+    training.same_run(older, {**config, "lr": 0.1}, lr_drop=True)
+    assert training.run_config(training.build_parser().parse_args([]), [], [], {})["lr_schedule"] == [{"epoch": 1, "lr": 1.0}]
+
+
+def test_lr_drop_through_main_records_the_schedule_and_the_lowered_rate_resumes_plainly(tmp_path, capsys):
+    """The whole trainer on two tiny clips: one epoch at lr 1.0, then --resume --lr-drop --lr 0.1
+    carries on at 0.1 (the checkpoint's param group says so, Adadelta's accumulators are kept) and
+    config.json records both rates; a resume at 0.1 without the flag is accepted, a second drop
+    appends a third entry, and a raise, the same rate with the flag, the original rate without it
+    and the flag without --resume are each refused in one line. An all-clips run following the
+    recipe sees the schedule and says it is not replayed."""
+    (tmp_path / "videos").mkdir()
+    (tmp_path / "labels").mkdir()
+    for clip in ("a", "b"):
+        write_clip(tmp_path / "videos" / f"{clip}.avi", 8, SIZE, 30.0)
+        write_labels(tmp_path / "labels" / f"{clip}_ball.csv", {f: (1.0 + f, 1.0) for f in range(7)}, *SIZE)
+    run_dir = tmp_path / "run"
+    argv = ["--videos", str(tmp_path / "videos"), "--labels", str(tmp_path / "labels"), "--data-dir", str(tmp_path / "cache"),
+            "--run-dir", str(run_dir), "--save", str(tmp_path / "save.npz"), "--device", "cpu", "--workers", "0",
+            "--from-scratch", "--max-train-steps", "1", "--max-val-steps", "1", "--prep-workers", "1"]
+    schedule_of = lambda: json.loads((run_dir / "config.json").read_text(encoding="utf-8"))["lr_schedule"]
+    with patch.object(training, "score_weights", return_value=training.metrics_of(0.5, 0.0)):
+        assert training.main([*argv, "--epochs", "1"]) == 0
+        assert schedule_of() == [{"epoch": 1, "lr": 1.0}]
+        state = torch.load(run_dir / "checkpoint.pt", weights_only=True)["optimizer"]
+        assert state["param_groups"][0]["lr"] == 1.0 and "square_avg" in state["state"][0]
+        capsys.readouterr()
+        assert training.main([*argv, "--resume", "--epochs", "2", "--lr", "0.1", "--lr-drop"]) == 0
+        out = capsys.readouterr().out
+        assert f"[train] resuming {run_dir} after epoch 1 of 2\n[train] learning rate 1 -> 0.1 from epoch 2\n" in out
+        assert "[train] epoch 2:" in out
+        assert schedule_of() == [{"epoch": 1, "lr": 1.0}, {"epoch": 2, "lr": 0.1}]
+        config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+        assert config["lr"] == 0.1 and config["epochs"] == 2
+        state = torch.load(run_dir / "checkpoint.pt", weights_only=True)["optimizer"]
+        assert state["param_groups"][0]["lr"] == 0.1 and "square_avg" in state["state"][0] and "acc_delta" in state["state"][0]
+        assert training.main([*argv, "--resume", "--epochs", "3", "--lr", "0.1"]) == 0       # the lowered rate needs no flag
+        assert "learning rate" not in capsys.readouterr().out
+        assert schedule_of() == [{"epoch": 1, "lr": 1.0}, {"epoch": 2, "lr": 0.1}]
+        assert [row["epoch"] for row in results_of(run_dir)] == ["1", "2", "3"]
+        assert training.main([*argv, "--resume", "--epochs", "4", "--lr", "0.01", "--lr-drop"]) == 0
+        assert "[train] learning rate 0.1 -> 0.01 from epoch 4" in capsys.readouterr().out
+        assert schedule_of() == [{"epoch": 1, "lr": 1.0}, {"epoch": 2, "lr": 0.1}, {"epoch": 4, "lr": 0.01}]
+        for flags, message in ((["--lr", "0.5", "--lr-drop"], "--lr-drop lowers the learning rate: config.json has lr=0.01, "
+                                                               "this run lr=0.5; it is not raised on a resume"),
+                               (["--lr", "0.01", "--lr-drop"], "--lr-drop lowers the learning rate: config.json has lr=0.01, "
+                                                                "this run lr=0.01, the same, so there is nothing to drop"),
+                               (["--lr", "1.0"], "--resume would continue a different run: config.json has lr=0.01, "
+                                                 "this run lr=1.0 (--lr-drop lowers it on purpose)")):
+            assert training.main([*argv, "--resume", "--epochs", "5", *flags]) == 1
+            assert f"[error] {message}" in capsys.readouterr().err
+        assert schedule_of()[-1] == {"epoch": 4, "lr": 0.01} and torch.load(run_dir / "checkpoint.pt", weights_only=True)["epoch"] == 4
+    assert training.main([*argv, "--epochs", "5", "--lr", "0.1", "--lr-drop"]) == 1
+    assert "[error] --lr-drop goes with --resume" in capsys.readouterr().err
+    recipe = training.read_selection_run(run_dir)["recipe"]
+    assert recipe["lr"] == 0.01 and recipe["lr_schedule"] == schedule_of()
+    all_clips = ["--videos", str(tmp_path / "videos"), "--labels", str(tmp_path / "labels"), "--data-dir", str(tmp_path / "cache"),
+                 "--run-dir", str(tmp_path / "all"), "--save", str(tmp_path / "all.npz"), "--device", "cpu", "--workers", "0",
+                 "--from-scratch", "--max-train-steps", "1", "--prep-workers", "1", "--all-clips", "--selection-run", str(run_dir),
+                 "--epochs", "1"]
+    assert training.main(all_clips) == 0
+    out = capsys.readouterr().out
+    assert ("[train] the selection run lowered its learning rate (1 from epoch 1, 0.1 from epoch 2, 0.01 from epoch 4); "
+            "this run trains at --lr 1 throughout, the schedule is not replayed") in out
+    winner = json.loads((tmp_path / "all" / "winner.json").read_text(encoding="utf-8"))
+    assert winner["selection_run"]["recipe"]["lr_schedule"] == schedule_of()
+
+
 def test_pick_winner_reuses_the_best_epochs_metrics_and_records_how_it_chose(tmp_path, capsys):
     args, selection, _ = scripted_run(tmp_path, ["--epochs", "2", "--save", str(tmp_path / "save.npz")],
                                       [0.6, 0.4], [0.5, 0.3], [0.90, 0.85])
@@ -789,6 +900,7 @@ def test_all_clips_runs_every_epoch_unscored_and_records_the_recipe(tmp_path, ca
     selection_run = training.read_selection_run(selection_dir)
     assert selection_run["best_epoch"] == 2 and selection_run["metrics"] == {"recall": 0.9}
     assert selection_run["recipe"]["augment"] == ["basic", "translate"] and selection_run["recipe"]["holdout"] == "mixed_v1"
+    assert selection_run["recipe"]["lr_schedule"] == [{"epoch": 1, "lr": 1.0}]       # a run from before the schedule: its lr
     with pytest.raises(ValueError, match="no readable winner.json"):
         training.read_selection_run(tmp_path / "nowhere")
 

@@ -263,7 +263,11 @@ separately). `ft.py check` flags files that break this rule.
      `--resume --run-dir runs/<tag>` carries an interrupted run on from it with
      the same options (`--epochs` may be raised; anything else that differs
      is refused), keeping `results.csv`; the best epoch so far is re-derived
-     from its rows by the current rule, not read from the checkpoint. A run
+     from its rows by the current rule, not read from the checkpoint. The one
+     deliberate change a resume allows is `--resume --lr-drop --lr 0.1`, a
+     lower learning rate (never a higher one) from the next epoch on, with the
+     optimizer state kept and every rate recorded in `config.json`'s
+     `lr_schedule` (`[{"epoch": 1, "lr": 1.0}, {"epoch": 41, "lr": 0.1}]`). A run
      started without `--resume` in a folder that holds one starts over. On
      Colab, where a runtime can be recycled mid-run, keep `--run-dir` on
      Drive and resume.
