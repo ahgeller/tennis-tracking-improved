@@ -1,4 +1,5 @@
-"""Running the raw GridTrackNet prepass over a whole clip: the detector's own view of a clip, for
+"""Running the raw five-frame prepass (GridTrackNet, or HeatmapNet for ``.pt`` weights) over a
+whole clip: the detector's own view of a clip, for
 the scripts that draft, audit, realign, score or judge labels against it (pretrack, the label
 audit, realign, evaluation.archive and the trainer's winner metric). It sits in the data layer
 because the data layer's scripts need it; torch and the tracker are imported only when a detector
@@ -18,8 +19,9 @@ BallPoint = Tuple[float, float, float]     # x, y (native pixels) and confidence
 
 def ball_detector(weights: Path, conf: float = 0.0, device: str = "0",
                   source_stride: Optional[int] = None) -> "GridTrackNetBallDetector":
-    """A GridTrackNet detector on `weights`, keeping every candidate at or above `conf`. It sees
-    the same five RGB frames the tracker feeds the model; `detect_clip` runs the prepass in the
+    """The prepass detector on `weights` (GridTrackNet for an ``.npz``, HeatmapNet for a ``.pt``:
+    ``tennis_tracker.ball_models``), keeping every candidate at or above `conf`. It sees the same
+    five RGB frames the tracker feeds the model; `detect_clip` runs the prepass in the
     foreground, so these scripts get every frame's answer at once. `source_stride` forces the
     frame spacing fed to the model (None: the training cadence, 2 at 60 FPS and 1 at 30)."""
     import torch

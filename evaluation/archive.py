@@ -45,7 +45,6 @@ from finetune.data import workspace as ws
 from finetune.data.workspace import (HOLDOUTS_NAME, MANIFEST_NAME, clip_of, find_video, natural_key, read_exclusions,
                                      read_manifest, video_meta)
 from evaluation.pipeline_score import ClipScore, score_pipeline_clip
-from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS
 from tennis_tracker.paths import GRIDTRACKNET_WEIGHTS, ROOT
 
 ARCHIVE_VARIABLE = "TENNIS_ARCHIVE"
@@ -215,15 +214,16 @@ def macro_metrics(per_clip: List[DetectorMetrics]) -> DetectorMetrics:
     )
 
 
-def cell_histogram(per_clip: List[RawClip], threshold: float) -> Dict[str, List[DetectorMetrics]]:
+def cell_histogram(per_clip: List[RawClip], threshold: float, grid: Tuple[int, int]) -> Dict[str, List[DetectorMetrics]]:
     """Recall by where the labelled ball sits within its grid cell: for each axis, the visible
     labels binned by the fractional part of their grid coordinate (``CELL_BINS`` bins from the
     cell's leading edge to its trailing edge), each bin scored as a clip is. A network that
-    only sees balls at cell centres shows it as low recall in the edge bins."""
+    only sees balls at cell centres shows it as low recall in the edge bins. `grid` is the
+    detector's (columns, rows): 48x27 for GridTrackNet, 192x108 for HeatmapNet."""
     bins = {axis: [[] for _ in range(CELL_BINS)] for axis in ("x", "y")}
     for clip in per_clip:
         scale = scale_for_width(clip.width)
-        cells = (GRID_COLS / clip.width, GRID_ROWS / clip.height)
+        cells = (grid[0] / clip.width, grid[1] / clip.height)
         for label, pred, conf in clip.rows:
             if label is None:
                 continue
@@ -236,10 +236,11 @@ def cell_histogram(per_clip: List[RawClip], threshold: float) -> Dict[str, List[
 
 
 def report_raw(name: str, per_clip: List[RawClip], thresholds: List[float],
-               sources: Optional[Dict[str, str]] = None, histogram: bool = False) -> None:
+               sources: Optional[Dict[str, str]] = None, histogram: Optional[Tuple[int, int]] = None) -> None:
     """The raw-mode report for one detector: the pooled sweep, the per-clip table with its macro
     and per-source lines (``sources``: clip -> clips.csv source), the hit offset, and with
-    ``histogram`` the recall by position within the grid cell."""
+    ``histogram`` (the detector's grid, columns by rows) the recall by position within the grid
+    cell."""
     print(f"\n=== {name}: threshold sweep (all clips pooled) ===")
     for threshold in thresholds:
         print(fmt(f"conf>={threshold:.2f}", DetectorMetrics.of(_pooled_pairs(per_clip, threshold), 1.0)))
@@ -257,8 +258,9 @@ def report_raw(name: str, per_clip: List[RawClip], thresholds: List[float],
     if count:
         print(f"{name}: mean offset on hits dx={dx / count:+.2f}px dy={dy / count:+.2f}px (n={count})")
     if histogram:
-        print(f"\n=== {name}: recall by position within the grid cell at conf>={PER_CLIP_CONF:.2f} ===")
-        for axis, per_bin in cell_histogram(per_clip, PER_CLIP_CONF).items():
+        print(f"\n=== {name}: recall by position within the {histogram[0]}x{histogram[1]} grid cell "
+              f"at conf>={PER_CLIP_CONF:.2f} ===")
+        for axis, per_bin in cell_histogram(per_clip, PER_CLIP_CONF, histogram).items():
             for index, stats in enumerate(per_bin):
                 low, high = index / CELL_BINS, (index + 1) / CELL_BINS
                 print(f"{axis} {low:.1f}-{high:.1f}  n={stats.visible:5d} recall={stats.recall:.3f} "
@@ -272,12 +274,14 @@ def run_raw(models: List[str], clips: List[ClipPair], thresholds: List[float], d
             weights: Optional[Dict[str, Path]] = None, stride: Optional[int] = None,
             sources: Optional[Dict[str, str]] = None, histogram: bool = False) -> None:
     per_model: Dict[str, List[RawClip]] = {}
+    grids: Dict[str, Tuple[int, int]] = {}
     for name in models:
         detector = ball_detector((weights or {}).get(name) or MODELS[name], device=device, source_stride=stride)
+        grids[name] = (detector.model.GRID_COLS, detector.model.GRID_ROWS)
         per_model[name] = raw_rows(detector, clips, name)
         del detector
     for name in models:
-        report_raw(name, per_model[name], thresholds, sources, histogram)
+        report_raw(name, per_model[name], thresholds, sources, grids[name] if histogram else None)
 
 
 def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float], device: str,
@@ -344,7 +348,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--court", action="store_true",
                         help="Pipeline mode: also compute the court events (landings, contacts, rally legs) and "
                              "write them into each clip's tracking JSON for score_court_events.py (needs CatBoost)")
-    parser.add_argument("--gridtracknet-weights", help="Score a different GridTrackNet .npz (raw mode)")
+    parser.add_argument("--gridtracknet-weights",
+                        help="Score other five-frame weights in raw mode: a GridTrackNet .npz or a HeatmapNet .pt")
     parser.add_argument("--gridtracknet-stride", type=int, default=None,
                         help="Force the frame spacing fed to GridTrackNet (1 = consecutive frames even at 60 FPS)")
     args = parser.parse_args(argv)

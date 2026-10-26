@@ -15,9 +15,11 @@ import torch
 from torch import nn
 
 
+ARCH = "gridtracknet"
 WIDTH = 768
 HEIGHT = 432
 FRAMES_PER_UNIT = 5
+INPUT_CHANNELS = FRAMES_PER_UNIT * 3
 GRID_COLS = 48
 GRID_ROWS = 27
 POOL_AFTER = {1, 3, 5, 8}
@@ -86,9 +88,21 @@ class WidthBatchNorm(nn.Module):
 
 
 class GridTrackNet(nn.Module):
+    """The upstream network: a VGG-style encoder with four max-pools and no decoder, predicting
+    one cell of the 48x27 grid per frame with its offsets. ``GRID_COLS``, ``GRID_ROWS``,
+    ``INPUT_CHANNELS``, ``FRAMES_PER_UNIT`` and ``ARCH`` are the contract it shares with
+    ``heatmapnet.HeatmapNet`` (``ball_models``), so the detector, the decoder and the trainer read
+    the model they hold instead of asking which class it is."""
+
+    ARCH = ARCH
+    GRID_COLS = GRID_COLS
+    GRID_ROWS = GRID_ROWS
+    INPUT_CHANNELS = INPUT_CHANNELS
+    FRAMES_PER_UNIT = FRAMES_PER_UNIT
+
     def __init__(self):
         super().__init__()
-        channels = [15, 64, 64, 128, 128, 256, 256, 256, 256, 256, 512, 512, 512, 15]
+        channels = [INPUT_CHANNELS, 64, 64, 128, 128, 256, 256, 256, 256, 256, 512, 512, 512, 15]
         widths = [768, 768, 384, 384, 192, 192, 96, 96, 96, 48, 48, 48]
         self.convs = nn.ModuleList(
             nn.Conv2d(channels[index], channels[index + 1], 3, padding=1)
@@ -154,8 +168,11 @@ def frame_tensor(frame: np.ndarray, device: torch.device) -> torch.Tensor:
 def decode_predictions(output: torch.Tensor, output_width: int, output_height: int,
                        threshold: float) -> List[GridPoint]:
     """Per input frame, the most confident grid cell as a point in ``output_width`` x
-    ``output_height`` pixels (None below ``threshold``) and its confidence."""
-    units = output.float().cpu().numpy().reshape(-1, FRAMES_PER_UNIT, 3, GRID_ROWS, GRID_COLS)
+    ``output_height`` pixels (None below ``threshold``) and its confidence. The grid is the
+    output's own (its last two axes), so GridTrackNet's 48x27 and HeatmapNet's 192x108 decode
+    alike: ``x = (x_offset + col) * output_width / cols``."""
+    rows, cols = int(output.shape[-2]), int(output.shape[-1])
+    units = output.float().cpu().numpy().reshape(-1, FRAMES_PER_UNIT, 3, rows, cols)
     decoded = []
     for unit in units:
         for confidence_grid, x_grid, y_grid in unit:
@@ -163,8 +180,8 @@ def decode_predictions(output: torch.Tensor, output_width: int, output_height: i
             confidence = float(confidence_grid[row, col])
             point = None
             if confidence >= threshold:
-                x = (float(x_grid[row, col]) + col) * output_width / GRID_COLS
-                y = (float(y_grid[row, col]) + row) * output_height / GRID_ROWS
+                x = (float(x_grid[row, col]) + col) * output_width / cols
+                y = (float(y_grid[row, col]) + row) * output_height / rows
                 point = (x, y)
             decoded.append((point, confidence))
     return decoded

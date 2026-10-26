@@ -20,6 +20,7 @@ from .court.bounce_events import infer_kinematic_bounces, predict_bounce_events
 from .court.contact_events import detect_player_contacts
 from .court.court_scene import CourtScene
 from .court.rally_legs import assemble_rally_legs
+from .ball_models import WEIGHTS_SUFFIX
 from .engines.ball_detectors import BallDetectorBackend, GridTrackNetBallDetector, TensorRTRuntimeBallDetector
 from .engines.court_detector import CourtDetector
 from .engines.engine_files import find_ball_class_id_from_names, read_engine_class_names, resolve_engine_path
@@ -34,6 +35,7 @@ from .utils import detect_device, print_platform_report, resolve_runtime
 from .video_io import check_writable_video_path
 
 _DEFAULT_FPS = 24.0                 # when the container reports none
+PREPASS_WEIGHTS = frozenset(WEIGHTS_SUFFIX.values())     # the suffixes the five-frame prepass detector loads
 # The display path interpolates across at least this much time, within these frame bounds.
 _DISPLAY_PATH_GAP_SECONDS = 0.60
 _DISPLAY_PATH_GAP_MIN_FRAMES, _DISPLAY_PATH_GAP_MAX_FRAMES = 10, 24
@@ -99,11 +101,12 @@ def validate_io_paths(cfg: Config) -> Path:
 
 
 def _build_ball_detector(cfg: Config) -> BallDetectorBackend:
-    """GridTrackNet for ``.npz`` weights, else the TensorRT engine next to ``model_path``."""
+    """The five-frame prepass detector for ``.npz`` (GridTrackNet) or ``.pt`` (HeatmapNet)
+    weights, else the TensorRT engine next to ``model_path``."""
     model_path = Path(cfg.model_path).expanduser().resolve()
-    if model_path.suffix.lower() == ".npz":
+    if model_path.suffix.lower() in PREPASS_WEIGHTS:
         if not model_path.is_file():
-            raise FileNotFoundError(f"GridTrackNet weights not found: {model_path}")
+            raise FileNotFoundError(f"Ball-detector weights not found: {model_path}")
         return GridTrackNetBallDetector(str(model_path), cfg)
     engine_path = resolve_engine_path(cfg.model_path)
     if engine_path is None:

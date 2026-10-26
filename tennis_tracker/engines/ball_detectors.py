@@ -1,10 +1,12 @@
-"""Ball detector backends: GridTrackNet and the single-frame TensorRT engine.
+"""Ball detector backends: the five-frame prepass (GridTrackNet or HeatmapNet) and the
+single-frame TensorRT engine.
 
-Both sit behind ``BallDetectorBackend``: GridTrackNet (the default, a
-five-frame temporal model run as a whole-clip prepass; ``_prepass`` keeps
-source-frame indices and temporal order) and the single-frame Ultralytics
-TensorRT engine (``Config.model_path`` ending in ``.engine``), driven through
-``TensorRTRuntimeSession`` from ``engine_session``.
+Both sit behind ``BallDetectorBackend``: ``GridTrackNetBallDetector`` (the default, a
+five-frame temporal model run as a whole-clip prepass; ``_prepass`` keeps source-frame
+indices and temporal order; the model is whichever ``ball_models.load_ball_model`` builds
+for ``Config.model_path``, GridTrackNet for ``.npz`` and HeatmapNet for ``.pt``) and the
+single-frame Ultralytics TensorRT engine (``Config.model_path`` ending in ``.engine``),
+driven through ``TensorRTRuntimeSession`` from ``engine_session``.
 """
 from __future__ import annotations
 
@@ -24,8 +26,9 @@ from ball_in_play_selector import RawDetection
 from ..config import Config
 from .engine_boxes import OutputMode, decode_engine_boxes, engine_output_mode
 from .engine_session import TensorRTRuntimeSession
+from ..ball_models import load_ball_model
 from ..frame_rate import require_phase_stride
-from ..gridtracknet import HEIGHT, WIDTH, GridPoint, decode_predictions, frame_tensor, load_model
+from ..gridtracknet import HEIGHT, WIDTH, GridPoint, decode_predictions, frame_tensor
 
 # A BGR HWC uint8 frame, either a host array or a CUDA tensor of the same layout.
 FrameInput = Union[np.ndarray, torch.Tensor]
@@ -89,7 +92,12 @@ class CachedDetections:
 
 
 class GridTrackNetBallDetector(BallDetectorBackend):
-    """Run the pretrained model at its native five-frame, 30-FPS cadence.
+    """Run the five-frame model at its native 30-FPS cadence.
+
+    The model is GridTrackNet or HeatmapNet by ``weights_path``'s suffix
+    (``ball_models.load_ball_model``); both take the same 15-channel unit and
+    answer in the same layout, so everything here reads the model's own
+    ``INPUT_CHANNELS`` and grid and nothing asks which it holds.
 
     ``prepare_video`` decodes the whole clip once (by default on a worker
     thread, see ``Config.gridtracknet_prepass_background``) and caches one
@@ -113,7 +121,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         self.device = torch.device(f"cuda:{cfg.device}")
         self._decode = decode_predictions
         self._frame_tensor = frame_tensor
-        self.model = load_model(Path(weights_path), self.device)
+        self.model = load_ball_model(Path(weights_path), self.device)
         # One entry per decoded source frame, appended by the prepass.
         self.precomputed: Optional[List[List[RawDetection]]] = None
         # Progressive prepass state: frames < ready_upto are final; ``_done``
@@ -124,9 +132,10 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         self._worker: Optional[threading.Thread] = None
         self._worker_error: Optional[BaseException] = None
         with torch.inference_mode():
-            self.model(torch.zeros((1, 15, HEIGHT, WIDTH), device=self.device, dtype=torch.float16))
+            self.model(torch.zeros((1, self.model.INPUT_CHANNELS, HEIGHT, WIDTH), device=self.device, dtype=torch.float16))
         torch.cuda.synchronize(self.device)
-        print(f"[detector] GridTrackNet FP16 (confidence={cfg.conf:.2f}, device={self.device})")
+        print(f"[detector] {self.model.ARCH} FP16, {self.model.GRID_COLS}x{self.model.GRID_ROWS} grid "
+              f"(confidence={cfg.conf:.2f}, device={self.device})")
 
     def source_stride_for(self, fps: float) -> int:
         override = self.cfg.gridtracknet_source_stride

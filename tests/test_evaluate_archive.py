@@ -250,14 +250,14 @@ def test_cell_histogram_bins_recall_by_position_within_the_grid_cell(capsys):
             LabelledDetection((79.0, 61.0), (79.0, 61.0), 0.9),             # x 0.975: last bin; y 1.525 -> 0.525
             LabelledDetection(None, (5.0, 5.0), 0.9)]                       # no label: not binned
     per_clip = [RawClip("c", 1920, 1080, 30.0, 1.0, rows)]
-    bins = cell_histogram(per_clip, 0.5)
+    bins = cell_histogram(per_clip, 0.5, (48, 27))
     assert set(bins) == {"x", "y"} and all(len(per_bin) == CELL_BINS for per_bin in bins.values())
     assert [stats.visible for stats in bins["x"]] == [1, 0, 1, 0, 1] and [stats.visible for stats in bins["y"]] == [0, 0, 3, 0, 0]
     assert bins["x"][0].recall == 0.0 and bins["x"][2].recall == 1.0 and bins["x"][4].recall == 1.0
     assert bins["y"][2].recall == pytest.approx(2 / 3)
-    report_raw("probe", per_clip, [0.5], histogram=True)
+    report_raw("probe", per_clip, [0.5], histogram=(48, 27))
     out = capsys.readouterr().out
-    assert "recall by position within the grid cell" in out
+    assert "recall by position within the 48x27 grid cell" in out
     assert "x 0.0-0.2  n=    1 recall=0.000 wrong=0.000 miss=1.000" in out
     assert "y 0.4-0.6  n=    3 recall=0.667" in out and "x spread: 1.000" in out and "y spread: 0.000" in out
     report_raw("probe", per_clip, [0.5])

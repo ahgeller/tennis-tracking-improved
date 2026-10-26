@@ -16,6 +16,7 @@ from finetune.training import metrics
 from tennis_tracker.engines import ball_detectors
 from tennis_tracker.engines.ball_detectors import GridTrackNetBallDetector
 from tennis_tracker.config import Config
+from tennis_tracker.gridtracknet import GridTrackNet
 from tennis_tracker.motion import _PROBE_S_DIFF_SCALE, _clean_raw_motion_mask
 from tennis_tracker.utils import ENCODER_OPENCV, EncoderChoice
 from tennis_tracker.video_io import VideoWriter
@@ -185,8 +186,23 @@ def metric_probe(count: int, labels: Dict[int, Optional[List[float]]]) -> Detect
         )
 
 
+class StandInModel:
+    """A callable standing in for the ball model, carrying the contract the detector reads off a
+    real one (``ball_models``: GridTrackNet's ``ARCH``, grid and channel count)."""
+
+    ARCH, GRID_COLS, GRID_ROWS = GridTrackNet.ARCH, GridTrackNet.GRID_COLS, GridTrackNet.GRID_ROWS
+    INPUT_CHANNELS, FRAMES_PER_UNIT = GridTrackNet.INPUT_CHANNELS, GridTrackNet.FRAMES_PER_UNIT
+
+    def __init__(self, forward):
+        self.forward = forward
+
+    def __call__(self, batch):
+        return self.forward(batch)
+
+
 class CpuGridTrackNet(GridTrackNetBallDetector):
-    """The real constructor, run on the CPU with an injected model, decoder and frame encoder.
+    """The real constructor, run on the CPU with an injected model (a callable, wrapped in
+    ``StandInModel``), decoder and frame encoder.
 
     The constructor insists on CUDA and loads weights from disk; both are
     replaced for its duration only. ``on_publish`` sees every prefix the
@@ -197,7 +213,7 @@ class CpuGridTrackNet(GridTrackNetBallDetector):
         with patch.object(torch.cuda, "is_available", return_value=True), \
              patch.object(torch, "device", return_value=torch.device("cpu")), \
              patch.object(torch.cuda, "synchronize"), \
-             patch.object(ball_detectors, "load_model", return_value=model):
+             patch.object(ball_detectors, "load_ball_model", return_value=StandInModel(model)):
             super().__init__("unused.npz", cfg)
         self._decode = decode
         self._frame_tensor = frame_tensor
