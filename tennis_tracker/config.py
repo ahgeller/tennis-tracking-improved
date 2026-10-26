@@ -23,6 +23,9 @@ class Config:
     gridtracknet_y_offset_px: float = 0.0
     gridtracknet_source_stride: Optional[int] = None  # None = 2 at 60 FPS / 1 at 30 FPS (the training cadence)
     gridtracknet_prepass_background: bool = True  # run the GridTrackNet prepass on a worker thread, overlapped with pass 1
+    # Frames of a phase between one five-frame unit's start and the next: 5 answers every frame
+    # from one unit; 1 starts a unit at every frame and averages the five answers each frame gets.
+    gridtracknet_window_step: int = 5
 
     # TensorRT
     trt_async_execute: bool = True

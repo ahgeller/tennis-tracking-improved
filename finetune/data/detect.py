@@ -18,18 +18,20 @@ BallPoint = Tuple[float, float, float]     # x, y (native pixels) and confidence
 
 
 def ball_detector(weights: Path, conf: float = 0.0, device: str = "0",
-                  source_stride: Optional[int] = None) -> "GridTrackNetBallDetector":
+                  source_stride: Optional[int] = None, window_step: int = 5) -> "GridTrackNetBallDetector":
     """The prepass detector on `weights` (GridTrackNet for an ``.npz``, HeatmapNet or MemoryNet
     for a ``.pt``: ``tennis_tracker.ball_models``), keeping every candidate at or above `conf`. It sees the same
     five RGB frames the tracker feeds the model; `detect_clip` runs the prepass in the
     foreground, so these scripts get every frame's answer at once. `source_stride` forces the
-    frame spacing fed to the model (None: the training cadence, 2 at 60 FPS and 1 at 30)."""
+    frame spacing fed to the model (None: the training cadence, 2 at 60 FPS and 1 at 30);
+    `window_step` is ``Config.gridtracknet_window_step`` (below 5, overlapping units averaged)."""
     import torch
     from tennis_tracker.config import Config
     from tennis_tracker.engines import ball_detectors as backends
     # These scripts own their process: let cuDNN autotune the fixed-shape convolutions.
     torch.backends.cudnn.benchmark = True
-    cfg = Config(conf=conf, device=device, gridtracknet_source_stride=source_stride)
+    cfg = Config(conf=conf, device=device, gridtracknet_source_stride=source_stride,
+                 gridtracknet_window_step=window_step)
     return backends.GridTrackNetBallDetector(str(weights), cfg)
 
 

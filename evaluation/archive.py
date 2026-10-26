@@ -272,11 +272,13 @@ def report_raw(name: str, per_clip: List[RawClip], thresholds: List[float],
 
 def run_raw(models: List[str], clips: List[ClipPair], thresholds: List[float], device: str,
             weights: Optional[Dict[str, Path]] = None, stride: Optional[int] = None,
-            sources: Optional[Dict[str, str]] = None, histogram: bool = False) -> None:
+            sources: Optional[Dict[str, str]] = None, histogram: bool = False,
+            window_step: int = 5) -> None:
     per_model: Dict[str, List[RawClip]] = {}
     grids: Dict[str, Tuple[int, int]] = {}
     for name in models:
-        detector = ball_detector((weights or {}).get(name) or MODELS[name], device=device, source_stride=stride)
+        detector = ball_detector((weights or {}).get(name) or MODELS[name], device=device, source_stride=stride,
+                                 window_step=window_step)
         grids[name] = (detector.model.GRID_COLS, detector.model.GRID_ROWS)
         per_model[name] = raw_rows(detector, clips, name)
         del detector
@@ -356,6 +358,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "detector on them, pipeline mode the tracker")
     parser.add_argument("--gridtracknet-stride", type=int, default=None,
                         help="Force the frame spacing fed to GridTrackNet (1 = consecutive frames even at 60 FPS)")
+    parser.add_argument("--window-step", type=int, default=5,
+                        help="Raw mode: frames of a phase between unit starts; below 5 a frame's overlapping units "
+                             "are averaged before it is decoded (1 = a unit at every frame)")
     args = parser.parse_args(argv)
 
     archive = Path(args.archive) if args.archive else default_archive()
@@ -369,7 +374,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         manifest = read_manifest(archive / MANIFEST_NAME)
         sources = {clip_of(csv_path): clip_source(clip_of(csv_path), manifest) for _, csv_path in clips}
         run_raw(args.models, clips, args.thresholds, args.device, weights, args.gridtracknet_stride, sources,
-                args.cell_histogram)
+                args.cell_histogram, args.window_step)
     else:
         run_pipeline(
             args.models, clips,

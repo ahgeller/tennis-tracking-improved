@@ -174,18 +174,23 @@ def decode_predictions(output: torch.Tensor, output_width: int, output_height: i
     alike: ``x = (x_offset + col) * output_width / cols``."""
     rows, cols = int(output.shape[-2]), int(output.shape[-1])
     units = output.float().cpu().numpy().reshape(-1, FRAMES_PER_UNIT, 3, rows, cols)
-    decoded = []
-    for unit in units:
-        for confidence_grid, x_grid, y_grid in unit:
-            row, col = np.unravel_index(np.argmax(confidence_grid), confidence_grid.shape)
-            confidence = float(confidence_grid[row, col])
-            point = None
-            if confidence >= threshold:
-                x = (float(x_grid[row, col]) + col) * output_width / cols
-                y = (float(y_grid[row, col]) + row) * output_height / rows
-                point = (x, y)
-            decoded.append((point, confidence))
-    return decoded
+    return [decode_grid(grids, output_width, output_height, threshold) for unit in units for grids in unit]
+
+
+def decode_grid(grids: np.ndarray, output_width: int, output_height: int, threshold: float) -> GridPoint:
+    """One frame's answer from its ``(3, rows, cols)`` grids (confidence, x offset, y offset):
+    the most confident cell as a point in ``output_width`` x ``output_height`` pixels (None
+    below ``threshold``) and its confidence."""
+    confidence_grid, x_grid, y_grid = grids
+    rows, cols = confidence_grid.shape
+    row, col = np.unravel_index(np.argmax(confidence_grid), confidence_grid.shape)
+    confidence = float(confidence_grid[row, col])
+    point = None
+    if confidence >= threshold:
+        x = (float(x_grid[row, col]) + col) * output_width / cols
+        y = (float(y_grid[row, col]) + row) * output_height / rows
+        point = (x, y)
+    return point, confidence
 
 
 def self_test() -> None:

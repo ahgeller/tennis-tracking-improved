@@ -29,7 +29,7 @@ from .engine_boxes import OutputMode, decode_engine_boxes, engine_output_mode
 from .engine_session import TensorRTRuntimeSession
 from ..ball_models import load_ball_model
 from ..frame_rate import require_phase_stride
-from ..gridtracknet import HEIGHT, WIDTH, GridPoint, decode_predictions, frame_tensor
+from ..gridtracknet import HEIGHT, WIDTH, GridPoint, decode_grid, decode_predictions, frame_tensor
 
 # A BGR HWC uint8 frame, either a host array or a CUDA tensor of the same layout.
 FrameInput = Union[np.ndarray, torch.Tensor]
@@ -106,6 +106,13 @@ class GridTrackNetBallDetector(BallDetectorBackend):
     to a call. Which frames are answered, in which order, and when they are
     published is the same either way.
 
+    ``Config.gridtracknet_window_step`` below 5 starts a unit every that many
+    frames of a phase instead of every 5, so a frame is answered by up to five
+    overlapping units, and the answers a frame gets are averaged grid by grid
+    before it is decoded once (``_HeatAverage``). A ``STATEFUL`` model carries
+    one chain of states per phase, which overlapping units would break, so it
+    takes the step of 5 only.
+
     ``prepare_video`` decodes the whole clip once (by default on a worker
     thread, see ``Config.gridtracknet_prepass_background``) and caches one
     detection per decoded source frame; ``detections_at(i)`` returns frame
@@ -129,6 +136,12 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         self._decode = decode_predictions
         self._frame_tensor = frame_tensor
         self.model = load_ball_model(Path(weights_path), self.device)
+        window_step = int(cfg.gridtracknet_window_step)
+        if not 1 <= window_step <= 5:
+            raise ValueError(f"gridtracknet_window_step must be 1 to 5, not {window_step}")
+        if self.model.STATEFUL and window_step != 5:
+            raise RuntimeError("a STATEFUL model answers each phase along one chain of states; overlapping "
+                               "units would need a chain each, so it takes window step 5")
         # One entry per decoded source frame, appended by the prepass.
         self.precomputed: Optional[List[List[RawDetection]]] = None
         # Progressive prepass state: frames < ready_upto are final; ``_done``
@@ -141,8 +154,9 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         with torch.inference_mode():
             self.model(torch.zeros((1, self.model.INPUT_CHANNELS, HEIGHT, WIDTH), device=self.device, dtype=torch.float16))
         torch.cuda.synchronize(self.device)
+        windows = "" if window_step == 5 else f", a unit every {window_step} frame(s)"
         print(f"[detector] {self.model.ARCH} FP16, {self.model.GRID_COLS}x{self.model.GRID_ROWS} grid "
-              f"(confidence={cfg.conf:.2f}, device={self.device})")
+              f"(confidence={cfg.conf:.2f}, device={self.device}{windows})")
 
     def source_stride_for(self, fps: float) -> int:
         override = self.cfg.gridtracknet_source_stride
@@ -206,11 +220,12 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                  total_hint: int) -> None:
         cached = self.precomputed
         finalized = set()
-        # One independent five-frame unit per phase. The model wants 30 FPS
-        # spacing, so at 60 FPS the odd frames form a second, equally valid
-        # unit stream; running only phase 0 leaves every odd frame unobserved.
-        units: List[List[_PrepassFrame]] = [[] for _ in range(source_stride)]
-        recent: List[Deque[_PrepassFrame]] = [deque(maxlen=5) for _ in range(source_stride)]
+        # One independent stream of five-frame units per phase. The model wants 30 FPS
+        # spacing, so at 60 FPS the odd frames form a second, equally valid unit stream;
+        # running only phase 0 leaves every odd frame unobserved. ``_UnitStream`` cuts a
+        # phase's units every ``window_step`` of its frames from the last five it saw.
+        window_step = int(self.cfg.gridtracknet_window_step)
+        streams = [_UnitStream(window_step) for _ in range(source_stride)]
         batches: List[_PrepassUnit] = []
         # A stateful model carries one memory per phase and sees one unit per phase per
         # call: the phases complete their units in turn, so a batch of ``source_stride``
@@ -218,29 +233,38 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         stateful = self.model.STATEFUL
         units_per_call = source_stride if stateful else _UNITS_PER_INFERENCE
         states: List[Optional[torch.Tensor]] = [None] * source_stride
+        average = _HeatAverage() if window_step != 5 else None
         frame_index = inference_calls = detected = 0
         started = time.perf_counter()
         y_offset = self.cfg.gridtracknet_y_offset_px * height / _REFERENCE_HEIGHT_PX
         radius = max(_MIN_BOX_RADIUS_PX, _BOX_RADIUS_FRAC * np.hypot(width, height))
 
-        def flush(update_states: bool = True) -> None:
+        def flush(update_states: bool = True, final: bool = False) -> None:
             nonlocal inference_calls, detected
-            if not batches:
-                return
-            with torch.inference_mode():
-                batch = torch.stack([item[0] for item in batches])
-                if stateful:
-                    phases = [indices[0] % source_stride for _, indices in batches]
-                    output = _run_stateful(self.model, batch, phases, states, update_states)
-                else:
-                    output = self.model(batch)
-                decoded = self._decode(output, width, height, self.cfg.conf)
-            detected += _store_decoded(batches, decoded, finalized, cached, y_offset, radius)
-            inference_calls += 1
-            # Every frame below the oldest unit still being assembled is final.
-            pending_min = min((item[1] for unit in units for item in unit), default=frame_index + 1)
-            batches.clear()
-            self._publish(min(pending_min, frame_index + 1))
+            # Every frame below the oldest unit not yet cut is final (a mid-clip call cannot be
+            # sure of later frames: the next unit may still cover them).
+            pending_min = min((stream.pending_start for stream in streams if stream.pending_start is not None),
+                              default=frame_index + 1)
+            upto = len(cached) if final else min(pending_min, frame_index + 1)
+            if batches:
+                with torch.inference_mode():
+                    batch = torch.stack([item[0] for item in batches])
+                    if stateful:
+                        phases = [indices[0] % source_stride for _, indices in batches]
+                        output = _run_stateful(self.model, batch, phases, states, update_states)
+                    else:
+                        output = self.model(batch)
+                    if average is None:
+                        decoded = self._decode(output, width, height, self.cfg.conf)
+                    else:
+                        average.add(output, [indices for _, indices in batches])
+                if average is None:
+                    detected += _store_decoded(batches, decoded, finalized, cached, y_offset, radius)
+                inference_calls += 1
+                batches.clear()
+            if average is not None:
+                detected += average.decode_below(upto, width, height, self.cfg.conf, cached, y_offset, radius)
+            self._publish(upto)
 
         try:
             # All of the worker's CUDA work lives on its own stream so it overlaps
@@ -253,19 +277,14 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                     if not ok:
                         break
                     cached.append([])
-                    phase = frame_index % source_stride
-                    unit = units[phase]
-                    item = (self._frame_tensor(frame, self.device), frame_index)
-                    recent[phase].append(item)
-                    unit.append(item)
-                    if len(unit) == 5:
-                        batches.append((torch.cat([value for value, _ in unit]), [index for _, index in unit]))
-                        unit.clear()
+                    unit = streams[frame_index % source_stride].push((self._frame_tensor(frame, self.device), frame_index))
+                    if unit is not None:
+                        batches.append(unit)
                         if len(batches) == units_per_call:
                             flush()
                     frame_index += 1
-                batches.extend(_trailing_windows(units, recent))
-                flush(update_states=False)          # the trailing windows read the states; nothing follows them
+                batches.extend(window for window in (stream.trailing_window() for stream in streams) if window is not None)
+                flush(update_states=False, final=True)      # the trailing windows read the states; nothing follows them
                 if stream is not None:
                     stream.synchronize()
                 else:
@@ -381,17 +400,83 @@ def _run_stateful(model: Any, batch: torch.Tensor, phases: List[int], states: Li
     return output
 
 
-def _trailing_windows(units: List[List[_PrepassFrame]], recent: List[Deque[_PrepassFrame]]) -> List[_PrepassUnit]:
-    """Cover each phase's trailing frames (a unit left short when the clip ended) with one
-    overlapping window: that phase's last five frames, in phase order."""
-    windows: List[_PrepassUnit] = []
-    for phase in range(len(units)):
-        if units[phase] and len(recent[phase]) == 5:
-            windows.append((
-                torch.cat([value for value, _ in recent[phase]]),
-                [index for _, index in recent[phase]],
-            ))
-    return windows
+class _UnitStream:
+    """One phase's frames cut into five-frame units: a unit starts every `step` frames of the
+    phase (5: units that do not overlap, each frame answered once; 1: a unit at every frame,
+    each frame in up to five). ``push`` takes the phase's next frame and returns the unit it
+    completes, if any; ``trailing_window`` is the phase's last five frames when the clip ended
+    between unit starts (a unit left short), so every frame is covered; ``pending_start`` is the
+    source index of the first frame of the next unit to cut, None while that frame has not been
+    read: frames below it are covered by no unit still to come."""
+
+    def __init__(self, step: int):
+        self.step = step
+        self.recent: Deque[_PrepassFrame] = deque(maxlen=5)
+        self.seen = 0               # frames of the phase pushed so far
+        self.next_cut = 5           # the count at which the next unit completes
+        self.pending_start: Optional[int] = None
+
+    def push(self, item: _PrepassFrame) -> Optional[_PrepassUnit]:
+        self.recent.append(item)
+        self.seen += 1
+        if self.seen == self.next_cut - 4:          # the next unit's first frame
+            self.pending_start = item[1]
+        if self.seen != self.next_cut:
+            return None
+        self.next_cut += self.step
+        self.pending_start = None
+        first = self.next_cut - 4                   # the count of the next unit's first frame
+        if first <= self.seen:                      # already read: in the window just cut
+            self.pending_start = self.recent[first - self.seen - 1][1]
+        return _window(self.recent)
+
+    def trailing_window(self) -> Optional[_PrepassUnit]:
+        if self.seen >= 5 and self.seen != self.next_cut - self.step:
+            return _window(self.recent)
+        return None
+
+
+def _window(frames: Deque[_PrepassFrame]) -> _PrepassUnit:
+    return torch.cat([value for value, _ in frames]), [index for _, index in frames]
+
+
+class _HeatAverage:
+    """A frame's answers from every unit that covers it, summed grid by grid (the model's
+    ``(3, rows, cols)`` per frame, in float32) until the frame is final, then decoded once
+    (``decode_grid``) from the mean."""
+
+    def __init__(self):
+        self.sums: Dict[int, torch.Tensor] = {}
+        self.counts: Dict[int, int] = {}
+
+    def add(self, output: torch.Tensor, indices: List[List[int]]) -> None:
+        grids = output.float().reshape(output.shape[0], 5, 3, output.shape[-2], output.shape[-1])
+        for row, unit in enumerate(indices):
+            for position, index in enumerate(unit):
+                if index in self.sums:
+                    self.sums[index] += grids[row, position]
+                    self.counts[index] += 1
+                else:
+                    self.sums[index] = grids[row, position].clone()
+                    self.counts[index] = 1
+
+    def decode_below(self, upto: int, width: int, height: int, threshold: float, cached: List[List[RawDetection]],
+                     y_offset: float, radius: float) -> int:
+        """Decode every accumulated frame below `upto` into `cached` and drop it; returns how many
+        were given a detection."""
+        ready = sorted(index for index in self.sums if index < upto)
+        if not ready:
+            return 0
+        means = torch.stack([self.sums.pop(index) / self.counts.pop(index) for index in ready]).cpu().numpy()
+        detected = 0
+        for index, grids in zip(ready, means):
+            point, confidence = decode_grid(grids, width, height, threshold)
+            if point is None:
+                continue
+            x, y = point[0], point[1] + y_offset
+            cached[index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
+            detected += 1
+        return detected
 
 
 def decode_ball_predictions(

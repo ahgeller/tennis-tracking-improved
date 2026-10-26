@@ -149,3 +149,17 @@ Full tables, the cell histogram and the per-source reading are in
   its running statistics follow within the first few dozen steps of the epoch. The warning and
   `check_finite` stay as a check that should never fire. A recipe 2 run (heat2, heat3) is refused
   as a resume; it is continued as a fine-tune under a new tag. heat4 is stage 1 on recipe 3.
+- 2026-10-26, dense windows (inference only, no training; branch `dense-windows`,
+  `Config.gridtracknet_window_step`, `evaluate_archive.py --window-step`): a five-frame unit
+  started at every frame of a phase instead of every fifth, each frame's up to five answers
+  averaged grid by grid before one decode (`ball_detectors._UnitStream`, `_HeatAverage`,
+  `gridtracknet.decode_grid`). WASB (BMVC 2023, Table 4) measured this as its largest row.
+  heat1's `best.pt` on mixed_v1, raw: at 0.50, recall 0.866 to 0.871, false alarm 0.075 (39) to
+  0.044 (23), wrong 0.005 to 0.001; at 0.30, recall 0.920 to 0.935, false alarm 0.168 to 0.133;
+  prof 0.873 to 0.886, grid 0.768 to 0.773, custom 0.904 to 0.901; median px unchanged. The
+  prepass over the 24 clips took 81 s against 55 s (the loader, not the network, is the cost;
+  five times the units is 1.5x the time). Also tried and removed: every unit mirrored and the
+  two answers averaged (x offsets mirrored back as one minus themselves): alone 0.866 / 0.069,
+  on top of dense windows 0.873 / 0.042, within noise for 1.5x more time. Logs in
+  `output/dense_windows/`. The tracker still defaults to a step of 5: the pipeline-mode check
+  (`--mode pipeline` not worse) has not been run, and the default moves with it.
