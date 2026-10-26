@@ -92,3 +92,19 @@ Full tables, the cell histogram and the per-source reading are in
   must then be the architecture's own file. GridTrackNet's runs are byte-for-byte unchanged. No
   `heatmap_s4` run has been made yet; when one is, it goes in the table above with the same
   held-out set and rule.
+- 2026-10-26: a third architecture, `memory_s4` (`tennis_tracker/memorynet.py`, `MemoryNet`):
+  HeatmapNet plus a convolutional GRU at the bottleneck (48x27, 256 channels, 3x3 gates) whose
+  state is carried from one five-frame unit to the next of the same phase, so the network knows
+  where the ball was before the five frames it looks at; the decoder takes the bottleneck plus a
+  1x1 `out` of the state, which starts at zero, so a MemoryNet built from a HeatmapNet's weights
+  (`from_heatmap`; the trainer's `--arch memory_s4 --weights <heatmap_s4 .pt>`) answers exactly
+  as that HeatmapNet until the memory trains. The prepass runs a `STATEFUL` model one unit per
+  phase per call in temporal order with the phase's state (reset at the clip's start; the
+  trailing window reads it without updating it), publishing exactly what it published before;
+  the trainer's example is a chain of `--chain` (4) consecutive non-overlapping units of one
+  clip and phase, the state carried through it, the loss the mean of the units', one
+  augmentation draw per chain (`reverse` reverses the unit order too), a chain's sampling
+  weight the mean of its units' and `config.json` recording `chain`. A `.pt` now names its
+  architecture inside and `ball_models.arch_of` reads it (the suffix is shared). The README's
+  stage 3b says how to train it from the heat run's `best.pt` and judge it on the same
+  commands, and "Keeping one network" what to delete when an architecture loses. No run yet.
