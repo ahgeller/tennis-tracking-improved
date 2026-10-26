@@ -7,9 +7,9 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from finetune.training.dataset import make_target
-from finetune.training.loop import (HEAT_OFFSET_WEIGHT, LOSSES, NORMALISED_WEIGHT_DECAY, batch_loss, build_optimizer,
-                                    chain_loss, check_finite, evaluate_loss, fresh_model, gridtracknet_loss,
-                                    heatmap_loss, largest_running_variance, normalised_conv_weights, save_weights,
+from finetune.training.loop import (HEAT_OFFSET_WEIGHT, LOSSES, batch_loss, build_optimizer, chain_loss, check_finite,
+                                    evaluate_loss, fresh_model, gridtracknet_loss, heatmap_loss, hold_conv_scale,
+                                    FILTER_NORM, largest_running_variance, normalised_conv_weights, save_weights,
                                     train_epoch, unit_loss)
 from tennis_tracker import memorynet
 from tennis_tracker import heatmapnet
@@ -180,30 +180,66 @@ def test_heatmap_offsets_are_weighted_as_centernet_weights_them():
     assert heatmap_loss(off, target) - heatmap_loss(exact, target) == pytest.approx(HEAT_OFFSET_WEIGHT * 0.5, abs=1e-5)
 
 
-def test_the_optimizer_decays_exactly_the_convolutions_batchnorm_follows():
+def test_the_normalised_convolutions_are_exactly_the_ones_batchnorm_follows_and_the_optimizer_is_plain():
     """A HeatmapNet's fourteen block convolutions (two per block: stem, four stages, two decoder
-    stages) get NORMALISED_WEIGHT_DECAY and nothing else does: not the heat head, whose scale the
-    sigmoid reads, nor a MemoryNet's gates and ``out``; a GridTrackNet, with no BatchNorm2d after
-    its convolutions, gets the one undecayed group it always had."""
+    stages) are the normalised ones and nothing else is: not the heat head, whose scale the
+    sigmoid reads, nor a MemoryNet's gates and ``out``; a GridTrackNet has none. The optimizer is
+    one undecayed Adadelta group for every architecture (recipe 2's decay group is gone)."""
     heat = heatmapnet.HeatmapNet()
-    decayed = normalised_conv_weights(heat)
-    assert len(decayed) == 14 and all(weight.dim() == 4 for weight in decayed)
-    assert not any(weight is heat.head.weight for weight in decayed)
-    optimizer = build_optimizer(heat, 1.0)
-    assert [group["weight_decay"] for group in optimizer.param_groups] == [NORMALISED_WEIGHT_DECAY, 0.0]
-    assert all(group["lr"] == 1.0 and group["rho"] == 0.95 and group["eps"] == 1e-7 for group in optimizer.param_groups)
-    counted = sum(len(group["params"]) for group in optimizer.param_groups)
-    assert counted == len(list(heat.parameters()))
+    held = normalised_conv_weights(heat)
+    assert len(held) == 14 and all(weight.dim() == 4 for weight in held)
+    assert not any(weight is heat.head.weight for weight in held)
     memory = memorynet.MemoryNet()
-    decayed_ids = {id(weight) for weight in normalised_conv_weights(memory)}
-    assert len(decayed_ids) == 14
+    held_ids = {id(weight) for weight in normalised_conv_weights(memory)}
+    assert len(held_ids) == 14
     for name, parameter in memory.named_parameters():
-        assert (id(parameter) in decayed_ids) == (parameter.dim() == 4 and not name.startswith(("head", "memory", "out")))
+        assert (id(parameter) in held_ids) == (parameter.dim() == 4 and not name.startswith(("head", "memory", "out")))
     grid = fresh_model(torch.device("cpu"), "gridtracknet")
     assert normalised_conv_weights(grid) == []
-    plain = build_optimizer(grid, 0.3)
-    assert len(plain.param_groups) == 1 and plain.param_groups[0]["weight_decay"] == 0
-    assert len(plain.param_groups[0]["params"]) == len(list(grid.parameters()))
+    for model, lr in ((heat, 1.0), (grid, 0.3)):
+        optimizer = build_optimizer(model, lr)
+        assert len(optimizer.param_groups) == 1
+        group = optimizer.param_groups[0]
+        assert group["weight_decay"] == 0 and group["lr"] == lr and group["rho"] == 0.95 and group["eps"] == 1e-7
+        assert len(group["params"]) == len(list(model.parameters()))
+
+
+def test_holding_the_normalised_convolutions_leaves_the_answer_alone_and_an_epoch_keeps_them_held():
+    """Scaling a normalised convolution's weight by 40 (heat3's decoder by epoch 16), one of its
+    output channels alone by 10, or another weight by a quarter does not change what the network
+    answers in train mode (to BatchNorm's eps, which is why a weight shrunk a hundredfold would),
+    and hold_conv_scale brings every filter back to FILTER_NORM (sqrt(2), a Kaiming filter's)
+    without changing the answer either; after a training step every held filter sits at that
+    norm, so the pre-normalisation activations stay a fresh network's size at any learning rate.
+    A biased convolution before BatchNorm is refused: the hold would change its answer."""
+    torch.manual_seed(3)
+    model = heatmapnet.HeatmapNet().train()
+    held = normalised_conv_weights(model)
+    images = torch.rand(2, 3 * FRAMES_PER_UNIT, 96, 160)
+    with torch.no_grad():
+        before = model(images)
+        held[0].mul_(40.0)
+        held[5][2].mul_(10.0)
+        held[13].mul_(0.25)
+        scaled = model(images)
+    assert torch.allclose(before, scaled, atol=1e-3)
+    hold_conv_scale(held)
+    assert FILTER_NORM == pytest.approx(2 ** 0.5)
+    for weight in held:
+        assert torch.allclose(weight.detach().flatten(1).norm(dim=1), torch.full((weight.shape[0],), FILTER_NORM), rtol=1e-5)
+    with torch.no_grad():
+        assert torch.allclose(before, model(images), atol=1e-3)
+    biased = torch.nn.Sequential(torch.nn.Conv2d(3, 4, 3, padding=1), torch.nn.BatchNorm2d(4))
+    with pytest.raises(ValueError, match="bias-free"):
+        normalised_conv_weights(biased)
+    target = make_target([[100.0, 50.0], None, None, None, None], 160, 96, heatmapnet.ARCH)[:, :24, :40].unsqueeze(0)
+    loader = DataLoader(TensorDataset(images[:1], target), batch_size=1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=10.0)       # a step large enough to move every norm
+    train_epoch(model, loader, optimizer, torch.amp.GradScaler("cuda", enabled=False), torch.device("cpu"), 1, 1, 1)
+    for weight in held:
+        assert torch.allclose(weight.detach().flatten(1).norm(dim=1), torch.full((weight.shape[0],), FILTER_NORM), rtol=1e-5)
+    grid = fresh_model(torch.device("cpu"), "gridtracknet")
+    hold_conv_scale(normalised_conv_weights(grid))                   # nothing to hold, nothing happens
 
 
 def test_check_finite_names_a_poisoned_running_statistic_and_the_largest_variance_is_reported():

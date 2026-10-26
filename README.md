@@ -73,14 +73,18 @@ Reading the table:
   the step is too big. Go to stage 2 now; the rest of the epochs are wasted.
 - `EPOCHS` reached while recall is still climbing: raise `EPOCHS`, keep the
   `TAG`, Run all.
-- Recall falling towards 0 while the train loss keeps falling: the network's
-  normalisation statistics overflowed (heat1 did this from epoch 18 at `LR` 1.0).
-  The trainer now stops the run with a message naming the layer instead of
-  scoring zeros, and warns an epoch or two before. Start a new `TAG` from the
-  last good epoch's file in `epochs/` with `MODE = "finetune"` and `LR = 0.1`.
+- Recall swinging between scored rows, or falling towards 0, while the train
+  loss keeps falling: the network's normalisation statistics are too large for
+  float16 (heat1 overflowed from epoch 18 at `LR` 1.0; heat3 swung from epoch
+  12). The trainer now holds the normalised convolutions at a fixed size after
+  every step, so this should not recur; it still warns when a running variance
+  passes a tenth of the ceiling and stops the run, naming the layer, if one
+  overflows. If it does, start a new `TAG` from the last good epoch's file in
+  `epochs/` with `MODE = "finetune"` and `LR = 0.1`, and report it.
 
-The first heat run (heat1, October 2026) reached 0.897 recall at epoch 10 and
-its best score at epoch 12; the old network from scratch plateaued at 0.85.
+The first heat runs (heat1 and heat3, October 2026) reached 0.897 and 0.883
+recall at epoch 10 before their statistics grew; the old network from scratch
+plateaued at 0.85.
 
 ## Stage 2: the rate drop (resume the same run)
 

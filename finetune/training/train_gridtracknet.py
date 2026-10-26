@@ -131,8 +131,8 @@ CHECKPOINT = "checkpoint.pt"
 EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz (or .pt), unless --no-keep-epochs
 RECIPE_FIELDS = ("arch", "chain", "augment", "oversample", "oversample_absent", "oversample_false_alarms",
                  "epoch_units", "batch_size", "lr", "seed", "holdout", "validation_clips")      # what read_selection_run copies
-HEAT_RECIPE = 2            # the heat-map losses' and optimizer's version, see run_config; 1 was heat1's (never recorded)
-VARIANCE_WARNING_SHARE = 0.1   # of HALF_MAX: the running variance above which an epoch warns
+HEAT_RECIPE = 3            # the heat-map losses' and optimizer's version, see run_config; 1 was heat1's (never recorded)
+VARIANCE_WARNING_SHARE = 0.1   # of HALF_MAX: the running variance above which an epoch warns (held convolutions never should)
 RUN_OUTCOMES = ("epochs", "false_alarm_units")     # the config.json fields a --resume may differ in, see same_run
 RATE_FIELDS = ("lr", "lr_schedule")                # ... and the two same_run reads as the schedule, not field by field
 
@@ -155,9 +155,11 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
     ``--oversample-false-alarms`` weighted up; ``lr_schedule``: the rates the run has trained at,
     see ``lr_schedule_of``, by default the one ``--lr`` from epoch 1), as ``config.json`` records
     it. ``lr`` is the rate in force. ``heat_recipe`` is ``HEAT_RECIPE`` for a HeatmapNet or MemoryNet
-    run (2: offsets weighted ``loop.HEAT_OFFSET_WEIGHT``, the normalised convolutions decayed) and
-    None for GridTrackNet, whose recipe has not changed; ``same_run`` refuses to continue a run
-    recorded under another, so heat1 (recipe 1, before the field existed) is not resumed as this one."""
+    run (3: offsets weighted ``loop.HEAT_OFFSET_WEIGHT``, the normalised convolutions held at their
+    Kaiming norm by ``loop.hold_conv_scale``; 2 decayed them instead, which held at ``--lr 0.3`` and
+    not at 1.0) and None for GridTrackNet, whose recipe has not changed; ``same_run`` refuses to
+    continue a run recorded under another, so heat1 (recipe 1, before the field existed) and heat2
+    and heat3 (recipe 2) are not resumed as this one."""
     arch = args.arch or GRIDTRACKNET
     return {"arch": arch, "chain": args.chain, "heat_recipe": None if arch == GRIDTRACKNET else HEAT_RECIPE,
             "clips": names,
@@ -406,7 +408,7 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
         name, variance = largest_running_variance(model)
         if variance > HALF_MAX * VARIANCE_WARNING_SHARE:
             print(f"[train] warning: {name} running variance {variance:.0f}, float16 overflows at {HALF_MAX:.0f}; "
-                  f"the pre-normalisation activations are growing, lower --lr before they do", flush=True)
+                  f"the pre-normalisation activations are growing although the convolutions are held", flush=True)
         val_loss = None if val_loader is None else evaluate_loss(model, val_loader, device, args.max_val_steps)
         save_weights(model, args.weights, last_path)
         if val_loss is not None and val_loss < best_loss:

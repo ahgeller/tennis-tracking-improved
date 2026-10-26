@@ -40,6 +40,8 @@ weights (`models/gridtracknet_weights_torch.npz`), training on the 40 clips outs
 | E0 area | 9b4985b | same, `RESIZE_INTERPOLATION` flipped to INTER_AREA by `output/e0_area.py` | - | - | 0.931 / 0.009 / 0.205 (106/518) | 0.924 | 0.967 / 0.905 / 0.905 | 2.0 | +0.6 recall, under the 2 point bar, prepass 58 fps: the recipe stays INTER_LINEAR |
 | R0 | 9b4985b | `--epochs 10 --seed 7` (basic augmentation), cancelled in epoch 10 | 7 | 1 (of 9 scored) | 0.938 / 0.011 / 0.305 (epoch 1); 0.936 / 0.007 / 0.230 (epoch 9) | - | - | 1.9 | baseline: recall +1 point over the bundled weights from epoch 1 on, false alarms up and falling with epochs; not scored by source (cancelled) |
 | heat1 | d6dc880 | `--arch heatmap_s4 --from-scratch --holdout mixed_v1 --epochs 40 --lr 1.0 --augment basic translate --score-every 2` (Colab A100, 4.4 min/epoch) | 7 | 12 (of 20 scored) | 0.866 / 0.005 / 0.075 (39/518) at 0.50; 0.920 / 0.011 / 0.168 at 0.30 | 0.869 | 0.904 / 0.873 / 0.768 | 3.4 | epoch 10 was 0.897 recall at 0.112 false alarm; from epoch 18 recall fell to 0.11 and from 24 to 0.000 while the training loss kept falling: the decoder's BatchNorm running variance (`up2.1`, `up2.4`) had overflowed float16 to infinity (25104 at epoch 12, 9088 running mean at 24), which silences the eval-mode network only. Fixed in recipe 2 below; the 3.4 px median (bundled 2.1) is the offset head untrained at weight 0.001 |
+| heat2 | 747d1ed | `--arch heatmap_s4 --weights heat1/best.pt --holdout mixed_v1 --epochs 16 --lr 0.3 --augment basic translate --score-every 2` (recipe 2 fine-tune of heat1's epoch 12; Colab) | 7 | 4 (of 8 scored) | 0.901 / 0.005 / 0.102 at 0.50 (epochs 2 to 8: 0.889, 0.901, 0.902, 0.891 recall, 0.10 to 0.12 false alarm) | - | - | 1.0 | the offset fix proven: 3.4 px median to 1.0 at once; the `up2.1` running variance fell under weight decay at 0.3 (10110, 8657, 6730, then under the warning line); recall held at heat1's level, the false-alarm rate did not fall. Scored on the PC per source: pending |
+| heat3 | 747d1ed | `--arch heatmap_s4 --from-scratch --holdout mixed_v1 --epochs 40 --lr 1.0 --augment basic translate --score-every 2` (recipe 2 from scratch; Colab A100, 4.3 min/epoch) | 7 | 16 (of 8 scored, in progress) | 0.831 / 0.006 / 0.054 at epoch 16; 0.883 / 0.014 / 0.104 at epoch 10 | - | - | 1.0 | the same climb as heat1 on the same schedule: `up2.4` running variance 9348 at epoch 11, 19625, 24039, 44242, 26936, 60577 at 16 (heat1's `best.pt`, epoch 12, held 25104), with the scored recall swinging 0.883, 0.775, 0.451, 0.831 while the training loss fell 0.44 to 0.41: weight decay 1e-4 holds the scale at 0.3 and loses to the step at 1.0. Fixed in recipe 3 below; the run was left going at 1.0 at the user's request |
 | R1 to R5 | - | see `audit/gridtracknet_recipe_experiments.md` | - | - | - | - | - | - | not run: the chain was cancelled on 2026-10-21 at the user's request (ten more hours); the protocol and commands are in the doc |
 
 ## E0: the current weights, INTER_LINEAR against INTER_AREA
@@ -129,3 +131,21 @@ Full tables, the cell histogram and the per-source reading are in
   held-out set at threshold 0.30 it matches the bundled weights' recall with half their false
   alarms (0.920 / 0.168 against 0.919 / 0.326), at 3.6x the speed. heat2 is the same stage 1 on
   recipe 2.
+- 2026-10-26, heat2 and heat3 (the table above): recipe 2 fixed the offsets (1.0 px median from
+  the first scored epoch) and the fine-tune at 0.3 was calm, but the scratch run at 1.0 grew its
+  decoder's running variance exactly as heat1 had, warning from epoch 11 and swinging the scored
+  recall from epoch 12; weight decay on the normalised convolutions is a force the step outruns
+  at the full rate. Recipe 3 (`HEAT_RECIPE` 3): the decay is gone, and `loop.hold_conv_scale`
+  rescales every output channel's filter of the fourteen convolutions BatchNorm follows back to
+  a Kaiming filter's norm (`loop.FILTER_NORM`, sqrt 2) after every optimizer step, which is the
+  bounded weight normalisation of Hoffer, Banner, Golan and Soudry, "Norm matters" (NeurIPS
+  2018): BatchNorm divides each channel's scale out, so the rescale leaves the network's answer
+  unchanged (to BatchNorm's eps; `tests/test_training_loop.py` checks a weight scaled by 40 and a
+  channel by 10 answer the same, and that an epoch leaves every filter at the norm), the
+  pre-normalisation activations stay a fresh network's size at any learning rate, and the
+  effective step no longer shrinks as the weights grow, which is what the rate was quietly
+  doing. The optimizer is one plain Adadelta group again for every architecture. A fine-tune
+  from weights that grew (heat3's decoder, 40x) is brought to the norm at the first step and
+  its running statistics follow within the first few dozen steps of the epoch. The warning and
+  `check_finite` stay as a check that should never fire. A recipe 2 run (heat2, heat3) is refused
+  as a resume; it is continued as a fine-tune under a new tag. heat4 is stage 1 on recipe 3.

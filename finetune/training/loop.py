@@ -12,9 +12,10 @@ backward pass runs through the whole chain (truncated at K).
 
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -28,7 +29,6 @@ LOSS_EPSILON = 1e-6        # keeps the confidence loss's logs finite
 OFFSET_LOSS_WEIGHT = 0.001     # GridTrackNet's, as upstream trains it
 HEAT_OFFSET_WEIGHT = 1.0       # the heat-map loss's, CenterNet's lambda_off: at 0.001 the offsets never trained
                                # (heat1, 2026-10-26: 3.4 px median at 1080p, a quarter of a cell at random)
-NORMALISED_WEIGHT_DECAY = 1e-4   # on the convolutions BatchNorm follows, whose scale the loss cannot see
 HALF_MAX = 65504.0               # float16's largest value; the prepass and the training forward run in it
 POSITIVE_WEIGHT, NEGATIVE_WEIGHT = 0.75, 0.25    # the focal loss's class weights
 HEAT_ALPHA, HEAT_BETA = 2.0, 4.0                 # CenterNet's focal exponents: the easy-example one and the penalty reduction
@@ -127,34 +127,52 @@ def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> N
     temporary.replace(destination)
 
 
-def normalised_conv_weights(model: torch.nn.Module) -> list:
+def normalised_conv_weights(model: torch.nn.Module) -> List[torch.Tensor]:
     """The weights of the convolutions a ``BatchNorm2d`` follows directly (the two of every
-    ``heatmapnet._block``): the normalisation cancels their scale, so the loss never pushes back
-    when the optimizer lets it grow, and nothing but weight decay keeps the pre-normalisation
-    activations inside float16 (heat1, 2026-10-26: the decoder's running variance reached
-    infinity at epoch 24 and the eval-mode network went silent while training looked fine).
-    GridTrackNet's convolutions, the heat head and the memory's gates are not such."""
+    ``heatmapnet._block``, bias-free): the normalisation divides their scale out, so the network's
+    answer does not depend on it and the loss never pushes back when the optimizer lets it grow;
+    left alone, the pre-normalisation activations outgrow float16 (heat1, 2026-10-26: the
+    decoder's running variance reached infinity at epoch 24 and the eval-mode network went silent
+    while training looked fine; heat3, with weight decay 1e-4 on them, climbed the same way at
+    ``--lr 1.0``). ``hold_conv_scale`` pins them instead. GridTrackNet's convolutions, the heat
+    head and the memory's gates are not such."""
     weights = []
     for module in model.modules():
         if isinstance(module, torch.nn.Sequential):
             layers = list(module)
-            weights.extend(conv.weight for conv, following in zip(layers, layers[1:])
-                           if isinstance(conv, torch.nn.Conv2d) and isinstance(following, torch.nn.BatchNorm2d))
+            for conv, following in zip(layers, layers[1:]):
+                if isinstance(conv, torch.nn.Conv2d) and isinstance(following, torch.nn.BatchNorm2d):
+                    if conv.bias is not None:        # a bias would not be cancelled, and the hold would change the answer
+                        raise ValueError("a convolution BatchNorm follows must be bias-free to be held at a fixed scale")
+                    weights.append(conv.weight)
     return weights
 
 
+FILTER_NORM = math.sqrt(2.0)   # a Kaiming-normal filter's expected norm: fan_in numbers of variance 2 / fan_in
+
+
+@torch.no_grad()
+def hold_conv_scale(weights: List[torch.Tensor]) -> None:
+    """Rescale every output channel's filter in each of `weights` (``normalised_conv_weights``) to
+    ``FILTER_NORM``, the size it was born with (Hoffer et al. 2018, "Norm matters", bounded weight
+    normalisation). BatchNorm divides each channel's scale out again, so the network's answer in
+    train mode is unchanged to its eps; what changes is that the activations it normalises stay
+    the size of a fresh network's at every step, at any learning rate, and float16's ceiling is
+    never approached. (With BatchNorm a filter's effective step shrinks as it grows; held, the
+    rate the run asked for is the rate it trains at.) Done after every optimizer step. Weights
+    loaded far from this size (heat3's decoder sat 40x above it) are brought to it at the first
+    step, and the running statistics follow over the next few dozen steps; an epoch is thousands,
+    so nothing scored at an epoch's end sees the gap (a smoke run of a handful of steps would)."""
+    for weight in weights:
+        norms = weight.flatten(1).norm(dim=1).clamp(min=1e-12)
+        weight.mul_((FILTER_NORM / norms).view(-1, 1, 1, 1))
+
+
 def build_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Adadelta:
-    """The run's Adadelta (rho 0.95, eps 1e-7, upstream's): one parameter group as before for a
-    network without normalised convolutions (GridTrackNet, byte-for-byte the old optimizer), else
-    ``normalised_conv_weights`` in a group with ``NORMALISED_WEIGHT_DECAY`` and the rest in one
-    without."""
-    decayed = normalised_conv_weights(model)
-    if not decayed:
-        return torch.optim.Adadelta(model.parameters(), lr=lr, rho=0.95, eps=1e-7)
-    decayed_ids = {id(weight) for weight in decayed}
-    rest = [parameter for parameter in model.parameters() if id(parameter) not in decayed_ids]
-    return torch.optim.Adadelta([{"params": decayed, "weight_decay": NORMALISED_WEIGHT_DECAY},
-                                 {"params": rest, "weight_decay": 0.0}], lr=lr, rho=0.95, eps=1e-7)
+    """The run's Adadelta (rho 0.95, eps 1e-7, upstream's), one parameter group and no weight
+    decay: recipe 2's decay on the normalised convolutions held their scale at 0.3 and lost to
+    the step at 1.0 (heat3); ``hold_conv_scale`` holds it exactly at either."""
+    return torch.optim.Adadelta(model.parameters(), lr=lr, rho=0.95, eps=1e-7)
 
 
 def check_finite(model: torch.nn.Module) -> None:
@@ -217,8 +235,12 @@ def evaluate_loss(model, loader, device, max_steps=None) -> float:
 
 def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: int, epochs: int,
                 max_steps: Optional[int]) -> float:
-    """One pass over the training loader; returns the mean loss."""
+    """One pass over the training loader; returns the mean loss. The normalised convolutions are
+    held at ``FILTER_NORM`` per filter before the first step and after every step (``hold_conv_scale``;
+    nothing to hold in a GridTrackNet)."""
     model.train()
+    held = normalised_conv_weights(model)
+    hold_conv_scale(held)
     total, steps = 0.0, 0
     started = time.perf_counter()
     for images, target in loader:
@@ -229,6 +251,7 @@ def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: i
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        hold_conv_scale(held)
         total += float(loss.detach())
         steps += 1
         if steps == 1 or steps % PROGRESS_EVERY == 0:

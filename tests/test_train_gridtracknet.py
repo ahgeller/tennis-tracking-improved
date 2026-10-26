@@ -251,18 +251,20 @@ def test_config_json_carries_the_arch_and_the_chain_and_same_run_refuses_a_chang
 
 
 def test_config_json_versions_the_heat_recipe_and_same_run_refuses_an_older_one():
-    """A HeatmapNet or MemoryNet run records heat_recipe (HEAT_RECIPE, 2: offsets at weight 1,
-    normalised convolutions decayed) and a GridTrackNet run None; heat1's config.json, written
-    before the field existed, is refused as a resume of this recipe, while an old GridTrackNet
-    config without the field still resumes."""
+    """A HeatmapNet or MemoryNet run records heat_recipe (HEAT_RECIPE, 3: offsets at weight 1,
+    normalised convolutions held at their Kaiming norm) and a GridTrackNet run None; heat1's
+    config.json, written before the field existed, is refused as a resume of this recipe, as is
+    heat3's recipe 2, while an old GridTrackNet config without the field still resumes."""
     parser = training.build_parser()
     grid = training.run_config(parser.parse_args([]), ["a"], ["a"], {})
     heat = training.run_config(parser.parse_args(["--arch", "heatmap_s4", "--from-scratch"]), ["a"], ["a"], {})
-    assert grid["heat_recipe"] is None and heat["heat_recipe"] == training.HEAT_RECIPE == 2
+    assert grid["heat_recipe"] is None and heat["heat_recipe"] == training.HEAT_RECIPE == 3
     training.same_run({key: value for key, value in grid.items() if key != "heat_recipe"}, grid)
     training.same_run(heat, heat)
-    with pytest.raises(ValueError, match="config.json has heat_recipe=None, this run heat_recipe=2"):
+    with pytest.raises(ValueError, match="config.json has heat_recipe=None, this run heat_recipe=3"):
         training.same_run({key: value for key, value in heat.items() if key != "heat_recipe"}, heat)
+    with pytest.raises(ValueError, match="config.json has heat_recipe=2, this run heat_recipe=3"):
+        training.same_run({**heat, "heat_recipe": 2}, heat)
     assert "heat_recipe" not in training.RECIPE_FIELDS           # an all-clips run follows the arch's current recipe
 
 
