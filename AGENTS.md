@@ -4,7 +4,7 @@
 
 This is an offline GPU tennis-video tracker, plus a labeling and GridTrackNet
 fine-tuning workspace. `clean_tracker.py` runs detection, selection and optional
-rendering. Outputs are an annotated MP4 and per-frame JSON. It is not a calibrated
+rendering (`--weights` points it at other ball-detector weights, `.npz` or `.pt`). Outputs are an annotated MP4 and per-frame JSON. It is not a calibrated
 3D ball-flight or line-calling system.
 
 - `tennis_tracker/gridtracknet.py`: PyTorch port and NPZ loader. Five raw RGB

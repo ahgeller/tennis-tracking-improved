@@ -223,7 +223,7 @@ separately). `ft.py check` flags files that break this rule.
      GridTrackNet's 48x27, trained on a Gaussian heat target with CenterNet's
      focal loss. It takes the same five frames and answers in the same layout,
      so the tracker runs it the moment `Config.model_path` points at its `.pt`
-     file (the suffix is the switch: `.npz` is GridTrackNet, `.pt` is
+     file (`clean_tracker.py --weights runs/<tag>/best.pt`; the suffix is the switch: `.npz` is GridTrackNet, `.pt` is
      HeatmapNet; `tennis_tracker/ball_models.py`), and the same metric scores
      it (`evaluate_archive.py --gridtracknet-weights best.pt`). A fine-tune
      starts from `--weights`, which must then be the architecture's own file

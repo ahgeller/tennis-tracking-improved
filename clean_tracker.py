@@ -31,6 +31,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracking-json",
                         help=f"Default: <input stem>{TRACKING_JSON_SUFFIX} beside a folder's video, "
                              f"else {OUTPUT / 'tracking.json'}")
+    parser.add_argument("--weights", default=str(GRIDTRACKNET_WEIGHTS),
+                        help="ball detector weights, .npz GridTrackNet or .pt HeatmapNet")
     parser.add_argument("--conf", type=float, default=0.50)
     parser.add_argument("--device", default="0")
     parser.add_argument("--no-video", action="store_true")
@@ -107,7 +109,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         input_video=str(Path(args.input).resolve()),
         output_video=str(output_video),
         tracking_json=str(tracking_json),
-        model_path=str(GRIDTRACKNET_WEIGHTS),
+        model_path=args.weights,
         player_model_path=str(PLAYER_ENGINE),
         court_model_path=str(COURT_ENGINE),
         conf=float(args.conf),
