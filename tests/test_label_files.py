@@ -183,7 +183,7 @@ def test_a_failed_write_leaves_the_old_file_and_no_temporary(tmp_path):
         with fileio.atomic_text(path) as handle:
             handle.write("half")
             raise RuntimeError("power cut")
-    assert path.read_text(encoding="utf-8") == "old"
+    assert path.read_text(encoding="utf-8") == "old" and not list(tmp_path.glob("*.tmp"))
     backup = fileio.backup_copy(path, "test")
     assert backup.name.startswith("settings.json.before_test_") and backup.read_text(encoding="utf-8") == "old"
 
@@ -198,6 +198,18 @@ def test_copy_atomic_lands_the_whole_file_or_nothing(tmp_path):
     with pytest.raises(FileNotFoundError):
         fileio.copy_atomic(tmp_path / "missing", target)
     assert target.read_bytes() == source.read_bytes()          # the failed copy left it alone
+
+
+def test_atomic_binary_lands_the_whole_file_or_keeps_the_old_one(tmp_path):
+    path = tmp_path / "sub" / "checkpoint.pt"
+    with fileio.atomic_binary(path) as handle:
+        handle.write(b"\x00" * 1000 + b"end")
+    assert path.read_bytes() == b"\x00" * 1000 + b"end" and not list(tmp_path.rglob("*.tmp"))
+    with pytest.raises(RuntimeError):
+        with fileio.atomic_binary(path) as handle:
+            handle.write(b"half")
+            raise RuntimeError("power cut")
+    assert path.read_bytes() == b"\x00" * 1000 + b"end" and not list(tmp_path.rglob("*.tmp"))
 
 
 # --------------------------------------------------------------------------- video facts

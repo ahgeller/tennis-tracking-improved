@@ -124,8 +124,10 @@ def test_a_named_held_out_set_is_taken_as_listed_while_val_clips_take_the_record
 def test_mixed_v1_holds_out_the_same_24_clips_in_the_trainer_and_the_evaluator():
     """The tracked records only: every clips.csv clip the review policy lets the trainer use, as
     a run over the whole workspace would have them. The trainer's split and the evaluator's
-    ``holdout_clips`` must name the same clips, and never video11 or video12, whose labels were
-    never corrected and who share the own-camera recording with the members video1 to video10."""
+    ``holdout_clips`` must name the same clips. video11, video12 and the Pomona clip are
+    own-camera footage the user reviewed and, since 2026-10-25, tagged ``custom``: they train
+    (the set lists its own-camera members one by one, so sharing the group with video1 to
+    video10 does not pull them in)."""
     workspace = ROOT / "finetune"
     manifest = read_manifest(workspace / MANIFEST_NAME)
     status, excluded = read_review_status(workspace), set(read_exclusions(workspace))
@@ -134,4 +136,5 @@ def test_mixed_v1_holds_out_the_same_24_clips_in_the_trainer_and_the_evaluator()
     held_out = validation_split(clips, workspace / "labels", None, "mixed_v1")
     assert held_out == holdout_clips("mixed_v1", trainable, manifest, workspace / HOLDOUTS_NAME)
     assert len(held_out) == 24 and "video11" not in held_out and "video12" not in held_out
-    assert "video11" not in trainable and "video12" not in trainable
+    pomona = "PomonaPitzer_Women_vs._UCSD-cut-merged-1778697988405"
+    assert {"video11", "video12", pomona} <= set(trainable) - set(held_out)

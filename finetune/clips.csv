@@ -31,6 +31,7 @@ grid_match86,grid,,grid_match86,1920,1080,60.000,2,611,557,fixed,1.0,C:\Users\An
 grid_match87,grid,,grid_match87,1920,1080,29.997,1,688,618,fixed,1.5,C:\Users\Andrew\Desktop\V5Test\archive\Match-Data-20260716T144245Z-1-001\Match-Data\match87\DAY 588 Amateur Tennis Match   Preparing for first tournament of the year #tennis.mp4,labels scaled from 1280x720
 grid_match89,grid,,grid_match89,1920,1080,60.000,2,302,293,moving,2.5,C:\Users\Andrew\Desktop\V5Test\archive\Match-Data-20260716T144245Z-1-001\Match-Data\match89\NTRP 4.0 Doubles - SwingVision Recording.mp4,labels scaled from 1280x720; audit 2026-08-31: shifted +18 frames
 grid_match92,grid,,grid_match92,1920,1080,59.940,2,225,205,fixed,1.2,C:\Users\Andrew\Desktop\V5Test\archive\Match-Data-20260716T144245Z-1-001\Match-Data\match92\USTA 4.0 Doubles - 1st match played of the 2023 season.mp4,labels scaled from 1280x720; audit 2026-09-02: shifted +2 frames
+PomonaPitzer_Women_vs._UCSD-cut-merged-1778697988405,custom,archive,pomona_ucsd,1920,1080,59.971,2,1837,1577,fixed,0.8,C:\Users\Andrew\Desktop\clean_version_gridtracknet_restart\finetune\videos\PomonaPitzer_Women_vs._UCSD-cut-merged-1778697988405.mp4,"own camera, UCSD match; labels reviewed by hand (review_status.json); added to the manifest 2026-10-25"
 video1,custom,archive,own-camera,1920,1080,60.087,2,345,327,fixed,0.4,C:\Users\Andrew\Desktop\gridtracknet_finetuning\archive\video1.mp4,
 video2,custom,archive,own-camera,1920,1080,60.015,2,401,382,fixed,0.6,C:\Users\Andrew\Desktop\gridtracknet_finetuning\archive\video2.mp4,
 video3,custom,archive,own-camera,1920,1080,60.069,2,434,406,fixed,0.8,C:\Users\Andrew\Desktop\gridtracknet_finetuning\archive\video3.mp4,
@@ -41,8 +42,8 @@ video7,custom,archive,own-camera,1920,1080,60.018,2,387,385,fixed,0.5,C:\Users\A
 video8,custom,archive,own-camera,1920,1080,30.059,1,513,500,fixed,0.7,C:\Users\Andrew\Desktop\gridtracknet_finetuning\archive\video8.mp4,
 video9,custom,archive,own-camera,1920,1080,60.096,2,314,249,fixed,0.7,C:\Users\Andrew\Desktop\gridtracknet_finetuning\archive\video9.mp4,
 video10,custom,archive,own-camera,1920,1080,30.130,1,226,215,fixed,0.3,C:\Users\Andrew\Desktop\gridtracknet_finetuning\archive\video10.mp4,
-video11,custom-uncorrected,held-back,own-camera,768,432,30.000,1,300,245,fixed,0.5,C:\Users\Andrew\Desktop\V5Test\held_back_custom_768\sources\custom\video11,768x432 PNGs from the TrackNetV5 prep; labels never click-corrected; eval only; frames->ffmpeg
-video12,custom-uncorrected,archive,own-camera,1280,720,30.000,1,330,273,fixed,0.4,C:\Users\Andrew\Desktop\gridtracknet_finetuning\archive\video12.mp4,"labels never click-corrected - treat as unchecked, not ground truth"
+video11,custom,held-back,own-camera,768,432,30.000,1,300,245,fixed,0.5,C:\Users\Andrew\Desktop\V5Test\held_back_custom_768\sources\custom\video11,"768x432 PNGs from the TrackNetV5 prep; frames->ffmpeg; labels reviewed by hand in the label tool by 2026-10-18, retagged custom 2026-10-25"
+video12,custom,archive,own-camera,1280,720,30.000,1,330,273,fixed,0.4,C:\Users\Andrew\Desktop\gridtracknet_finetuning\archive\video12.mp4,"labels reviewed by hand in the label tool by 2026-10-18, retagged custom 2026-10-25"
 video13,prof,game2,prof_game2,1280,720,30.000,1,361,360,fixed,0.6,C:\Users\Andrew\Desktop\prof\Dataset\game2\Clip1,"public TrackNet tennis set, game2/Clip1"
 video14,prof,game2,prof_game2,1280,720,30.000,1,199,199,fixed,0.5,C:\Users\Andrew\Desktop\prof\Dataset\game2\Clip2,"public TrackNet tennis set, game2/Clip2"
 video15,prof,game2,prof_game2,1280,720,30.000,1,36,36,fixed,0.1,C:\Users\Andrew\Desktop\prof\Dataset\game2\Clip3,"public TrackNet tennis set, game2/Clip3"
