@@ -20,9 +20,9 @@ from finetune.training.clips import ClipSelection, find_clips
 from finetune.training.dataset import (TRANSLATE_PX, Augmenter, UnitDataset, compress, make_target, reverse, translate,
                                        translate_limits)
 from finetune.training.frame_cache import DATA_VERSION, TrainingUnit, prepare_clip, training_targets
-from finetune.training.loop import fresh_model
+from finetune.training.loop import evaluate_loss, fresh_model, gridtracknet_loss, save_weights, train_epoch
 from finetune.training.metrics import promotion_improves
-from tennis_tracker.gridtracknet import load_model
+from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
 from tests._helpers import blank_template, metric_probe, write_clip
 
 SIZE = (64, 36)
@@ -407,6 +407,62 @@ def scripted_run(tmp_path, argv, train_losses, val_losses, scored, scoring=True,
 def results_of(run_dir):
     with (run_dir / "results.csv").open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def _tiny_loader(count: int = 2, batch: int = 1):
+    """A loader of ``count`` random model-sized units (the width is fixed by the normalisation,
+    the grid by the loss) with a one-cell target each, on the CPU."""
+    generator = torch.Generator().manual_seed(7)
+    images = torch.rand((count * batch, 15, HEIGHT, WIDTH), generator=generator)
+    target = torch.zeros((count * batch, 15, GRID_ROWS, GRID_COLS))
+    target[:, 0, 1, 2] = 1.0
+    return torch.utils.data.DataLoader(torch.utils.data.TensorDataset(images, target), batch_size=batch)
+
+
+def test_a_scratch_training_step_moves_the_running_statistics_and_evaluate_loss_leaves_them():
+    """From scratch the BatchNorm layers start at Keras's defaults; one training step normalises
+    with the batch and moves every layer's running mean, and the validation pass in eval mode
+    neither moves them nor leaves the model in eval mode."""
+    device = torch.device("cpu")
+    model = fresh_model(device)
+    assert model.training
+    for layer in model.batch_norms:
+        assert float(layer.mean.abs().sum()) == 0 and torch.equal(layer.variance, torch.ones_like(layer.variance))
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    train_epoch(model, _tiny_loader(), optimizer, scaler, device, 1, 1, max_steps=1)
+    for layer in model.batch_norms:
+        assert float(layer.mean.abs().sum()) > 0
+        assert not torch.equal(layer.variance, torch.ones_like(layer.variance))
+    state = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+    loss = evaluate_loss(model, _tiny_loader(count=1), device)
+    assert np.isfinite(loss) and model.training
+    for name, tensor in model.state_dict().items():
+        assert torch.equal(tensor, state[name]), name
+    model.eval()
+    evaluate_loss(model, _tiny_loader(count=1), device)
+    assert not model.training
+
+
+def test_save_weights_and_load_model_round_trip_every_batchnorm_array(tmp_path):
+    """gamma and beta (parameters now) and the running mean and variance (buffers) all come back
+    from the .npz exactly, and the loaded model runs in eval mode."""
+    device = torch.device("cpu")
+    model = fresh_model(device)
+    generator = torch.Generator().manual_seed(11)
+    with torch.no_grad():
+        for layer in model.batch_norms:
+            for tensor in (layer.gamma, layer.beta, layer.mean, layer.variance):
+                tensor.copy_(torch.rand(tensor.shape, generator=generator) + 0.25)
+    template = blank_template(model, tmp_path / "template.npz")
+    save_weights(model, template, tmp_path / "saved.npz")
+    loaded = load_model(tmp_path / "saved.npz", device)
+    assert not loaded.training
+    for saved, back in zip(model.batch_norms, loaded.batch_norms):
+        assert isinstance(back.gamma, torch.nn.Parameter) and isinstance(back.beta, torch.nn.Parameter)
+        for name in ("gamma", "beta", "mean", "variance"):
+            np.testing.assert_array_equal(getattr(back, name).detach().float().numpy(),
+                                          getattr(saved, name).detach().half().float().numpy())
 
 
 def test_best_npz_is_the_epoch_the_detector_metric_prefers_not_the_lowest_loss(tmp_path):

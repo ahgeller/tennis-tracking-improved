@@ -2,6 +2,9 @@
 
 Input: five consecutive RGB frames at 768x432, stacked into 15 channels, in
 [0, 1].  Output: per frame a confidence grid and x/y offset grids at 48x27.
+The width-axis normalisation is Keras BatchNormalization: its gamma and beta train
+(in fine-tunes too), its running statistics follow the batches in train mode and
+are what eval mode applies.
 """
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -18,8 +21,10 @@ FRAMES_PER_UNIT = 5
 GRID_COLS = 48
 GRID_ROWS = 27
 POOL_AFTER = {1, 3, 5, 8}
-# Keras BatchNormalization default epsilon, baked into the exported statistics.
+# Keras BatchNormalization defaults: the epsilon baked into the exported statistics and the
+# momentum of the running statistics (``moving = moving * momentum + batch * (1 - momentum)``).
 BN_EPSILON = 0.001
+BN_MOMENTUM = 0.99
 
 # The one resize rule: the tracker's prepass and the trainer's frame cache both go through
 # ``resize_to_model``, so the network trains on the very pixels it is run on.
@@ -31,22 +36,50 @@ GridPoint = Tuple[Optional[Tuple[float, float]], float]
 class WidthBatchNorm(nn.Module):
     """Reproduce GridTrackNet's BatchNormalization(axis=-1) in NCHW.
 
-    The upstream export normalises along the width axis; these statistics are
-    buffers from that export, not trainable parameters.
+    The upstream model normalises along the width axis (Keras's last axis of an NCHW
+    tensor), and this layer does exactly what Keras BatchNormalization does there:
+    ``gamma`` and ``beta`` are trainable parameters, so they learn in scratch runs and
+    fine-tunes alike, as they would in Keras; ``mean`` and ``variance`` are the running
+    statistics.  In train mode the batch is normalised with its own statistics over the
+    N, C and H axes (the biased variance) and the running statistics follow them with
+    Keras's momentum rule, the unbiased variance feeding the running variance as the
+    fused Keras op does.  In eval mode the running statistics are applied, which on the
+    exported weights is the upstream inference.
     """
 
     def __init__(self, width: int):
         super().__init__()
-        self.register_buffer("gamma", torch.ones(width))
-        self.register_buffer("beta", torch.zeros(width))
+        self.gamma = nn.Parameter(torch.ones(width))
+        self.beta = nn.Parameter(torch.zeros(width))
         self.register_buffer("mean", torch.zeros(width))
         self.register_buffer("variance", torch.ones(width))
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         shape = (1, 1, 1, -1)
+        if self.training:
+            return self._normalise_batch(value, shape)
         return (
             (value - self.mean.view(shape))
             * torch.rsqrt(self.variance.view(shape) + BN_EPSILON)
+            * self.gamma.view(shape)
+            + self.beta.view(shape)
+        )
+
+    def _normalise_batch(self, value: torch.Tensor, shape: Tuple[int, ...]) -> torch.Tensor:
+        """Train mode: normalise with the batch's statistics (in float32 under autocast) and
+        move the running statistics toward them."""
+        batch = value.float()
+        axes = (0, 1, 2)
+        mean = batch.mean(dim=axes)
+        variance = batch.var(dim=axes, unbiased=False)
+        with torch.no_grad():
+            count = batch.numel() // batch.shape[-1]
+            unbiased = variance * (count / max(count - 1, 1))
+            self.mean.mul_(BN_MOMENTUM).add_(mean, alpha=1 - BN_MOMENTUM)
+            self.variance.mul_(BN_MOMENTUM).add_(unbiased, alpha=1 - BN_MOMENTUM)
+        return (
+            (batch - mean.view(shape))
+            * torch.rsqrt(variance.view(shape) + BN_EPSILON)
             * self.gamma.view(shape)
             + self.beta.view(shape)
         )
