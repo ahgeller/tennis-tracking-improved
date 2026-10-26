@@ -50,6 +50,14 @@ def test_a_network_built_from_a_heatmapnet_answers_exactly_as_it_does_until_the_
         output, state = model(probe)
         with_state, _ = model(probe, torch.randn_like(state))
     assert torch.equal(output, expected) and torch.equal(with_state, expected)
+    torch.manual_seed(1)                              # a Kaiming parent whose CPU float16 activations stay finite
+    save_model(HeatmapNet(), tmp_path / "kaiming.pt")
+    parent, model = heatmapnet.load_model(tmp_path / "kaiming.pt", CPU), from_heatmap(tmp_path / "kaiming.pt", CPU).eval().half()
+    with torch.inference_mode():
+        expected = parent(probe.half())
+        output, state = model(probe.half())
+        again, _ = model(probe.half(), state)
+    assert torch.isfinite(expected).all() and torch.equal(output, expected) and torch.equal(again, expected)
 
 
 def test_the_state_changes_the_output_once_the_memory_cell_has_taken_a_gradient_step():

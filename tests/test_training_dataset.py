@@ -1,12 +1,14 @@
 """finetune/training/dataset.py on its own: the grid targets, the sampler and the augmentation,
 on synthetic inputs. UnitDataset's reads and draws run on a cached unit in test_train_gridtracknet.py."""
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
 
-from finetune.training.dataset import (HEAT_SIGMA_CELLS, Augmenter, build_chains, chain_units, chain_weights,
-                                       gaussian_heat, make_sampler, make_target, photometric_augment, unit_weights,
-                                       weighted_sampler)
+from finetune.training.dataset import (AUGMENTATIONS, HEAT_SIGMA_CELLS, Augmentation, Augmenter, Photometric, UnitDataset,
+                                       build_chains, chain_units, chain_weights, gaussian_heat, make_sampler, make_target,
+                                       photometric_augment, unit_weights, weighted_sampler)
 from tennis_tracker import heatmapnet
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
 
@@ -97,6 +99,30 @@ def test_augmenter_is_seeded_and_photometric_augment_keeps_shape_and_range():
     assert not np.array_equal(augmented, images)
     assert np.array_equal(photometric_augment(images, Augmenter(1)), augmented)   # the same seed, the same draw
     assert isinstance(make_target([None] * 5, *SIZE), torch.Tensor)
+
+
+def test_the_draws_of_a_seed_are_the_ones_every_run_has_made():
+    """The draw sequence frozen: these are the values the dataset drew for seed 5 before the
+    draws were split from their application (checked equal to that code on every augmentation
+    set), so a seed still reproduces an old run's augmentation. The shift is drawn within the
+    unit's own limits, so the unit is fixed too."""
+    unit = {"clip": "c", "source": "custom", "indices": list(range(5)), "frames": [], "size": [1920, 1080],
+            "points": [[850.0, 300.0], None, [1900.0, 1070.0], [10.0, 5.0], [960.0, 540.0]]}
+    basic = UnitDataset(Path("unused"), [unit], augment=True, augmentations={"basic"})
+    basic.rng = Augmenter(5)
+    draws = [basic.draw([unit]) for _ in range(4)]
+    assert draws[:3] == [Augmentation()] * 3 and draws[3].flip and draws[3].gain == pytest.approx(1.133007015099494)
+    assert basic.rng.draws.random() == pytest.approx(0.6489745531369242)        # the stream is where it always was
+    everything = UnitDataset(Path("unused"), [unit], augment=True, augmentations=set(AUGMENTATIONS))
+    everything.rng = Augmenter(5)
+    everything.draw([unit])
+    drawn = everything.draw([unit])
+    assert (drawn.flip, drawn.gain, drawn.shift, drawn.reverse, drawn.compress, drawn.blur) == (True, 1.0, (-8, -2), True, 45, None)
+    assert drawn.photometric == pytest.approx(Photometric(1.1188673887090184, 0.6104913516711218, -0.06798484788867644,
+                                                          (0.933844709803333, 1.1249036115425655, 1.0797176354887426),
+                                                          0.024928674785780112, 0.7704715122796699))
+    assert everything.draw([unit]) == Augmentation(flip=True, compress=79, blur=pytest.approx(0.9790578345674649))
+    assert UnitDataset(Path("unused"), [unit], augment=False).draw([unit]) == Augmentation()
 
 
 # --------------------------------------------------------------------------- chains
