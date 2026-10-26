@@ -16,11 +16,14 @@ and the head is one 3x3 convolution to 15 channels and a sigmoid. Convolutions a
 initialised with zero bias; the head's heat-channel bias starts at the CenterNet prior
 (``HEAT_PRIOR``) so a fresh network predicts a nearly empty map and early training stays stable.
 The forward pass is ``encode`` (the stem, the stages and the bottleneck) then ``decode``, so
-``memorynet.MemoryNet`` can work on the bottleneck features between the two.
+``memorynet.MemoryNet`` can work on the bottleneck features between the two; ``decode`` is the
+decoder's stride-4 features (``features``) then the head, so ``heatmapnet_s2.HeatmapNetS2`` can
+carry the features one stride further before its own head.
 
-The ``.pt`` record (``save_model``, ``read_record``, ``load_model``) is shared with MemoryNet:
-``{"arch": <the model's ARCH>, "state_dict"}``. ``read_record`` checks the architecture it is
-given, each loader its own, and ``ball_models.arch_of`` reads it off any record.
+The ``.pt`` record (``save_model``, ``read_record``, ``load_model``) is shared with the
+architectures built on this one (MemoryNet, HeatmapNetS2): ``{"arch": <the model's ARCH>,
+"state_dict"}``. ``read_record`` checks the architecture it is given, each loader its own, and
+``ball_models.arch_of`` reads it off any record.
 """
 from __future__ import annotations
 
@@ -60,9 +63,9 @@ def _block(in_channels: int, out_channels: int, stride: int = 1) -> nn.Sequentia
 
 class HeatmapNet(nn.Module):
     """The network; see the module docstring. ``GRID_COLS``, ``GRID_ROWS``, ``INPUT_CHANNELS``,
-    ``FRAMES_PER_UNIT``, ``ARCH`` and ``STATEFUL`` are the contract it shares with ``GridTrackNet``
-    and ``MemoryNet`` (``ball_models``), which the detector, the decoder and the trainer read
-    instead of asking which class they hold."""
+    ``FRAMES_PER_UNIT``, ``ARCH`` and ``STATEFUL`` are the contract it shares with ``GridTrackNet``,
+    ``MemoryNet`` and ``HeatmapNetS2`` (``ball_models``), which the detector, the decoder and the
+    trainer read instead of asking which class they hold."""
 
     ARCH = ARCH
     STATEFUL = False
@@ -96,27 +99,36 @@ class HeatmapNet(nn.Module):
         with torch.no_grad():
             self.head.bias[list(HEAT_CHANNELS)] = -math.log((1 - HEAT_PRIOR) / HEAT_PRIOR)
 
-    def encode(self, value: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """The encoder: the skips at strides 4 and 8 and the bottleneck features at stride 16,
-        what ``decode`` takes. An input whose sides are not multiples of ``TOTAL_STRIDE`` is a
-        ValueError."""
+    def check_input(self, value: torch.Tensor) -> None:
+        """An input whose sides are not multiples of ``TOTAL_STRIDE`` is a ValueError: the skips
+        must meet the upsampled maps."""
         if value.shape[-2] % TOTAL_STRIDE or value.shape[-1] % TOTAL_STRIDE:
             raise ValueError(f"{type(self).__name__} takes inputs whose height and width are multiples of "
                              f"{TOTAL_STRIDE} (the skips must meet the upsampled maps), not {tuple(value.shape[-2:])}")
+
+    def encode(self, value: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The encoder: the skips at strides 4 and 8 and the bottleneck features at stride 16,
+        what ``decode`` takes. An input whose sides are not multiples of ``TOTAL_STRIDE`` is a
+        ValueError (``check_input``)."""
+        self.check_input(value)
         full = self.stem(value)
         half = self.down1(full)
         quarter = self.down2(half)
         eighth = self.down3(quarter)
         return quarter, eighth, self.bottleneck(eighth)
 
-    def decode(self, quarter: torch.Tensor, eighth: torch.Tensor, bottom: torch.Tensor) -> torch.Tensor:
-        """The decoder and the head: the 15-channel sigmoid output at stride 4 from the bottleneck
-        features and the two skips ``encode`` returned."""
+    def features(self, quarter: torch.Tensor, eighth: torch.Tensor, bottom: torch.Tensor) -> torch.Tensor:
+        """The decoder's features at stride 4 (``DECODER_CHANNELS[-1]`` channels), what the head
+        reads, from the bottleneck features and the two skips ``encode`` returned."""
         up = nn.functional.interpolate(bottom, scale_factor=2, mode="nearest")
         up = self.up1(torch.cat([up, eighth], dim=1))
         up = nn.functional.interpolate(up, scale_factor=2, mode="nearest")
-        up = self.up2(torch.cat([up, quarter], dim=1))
-        return torch.sigmoid(self.head(up))
+        return self.up2(torch.cat([up, quarter], dim=1))
+
+    def decode(self, quarter: torch.Tensor, eighth: torch.Tensor, bottom: torch.Tensor) -> torch.Tensor:
+        """The decoder and the head: the 15-channel sigmoid output at stride 4 from the bottleneck
+        features and the two skips ``encode`` returned."""
+        return torch.sigmoid(self.head(self.features(quarter, eighth, bottom)))
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         return self.decode(*self.encode(value))
@@ -125,8 +137,8 @@ class HeatmapNet(nn.Module):
 def save_model(model: nn.Module, destination: Path) -> None:
     """Write `model`'s weights as the ``.pt`` record ``load_model`` reads: a dict with the model's
     architecture id (``arch``, its ``ARCH``) and the float32 ``state_dict``, through a temporary
-    file beside `destination` so an interruption leaves no half-written file. A HeatmapNet and a
-    MemoryNet are written alike."""
+    file beside `destination` so an interruption leaves no half-written file. Every ``.pt``
+    architecture is written alike."""
     state = {name: tensor.detach().float().cpu() for name, tensor in model.state_dict().items()}
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".tmp.pt")

@@ -120,13 +120,13 @@ def test_the_settings_cell_drops_the_learning_rate_on_a_resume_whose_lr_differs(
 
 def test_the_settings_cell_exposes_the_architectures_and_names_the_files_by_them():
     """ARCH picks the network: the cell passes --arch and gives --save the architecture's suffix
-    (.pt for heatmap_s4 and memory_s4). START_WEIGHTS is a name in the zip's models/ folder or a
-    path under runs/ on Drive (an earlier run's best.pt), and a fine-tune's must be the
-    architecture's own file, judged by the record inside a .pt (two architectures share the
-    suffix) with memory_s4 also taking its heatmap_s4 parent, said early, which the trainer
-    refuses anyway; the staging cell lists the modules the switch imports."""
+    (.pt for the others). START_WEIGHTS is a name in the zip's models/ folder or a path under
+    runs/ on Drive (an earlier run's best.pt), and a fine-tune's must be the architecture's own
+    file, judged by the record inside a .pt (three architectures share the suffix) with memory_s4
+    and heatmap_s2 also taking their heatmap_s4 parent, said early, which the trainer refuses
+    anyway; the staging cell lists the modules the switch imports."""
     settings = code_cell_starting("#@title Training settings")
-    assert 'ARCH = "gridtracknet"       #@param ["gridtracknet", "heatmap_s4", "memory_s4"]' in settings
+    assert 'ARCH = "gridtracknet"       #@param ["gridtracknet", "heatmap_s4", "memory_s4", "heatmap_s2"]' in settings
     assert "'--arch', ARCH," in settings and "'--save', str(RUN / ('winner' + SUFFIX))" in settings
     assert "SUFFIX = '.npz' if ARCH == 'gridtracknet' else '.pt'" in settings
     assert "START = DATA / 'models' / START_WEIGHTS" in settings and "START = WORK / START_WEIGHTS" in settings
@@ -134,11 +134,13 @@ def test_the_settings_cell_exposes_the_architectures_and_names_the_files_by_them
     assert "START.suffix != SUFFIX" not in settings                    # the suffix no longer names the architecture
     assert "start_arch = 'gridtracknet' if START.suffix == '.npz' else torch.load(START, map_location='cpu', " \
            "weights_only=True).get('arch')" in settings
-    assert "allowed = {ARCH, 'heatmap_s4'} if ARCH == 'memory_s4' else {ARCH}" in settings
+    assert "allowed = {ARCH, 'heatmap_s4'} if ARCH in ('memory_s4', 'heatmap_s2') else {ARCH}" in settings
     assert "if start_arch not in allowed:" in settings
-    assert {"tennis_tracker/heatmapnet.py", "tennis_tracker/memorynet.py", "tennis_tracker/ball_models.py"} <= set(staged_files())
+    assert {"tennis_tracker/heatmapnet.py", "tennis_tracker/memorynet.py", "tennis_tracker/heatmapnet_s2.py",
+            "tennis_tracker/ball_models.py"} <= set(staged_files())
     text = "".join("".join(cell["source"]) for cell in json.loads(NOTEBOOK.read_text(encoding="utf-8"))["cells"])
     assert 'START_WEIGHTS = "<heat run>/best.pt"' in text and "starts the memory fresh" in text
+    assert 'ARCH = "heatmap_s2"' in text and "the stride-2 decoder block and the head starting fresh" in text
 
 
 def test_everything_on_drive_lives_under_one_folder():

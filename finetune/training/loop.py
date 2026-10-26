@@ -1,6 +1,7 @@
 """The training loop proper: the loss of each architecture, a fresh network, one epoch of
 optimisation, the validation loss and writing the weights back in the layout the tracker loads
-(the .npz for GridTrackNet, the .pt record for HeatmapNet and MemoryNet).
+(the .npz for GridTrackNet, the .pt record for the heat architectures: HeatmapNet, MemoryNet,
+HeatmapNetS2).
 
 Which loss and which layout is read off the model's ``ARCH`` (the contract ``ball_models``
 spells), so the loop holds no architecture switch of its own: ``LOSSES`` maps the id to the
@@ -21,7 +22,7 @@ import numpy as np
 import torch
 
 from tennis_tracker import heatmapnet
-from tennis_tracker.ball_models import GRIDTRACKNET, HEATMAP_S4, MEMORY_S4, model_class, weights_suffix
+from tennis_tracker.ball_models import GRIDTRACKNET, HEATMAP_S2, HEATMAP_S4, MEMORY_S4, model_class, weights_suffix
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
 
 PROGRESS_EVERY = 200       # training steps between progress lines
@@ -50,7 +51,7 @@ def gridtracknet_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.T
 
 
 def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """HeatmapNet's (and MemoryNet's) loss: CenterNet's penalty-reduced focal loss on the heat
+    """The heat architectures' loss: CenterNet's penalty-reduced focal loss on the heat
     channel against the Gaussian target (``dataset.make_target``), where a cell at exactly 1 is a
     positive and every other cell a negative whose penalty is reduced by ``(1 - heat) ** HEAT_BETA``
     near the peak, the sum normalised by the number of positives (at least one); plus
@@ -70,7 +71,7 @@ def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor
     return heat_loss + HEAT_OFFSET_WEIGHT * offset_loss
 
 
-LOSSES = {GRIDTRACKNET: gridtracknet_loss, HEATMAP_S4: heatmap_loss, MEMORY_S4: heatmap_loss}
+LOSSES = {GRIDTRACKNET: gridtracknet_loss, HEATMAP_S4: heatmap_loss, MEMORY_S4: heatmap_loss, HEATMAP_S2: heatmap_loss}
 
 
 def unit_loss(model: torch.nn.Module, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -100,7 +101,7 @@ def batch_loss(model: torch.nn.Module, images: torch.Tensor, target: torch.Tenso
 
 def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> None:
     """Write the model in the layout the tracker loads for its architecture: a ``.pt`` architecture
-    (HeatmapNet, MemoryNet) as the record ``heatmapnet.save_model`` writes (`template` is not read);
+    (the heat architectures) as the record ``heatmapnet.save_model`` writes (`template` is not read);
     a GridTrackNet in the .npz layout, where every convolution and every BatchNorm layer's gamma,
     beta and running mean and variance come from ``model`` and ``template`` supplies whatever else
     the layout carries."""
@@ -202,7 +203,7 @@ def largest_running_variance(model: torch.nn.Module) -> Tuple[str, float]:
 def fresh_model(device: torch.device, arch: str = GRIDTRACKNET) -> torch.nn.Module:
     """A float32 network of `arch` to train from scratch, in train mode: a GridTrackNet with
     Kaiming convolutions and BatchNorm at Keras's defaults (gamma 1, beta 0, running mean 0,
-    running variance 1); a HeatmapNet or MemoryNet as its own constructor leaves it (Kaiming
+    running variance 1); a heat architecture as its own constructor leaves it (Kaiming
     convolutions, the heat head at its prior, the memory's ``out`` at zero)."""
     model = model_class(arch)()
     if arch == GRIDTRACKNET:

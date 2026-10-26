@@ -1,6 +1,7 @@
 """Fine-tune (or train from scratch) the ball detector on the finetune workspace labels:
-GridTrackNet, with ``--arch heatmap_s4`` the HeatmapNet of ``tennis_tracker/heatmapnet.py``, or
-with ``--arch memory_s4`` the MemoryNet of ``tennis_tracker/memorynet.py``.
+GridTrackNet, with ``--arch heatmap_s4`` the HeatmapNet of ``tennis_tracker/heatmapnet.py``,
+with ``--arch memory_s4`` the MemoryNet of ``tennis_tracker/memorynet.py``, or with ``--arch
+heatmap_s2`` the HeatmapNetS2 of ``tennis_tracker/heatmapnet_s2.py``.
 
 Data contract (same as the archive): ``videos/<clip>.mp4`` + ``labels/<clip>_ball.csv``
 with ``frame,ball_x,ball_y`` rows at 30 FPS cadence (every 2nd frame of a 60 FPS
@@ -18,6 +19,7 @@ tags every clip with a source so you can pick, hold out and oversample by source
     python finetune/training/train_gridtracknet.py --arch heatmap_s4 --from-scratch --holdout mixed_v1   # the second architecture
     python finetune/training/train_gridtracknet.py --arch heatmap_s4 --weights finetune/runs/h1/best.pt --all-clips --selection-run finetune/runs/h1
     python finetune/training/train_gridtracknet.py --arch memory_s4 --weights finetune/runs/h1/best.pt --holdout mixed_v1   # the memory network from its parent
+    python finetune/training/train_gridtracknet.py --arch heatmap_s2 --weights finetune/runs/h1/best.pt --holdout mixed_v1  # the stride-2 network from its parent
     python finetune/training/train_gridtracknet.py --all-clips --selection-run finetune/runs/r5 --augment basic translate
     python finetune/training/train_gridtracknet.py --resume --run-dir finetune/runs/r5   # carry on after an interruption
     python finetune/training/train_gridtracknet.py --resume --lr-drop --lr 0.1 --run-dir finetune/runs/r5   # ... at a lower rate
@@ -61,18 +63,20 @@ since the deployable weights were never measured on footage they did not see.
 
 ``--arch`` picks the network (``tennis_tracker.ball_models``): ``gridtracknet`` (the default),
 ``heatmap_s4``, the stride-4 heat-map network, whose target is a Gaussian on its 192x108 grid
-and whose loss is the CenterNet focal loss (``dataset.make_target``, ``loop.heatmap_loss``), or
-``memory_s4``, HeatmapNet with a memory carried between consecutive units of one phase. The
+and whose loss is the CenterNet focal loss (``dataset.make_target``, ``loop.heatmap_loss``),
+``memory_s4``, HeatmapNet with a memory carried between consecutive units of one phase, or
+``heatmap_s2``, HeatmapNet with one more decoder block answering at stride 2 (384x216). The
 scoring, the winner rule and the resume are the same: the metric is the tracker's own prepass,
 which loads the network the weights file names (``.npz`` is GridTrackNet; a ``.pt`` record names
-``heatmap_s4`` or ``memory_s4`` inside, ``ball_models.arch_of``), and every file this trainer
+``heatmap_s4``, ``memory_s4`` or ``heatmap_s2`` inside, ``ball_models.arch_of``), and every file this trainer
 writes (``last``, ``best``, ``best_loss``, ``epochs/epoch_NNN``, ``--save``) carries the
 architecture's suffix; a ``--save`` given with the other suffix is corrected, with a line saying
 so. ``--weights`` is the starting model of a fine-tune and must then be the architecture's own
 file (``.npz`` for GridTrackNet, a ``.pt`` of its own architecture for the others; another is
-refused in one line), except that a ``memory_s4`` fine-tune may start from a ``heatmap_s4`` file,
-its parent: the shared layers are copied and the memory cell starts fresh
-(``memorynet.from_heatmap``), which is how the memory network is first trained. With
+refused in one line), except that a ``memory_s4`` or ``heatmap_s2`` fine-tune may start from a
+``heatmap_s4`` file, its parent (``ball_models.PARENTS``): the shared layers are copied and what
+the parent does not carry (the memory cell; the stride-2 decoder block and the head) starts fresh
+(``ball_models.from_parent``), which is how each is first trained. With
 ``--from-scratch`` ``--weights`` is any architecture's and only feeds the hard-negative prepass of
 ``--oversample-false-alarms`` (a GridTrackNet scratch run still needs an ``.npz``, the template
 its weights are written into). ``config.json`` records ``arch``, which a ``--resume`` without
@@ -108,9 +112,9 @@ from torch.utils.data import DataLoader
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tennis_tracker import heatmapnet, memorynet
-from tennis_tracker.ball_models import (ARCHITECTURES, GRIDTRACKNET, HEATMAP_S4, MEMORY_S4, arch_of, load_ball_model,
-                                        weights_suffix)
+from tennis_tracker import heatmapnet
+from tennis_tracker.ball_models import (ARCHITECTURES, GRIDTRACKNET, HEATMAP_S2, HEATMAP_S4, MEMORY_S4, PARENT_START_NOTE,
+                                        PARENTS, arch_of, from_parent, load_ball_model, weights_suffix)
 from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH
 from finetune.data.detector_metrics import DetectorMetrics
 from finetune.data.fileio import atomic_binary, atomic_csv, copy_atomic, write_atomic
@@ -154,7 +158,7 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
     every option that shaped the training (``flagged``: how many training units
     ``--oversample-false-alarms`` weighted up; ``lr_schedule``: the rates the run has trained at,
     see ``lr_schedule_of``, by default the one ``--lr`` from epoch 1), as ``config.json`` records
-    it. ``lr`` is the rate in force. ``heat_recipe`` is ``HEAT_RECIPE`` for a HeatmapNet or MemoryNet
+    it. ``lr`` is the rate in force. ``heat_recipe`` is ``HEAT_RECIPE`` for a heat-architecture
     run (3: offsets weighted ``loop.HEAT_OFFSET_WEIGHT``, the normalised convolutions held at their
     Kaiming norm by ``loop.hold_conv_scale``; 2 decayed them instead, which held at ``--lr 0.3`` and
     not at 1.0) and None for GridTrackNet, whose recipe has not changed; ``same_run`` refuses to
@@ -511,7 +515,8 @@ def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict], resume
     that contradicts either is refused here, in one line that names the run (``same_run`` would
     refuse it too, but after ``--weights`` had been judged by the wrong architecture). A fine-tune
     starts from ``--weights``, so they must be the architecture's own file (``weights_suffix``),
-    or for ``memory_s4`` its parent's (``memorynet.PARENT_ARCH``: the memory starts fresh); a
+    or for an architecture with a parent (``ball_models.PARENTS``) its parent's, what the parent
+    lacks starting fresh; a
     ``--from-scratch`` run reads them only for the hard-negative prepass, which takes any
     architecture's, except that a GridTrackNet scratch run needs the ``.npz`` as the template its
     weights are written into. A mismatch is a ValueError. ``args.starting_arch`` is left as the
@@ -530,11 +535,11 @@ def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict], resume
         raise ValueError(f"--arch {args.arch} does not follow {source} {inherited}; leave --arch out to inherit it")
     suffix = weights_suffix(args.arch)
     starting = arch_of(args.weights)                 # a suffix that is neither is refused here
-    parent_start = args.arch == MEMORY_S4 and starting == memorynet.PARENT_ARCH
+    parent_start = starting == PARENTS.get(args.arch)
     if starting != args.arch and not parent_start and (not args.from_scratch or args.arch == GRIDTRACKNET):
         role = ("the template the trained weights are written into" if args.from_scratch
                 else f"the starting model of a {args.arch} fine-tune")
-        parent = f" or its parent's, a {memorynet.PARENT_ARCH} one" if args.arch == MEMORY_S4 else ""
+        parent = f" or its parent's, a {PARENTS[args.arch]} one" if args.arch in PARENTS else ""
         raise ValueError(f"--weights {args.weights} is a {starting} file, but {role} must be a {args.arch} one{parent} "
                          f"({suffix})" + ("" if args.from_scratch else "; --from-scratch trains a new network instead"))
     args.starting_arch = starting
@@ -605,8 +610,8 @@ def train(args: argparse.Namespace) -> None:
         model = fresh_model(device, args.arch)
         print(f"[train] fresh {args.arch} (random init, {model.GRID_COLS}x{model.GRID_ROWS} grid)")
     elif args.starting_arch != args.arch:
-        model = memorynet.from_heatmap(args.weights, device)
-        print(f"[train] {args.arch} from its parent {args.weights}: the shared layers are copied, the memory starts fresh")
+        model = from_parent(args.arch, args.weights, device)
+        print(f"[train] {args.arch} from its parent {args.weights}: {PARENT_START_NOTE[args.arch]}")
     else:
         model = load_ball_model(args.weights, device).float()
         print(f"[train] fine-tuning {args.arch} from {args.weights}")
@@ -715,12 +720,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--labels", type=Path, default=layout.labels)
     parser.add_argument("--arch", choices=ARCHITECTURES, default=None,
                         help=f"The network: {GRIDTRACKNET} (the default; a --resume or --selection-run inherits its run's), "
-                             f"{HEATMAP_S4}, the stride-4 heat-map network, or {MEMORY_S4}, that network with a memory "
-                             "carried along each phase (both .pt files, naming their architecture inside)")
+                             f"{HEATMAP_S4}, the stride-4 heat-map network, {MEMORY_S4}, that network with a memory "
+                             f"carried along each phase, or {HEATMAP_S2}, that network with one more decoder block, "
+                             "answering at stride 2 (all three .pt files, naming their architecture inside)")
     parser.add_argument("--weights", type=Path, default=layout.repo_weights,
                         help="The starting model of a fine-tune, the architecture's own file (.npz for gridtracknet, its "
-                             f"own .pt for {HEATMAP_S4} and {MEMORY_S4}; a {MEMORY_S4} fine-tune also starts from a "
-                             f"{HEATMAP_S4} file, its parent, with the memory fresh); with --from-scratch, any "
+                             f"own .pt for the others; a {MEMORY_S4} or {HEATMAP_S2} fine-tune also starts from a "
+                             f"{HEATMAP_S4} file, its parent, with the memory or the stride-2 block and head fresh); "
+                             "with --from-scratch, any "
                              "architecture's, read only by the --oversample-false-alarms prepass (a gridtracknet scratch "
                              "run still needs the .npz, the template it saves into)")
     parser.add_argument("--chain", type=int, default=None, metavar="K",

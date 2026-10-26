@@ -11,8 +11,7 @@ from finetune.training.loop import (HEAT_OFFSET_WEIGHT, LOSSES, batch_loss, buil
                                     evaluate_loss, fresh_model, gridtracknet_loss, heatmap_loss, hold_conv_scale,
                                     FILTER_NORM, largest_running_variance, normalised_conv_weights, save_weights,
                                     train_epoch, unit_loss)
-from tennis_tracker import memorynet
-from tennis_tracker import heatmapnet
+from tennis_tracker import heatmapnet, heatmapnet_s2, memorynet
 from tennis_tracker.ball_models import load_ball_model
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
 from tests._helpers import blank_template
@@ -71,7 +70,8 @@ def test_heatmap_loss_is_finite_and_lower_for_the_right_answer_than_a_wrong_one(
     prediction = flat.clone().requires_grad_(True)
     heatmap_loss(prediction, target).backward()
     assert torch.isfinite(prediction.grad).all()
-    assert LOSSES == {"gridtracknet": gridtracknet_loss, "heatmap_s4": heatmap_loss, "memory_s4": heatmap_loss}
+    assert LOSSES == {"gridtracknet": gridtracknet_loss, "heatmap_s4": heatmap_loss, "memory_s4": heatmap_loss,
+                      "heatmap_s2": heatmap_loss}
     assert unit_loss(fresh_model(torch.device("cpu"), heatmapnet.ARCH), right, target) == heatmap_loss(right, target)
 
 
@@ -183,12 +183,17 @@ def test_heatmap_offsets_are_weighted_as_centernet_weights_them():
 def test_the_normalised_convolutions_are_exactly_the_ones_batchnorm_follows_and_the_optimizer_is_plain():
     """A HeatmapNet's fourteen block convolutions (two per block: stem, four stages, two decoder
     stages) are the normalised ones and nothing else is: not the heat head, whose scale the
-    sigmoid reads, nor a MemoryNet's gates and ``out``; a GridTrackNet has none. The optimizer is
-    one undecayed Adadelta group for every architecture (recipe 2's decay group is gone)."""
+    sigmoid reads, nor a MemoryNet's gates and ``out``; a HeatmapNetS2 adds its third decoder
+    block's two, sixteen; a GridTrackNet has none. The optimizer is one undecayed Adadelta group
+    for every architecture (recipe 2's decay group is gone)."""
     heat = heatmapnet.HeatmapNet()
     held = normalised_conv_weights(heat)
     assert len(held) == 14 and all(weight.dim() == 4 for weight in held)
     assert not any(weight is heat.head.weight for weight in held)
+    stride2 = heatmapnet_s2.HeatmapNetS2()
+    held_s2 = normalised_conv_weights(stride2)
+    assert len(held_s2) == 16 and held_s2[-2] is stride2.up3[0].weight and held_s2[-1] is stride2.up3[3].weight
+    assert not any(weight is stride2.head.weight for weight in held_s2)
     memory = memorynet.MemoryNet()
     held_ids = {id(weight) for weight in normalised_conv_weights(memory)}
     assert len(held_ids) == 14
