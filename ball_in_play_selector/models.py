@@ -22,9 +22,6 @@ class Detection:
     conf: float
     area: float
     on_motion: bool = False  # overlaps boost/motion mask
-    # Below SelectorConfig.start_conf: may continue an established track, never start one
-    # (association.build_tracks sets it; the JSON records it per observation).
-    weak: bool = False
 
 
 # Every key scoring.score_tracks writes into Track.score_breakdown, with the

@@ -275,13 +275,6 @@ def _association_cost(
     # The distance from the last known position handles direction reversals.
     dist_raw = math.sqrt((trk.last_pos[0] - det.cx) ** 2 + (trk.last_pos[1] - det.cy) ** 2)
     dist = min(dist_pred, dist_raw)
-    if det.weak:
-        # A weak detection only confirms a track that already knows where the ball is going:
-        # an established one, and only where its prediction says (SelectorConfig.start_conf).
-        if trk.num_obs < cfg.weak_continue_min_obs:
-            return _Verdict(None, "weak_young", dist)
-        if dist_pred > cfg.weak_gate_frac * diag:
-            return _Verdict(None, "weak_gate", dist)
     if dist > gate:
         return _Verdict(None, "gate", dist)
     if dist_raw > speed_limit:
@@ -377,8 +370,6 @@ def build_tracks(
     selection (``core.selected_tracks`` asks for several observations) and never take a stale
     reconnect (``trail_stitch_min_obs``), but the diagnostics want to see every detection the
     selector was given, and a detection that joined no track is where the association failed.
-    The exception is a weak detection (below ``cfg.start_conf``) that no established live track
-    took: it may not start a track, so it is dropped here and appears nowhere.
     """
     active: List[Track] = []      # only live tracks: the dead ones leave at the end of each frame
     finished: List[Track] = []
@@ -388,15 +379,13 @@ def build_tracks(
     guards = _TrailGuards(cfg, diag)
 
     for t, frame_dets in enumerate(all_dets):
-        for det in frame_dets:
-            det.weak = det.conf < cfg.start_conf
         assignments, start_reasons = _assignment_costs(active, frame_dets, t, dt_cap, cfg, diag, guards)
         used_tracks, used_dets = _assign_greedily(assignments, active, frame_dets)
         _count_misses(active, used_tracks, cfg.max_gap_frames)
 
         # Unmatched detections: rejoin a stale track or start a new one
         for di, det in enumerate(frame_dets):
-            if di in used_dets or det.weak:
+            if di in used_dets:
                 continue
             best_idx = -1
             if guards.stitch_enable and finished:

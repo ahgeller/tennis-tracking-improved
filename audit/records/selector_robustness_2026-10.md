@@ -154,3 +154,16 @@ first argument. The `track_breaks` switch column is not comparable to the contro
 changed the rule: 202 became 67 on the control JSONs); rerun `track_breaks.py output/ctrl_eval/pipeline`
 for a like-for-like control. The new run's JSONs are schema 6 and carry every single-detection
 track and the `weak` flag, so the replay on them sees everything the selector saw, down to 0.40.
+
+## The two-level confidence removed (2026-10-27)
+
+The weak-detection rule (proposal 2: a detection between the detector floor 0.40 and a start
+confidence of 0.50 may only continue an established track near its Kalman prediction) was a wash on
+the held-out set (5 hits fewer for 2 wrong frames fewer at 0.40) and visibly harmful on
+`sample/PomonaPitzer Women vs. UCSD-cut-merged-1778697988405.mp4`: at a racket hit the ball reverses
+and the detector's confidence dips below 0.50, so the rule dropped exactly the frames at the hit
+(frames 28-29, 429-431, 686, 965-966, 1536-1537 and six single frames, every one a detection at
+0.41 to 0.50 or a motion recovery beside one) and the court events lost three player contacts (21
+to 18). It is reverted: every detection above the detector floor associates alike, and the
+tracking JSON is version 5 again (no `weak` flag). The held-out row above was measured with the
+rule; without it the replay's 0.40 rows ("none (chain)") are the reference.

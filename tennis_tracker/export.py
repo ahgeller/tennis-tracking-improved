@@ -50,9 +50,7 @@ _MAX_CANDIDATES_PER_FRAME = 5
 # ``selection``, ``in_timeline``) and the summary lists the timeline's ``timeline_track_ids``.
 # Tracking version 5: ``tracks`` holds the single-detection tracks too (the association used to
 # drop them), so every detection the selector saw is in some track; they are never selected.
-# Tracking version 6: each observation says whether it was ``weak`` (below the selector's start
-# confidence, so it could only continue an established track).
-_TRACKING_SCHEMA_VERSION = 6
+_TRACKING_SCHEMA_VERSION = 5
 _MOTION_DIAGNOSTICS_SCHEMA_VERSION = 2
 
 
@@ -178,7 +176,6 @@ def track_to_json(track: Optional[Track]) -> Optional[TrackJson]:
         "conf": float(obs.conf),
         "area": float(obs.area),
         "on_motion": bool(obs.on_motion),
-        "weak": bool(obs.weak),
     } for obs in track.observations]
     return {
         "track_id": int(track.track_id),

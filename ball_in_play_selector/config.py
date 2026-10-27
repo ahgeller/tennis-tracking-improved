@@ -27,8 +27,8 @@ _NON_NEGATIVE_FIELDS = (
     "timeline_max_gap_sec", "timeline_overlap_tol_frac", "timeline_small_gap_sec",
     "timeline_small_gap_jump_reject_frac", "trail_jump_break_growth_frac", "bounce_restitution",
 )
-# Frame and observation counts the selector divides by or uses as loop bounds.
-_POSITIVE_FRAME_COUNT_FIELDS = ("trail_stitch_min_obs", "assoc_gate_growth_cap_frames", "weak_continue_min_obs")
+# Frame counts the selector divides by or uses as loop bounds.
+_POSITIVE_FRAME_COUNT_FIELDS = ("trail_stitch_min_obs", "assoc_gate_growth_cap_frames")
 
 
 @dataclass
@@ -56,17 +56,6 @@ class SelectorConfig:
     # fast and slow; a step this many frames long stays in one phase.
     detector_phase_stride: int = field(init=False)
     assoc_gate_growth_cap_frames: int = 6   # gate stops growing after this many misses
-    # Two confidence levels. The detector hands over every candidate above its own
-    # floor (tennis_tracker.Config.conf, 0.40); a candidate below ``start_conf`` is
-    # "weak": it may not start a track or rejoin a stale one, only continue a live
-    # track that already holds ``weak_continue_min_obs`` observations, and only
-    # within ``weak_gate_frac`` of the diagonal (44 px at 1080p) of that track's
-    # Kalman prediction, a far tighter gate than the association's. A weak
-    # detection the rule turns away is dropped: the ball mid-flight is where the
-    # detector's confidence dips, a stray at 0.4 is where it fires on a shoe.
-    start_conf: float = 0.50
-    weak_continue_min_obs: int = 3
-    weak_gate_frac: float = 0.02
     assoc_min_speed_for_ratio: float = 2.5  # 30 FPS px/frame below which the speed ratio is not judged
     assoc_speed_ratio_min: float = 0.15
     assoc_speed_ratio_max: float = 3.80

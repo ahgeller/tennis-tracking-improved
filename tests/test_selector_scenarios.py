@@ -255,45 +255,6 @@ def test_disjoint_continuity_is_decided_at_the_start_edge():
     assert [track.track_id for track in select_timeline_chain([outer, near_start], chain_cfg, 200)] == [5, 7]
 
 
-def test_a_weak_detection_continues_an_established_track_on_its_predicted_path():
-    # The detector's confidence dips mid-flight: frames 6 to 8 come in at 0.45, below the
-    # start confidence (0.50) but above the detector floor the pipeline passes on. On the
-    # ball's predicted path they continue the track and are drawn, flagged weak.
-    detections, masks = _moving_ball()
-    for frame in (6, 7, 8):
-        [(bbox, _)] = detections[frame]
-        detections[frame] = [(bbox, 0.45)]
-    results, chosen, tracks = select_ball_in_play(detections, 30.0, WIDTH, HEIGHT, boost_masks=masks)
-    [track] = tracks
-    assert track.num_obs == 12 and [obs.frame for obs in track.observations if obs.weak] == [6, 7, 8]
-    assert all(results[frame] is not None and results[frame].source == "det" for frame in range(12))
-    assert chosen is not None and chosen.num_obs == 12
-
-
-def test_a_weak_detection_cannot_start_a_track_nor_join_one_off_its_prediction():
-    # Three weak detections before the ball appears, one far from the ball's path while the
-    # track is live, and one on the path while the track is only two observations old: none
-    # starts a track, none joins one. The strong ball track is the only track there is, and
-    # the weak detections appear nowhere.
-    detections, masks = _moving_ball()
-    detections = [[([200 + frame, 300, 204 + frame, 304], 0.45)] for frame in range(3)] + detections
-    masks = [_empty_mask() for _ in range(3)] + masks
-    detections[4].append(([400, 300, 404, 304], 0.45))      # the track is 2 observations old, and far off
-    detections[8].append(([400, 300, 404, 304], 0.45))      # established, but 300 px off the prediction
-    results, chosen, tracks = select_ball_in_play(detections, 30.0, WIDTH, HEIGHT, boost_masks=masks)
-    [track] = tracks
-    assert track.first_frame == 3 and track.num_obs == 12 and not any(obs.weak for obs in track.observations)
-    assert all(results[frame] is None for frame in range(3))
-    assert chosen is not None and chosen.first_frame == 3
-    # A weak detection on the path of a track that is not yet established is turned away too.
-    young = [[([10 + 12 * frame, 20, 14 + 12 * frame, 24], 0.9 if frame < 2 else 0.45)] for frame in range(6)]
-    [only] = build_tracks(
-        [[Detection(f, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2, *b, c, 16.0, False) for b, c in rows] for f, rows in enumerate(young)],
-        _cfg(30.0),
-    )
-    assert only.num_obs == 2
-
-
 def test_weak_endpoint_without_motion_creates_no_interpolation():
     # Weak detector endpoints do not create blue interpolation without motion.
     detections, masks = _moving_ball()
