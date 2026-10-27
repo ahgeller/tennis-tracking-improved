@@ -135,7 +135,7 @@ def replay_union(detections: List[List[Detection]], scene: ReplayScene) -> Repla
                                    scene.player_boxes)
     for track in tracks:
         track.in_timeline = True
-    return Replay(core.output_trajectory(output_scene, tracks, None), tracks, None)
+    return Replay(core.output_trajectory(output_scene, tracks), tracks, None)
 
 
 def replay_raw(detections: List[List[Detection]], scene: ReplayScene) -> Replay:

@@ -6,6 +6,7 @@ trajectory and deliberately has no hidden handoff state.
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
@@ -921,7 +922,21 @@ def select_ball_in_play(
     chosen = stitch_track_chain(selected, cfg)
     if debug:
         print(f"[clean selector] selected tracks: {[track.track_id for track in selected]}")
-    return output_trajectory(scene, selected, chosen), chosen, tracks
+    results = output_trajectory(scene, selected)
+    if chosen is not None:
+        # The chain's record holds the observations that were drawn. A copy: for a one-track
+        # chain ``chosen`` is that very track, whose own record (in ``tracks``) keeps every
+        # observation, so the diagnostics can see what the pruning let go.
+        chosen = _pruned_copy(chosen, fps)
+    return results, chosen, tracks
+
+
+def _pruned_copy(track: Track, fps: float) -> Track:
+    """``track`` with its observations cut to ``trajectory_observations``; the track is untouched."""
+    pruned = copy.copy(track)
+    pruned.observations = trajectory_observations(track, fps)
+    pruned._kin_cache_key = None
+    return pruned
 
 
 def make_scene(
@@ -945,14 +960,11 @@ def make_scene(
     )
 
 
-def output_trajectory(
-    scene: _Scene, selected: List[Track], chosen: Optional[Track]
-) -> List[Optional[FrameResult]]:
+def output_trajectory(scene: _Scene, selected: List[Track]) -> List[Optional[FrameResult]]:
     """The per-frame output from the tracks the chooser kept: their trajectory observations
     placed (the stronger track winning a shared frame), the gaps between them filled where the
     evidence allows, the tails extended on motion, single holes closed, the refit, and the
-    implausible fills dropped. ``chosen`` (the stitched chain, None when nothing qualified) is
-    pruned to its trajectory observations too, so its record matches what was drawn.
+    implausible fills dropped. The tracks themselves are not changed.
 
     Separate from ``select_ball_in_play`` so a chooser other than the timeline chain (the
     evaluation's replay variants) produces its output the same way.
@@ -960,8 +972,6 @@ def output_trajectory(
     selected_observations = {
         id(track): trajectory_observations(track, scene.fps) for track in selected
     }
-    if chosen is not None:
-        chosen.observations = trajectory_observations(chosen, scene.fps)
     results: List[Optional[FrameResult]] = [None] * scene.total
 
     _place_detections(results, selected, selected_observations)

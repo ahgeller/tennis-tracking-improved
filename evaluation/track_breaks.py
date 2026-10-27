@@ -5,13 +5,20 @@
 For every ``<clip>_<model>.json`` that ``evaluate_archive.py --mode pipeline`` wrote, the
 labelled-visible frames with no output are bucketed by what the run had on that frame:
 ``no_track`` (no selector track observed it: the detector or the association never had it),
-``other_track`` (only a track the timeline did not choose observed it) or ``chosen_pruned`` (the
-chosen track observed it and the fills, the refit or the implausible-fill pruning let it go).
+``other_track`` (only a track the timeline did not choose observed it) or ``chosen_pruned`` (a
+timeline track observed it and the selector let it go: ``trajectory_observations`` dropped it as
+an unverifiable lone detection, or the fills, the refit or the implausible-fill pruning did). The
+timeline tracks are the ``tracks`` entries with ``in_timeline`` (schema 4); an older JSON falls
+back to the ``chosen_track`` record, which the selector writes already pruned, so there a dropped
+lone detection of a one-track chain reads as ``no_track``.
 Beside them: ``switches``, present rows that jump more than a share of the diagonal from the
-previous present row, and ``longest_gap``, the longest run of absent output between the clip's
-first and last visible label. Pooled lines follow per frame rate (``fps=30``, ``fps=60``), per
-clips.csv source and ``ALL``, so a 60 FPS clip's losses read against a 30 FPS clip's. Two logs
-compare with ``--compare``; positive deltas in the miss buckets, switches and gap are worse.
+previous present row, except when the two rows are on adjacent frames and belong to the same
+selector track (``track_id``, a recovered row continuing the track it sits in), which is a fast
+ball and not a switch: a switch is a change of track or a jump across a gap. ``longest_gap`` is
+the longest run of absent output between the clip's first and last visible label. Pooled lines
+follow per frame rate (``fps=30``, ``fps=60``), per clips.csv source and ``ALL``, so a 60 FPS
+clip's losses read against a 30 FPS clip's. Two logs compare with ``--compare``; positive deltas
+in the miss buckets, switches and gap are worse.
 
 When the JSONs record why each track started (schema 4), a second table counts, per frame
 rate and over all clips, the tracks that started because a live track's gate turned their first
@@ -56,15 +63,35 @@ class ClipBreaks(NamedTuple):
         return self.visible - self.hit
 
 
+def _continues_track(frame: int, previous_frame: int, run_track: Optional[int],
+                     track_of: Dict[int, Optional[int]]) -> bool:
+    """Whether the present row on ``frame`` continues the run of rows ending on ``previous_frame``
+    (the one before it) without a change of track: adjacent frames, both rows naming their track,
+    and this row's track the run's (a recovered row, or a run of them, belongs to the track it sits
+    in). Such a step is the ball moving, however far, never a switch."""
+    if frame != previous_frame + 1 or frame not in track_of or previous_frame not in track_of:
+        return False
+    track_id = track_of[frame]
+    return track_id is None or run_track is None or track_id == run_track
+
+
 def clip_breaks(payload: TrackingJson, labels: Labels, switch_frac: float = SWITCH_DIAG_FRAC) -> ClipBreaks:
     """Bucket a run's losses on one clip against its labels (frame -> point, or None for no ball)."""
     frames = payload["frames"]
     present = {int(row["frame"]): (float(row["x"]), float(row["y"])) for row in frames if row.get("present")}
+    # The selector track of each present row (None for a recovered row); a JSON from before the
+    # rows named their track (schema 3) has no entry, and its jumps are judged by distance alone.
+    track_of = {int(row["frame"]): row["track_id"] for row in frames if row.get("present") and "track_id" in row}
     observed: Set[int] = set()
+    chosen_frames: Set[int] = set()
     for track in payload.get("tracks") or ():
-        observed.update(int(item["frame"]) for item in track.get("observations") or ())
-    chosen = payload.get("chosen_track") or {}
-    chosen_frames = {int(item["frame"]) for item in chosen.get("observations") or ()}
+        track_frames = {int(item["frame"]) for item in track.get("observations") or ()}
+        observed.update(track_frames)
+        if track.get("in_timeline"):
+            chosen_frames.update(track_frames)
+    if not chosen_frames:
+        chosen = payload.get("chosen_track") or {}
+        chosen_frames = {int(item["frame"]) for item in chosen.get("observations") or ()}
 
     visible = sorted(frame for frame, point in labels.items() if point is not None)
     hit = no_track = other_track = chosen_pruned = 0
@@ -82,11 +109,17 @@ def clip_breaks(payload: TrackingJson, labels: Labels, switch_frac: float = SWIT
     switch_px = switch_frac * math.hypot(float(video["width"]), float(video["height"]))
     switches = 0
     previous = None
+    run_track = None        # the track the current run of adjacent present rows belongs to
     for frame in sorted(present):
         point = present[frame]
-        if previous is not None and math.hypot(point[0] - previous[0], point[1] - previous[1]) > switch_px:
-            switches += 1
-        previous = point
+        if previous is not None:
+            if not _continues_track(frame, previous[0], run_track, track_of):
+                if math.hypot(point[0] - previous[1][0], point[1] - previous[1][1]) > switch_px:
+                    switches += 1
+                run_track = None
+        if track_of.get(frame) is not None:
+            run_track = track_of[frame]
+        previous = (frame, point)
 
     longest_gap = run = 0
     if visible:

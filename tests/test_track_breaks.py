@@ -8,21 +8,29 @@ from evaluation.track_breaks import (ClipBreaks, clip_breaks, compare, fmt, pool
                                      track_starts)
 
 
-def _payload(present, chosen_frames, other_frames, width=1000, height=500, fps=30.0):
+def _payload(present, chosen_frames, other_frames, width=1000, height=500, fps=30.0, tracks=None, timeline=None):
+    """A schema-3 payload (rows without ``track_id``) unless ``tracks`` gives each present frame its
+    track (None for a recovered row); ``timeline`` marks the tracks ``in_timeline`` (schema 4)."""
     frames = [{"frame": f, "present": False} for f in range(10)]
     for f, (x, y) in present.items():
         frames[f] = {"frame": f, "present": True, "x": x, "y": y, "source": "det"}
+        if tracks is not None:
+            frames[f]["track_id"] = tracks[f]
 
     def observations(fs):
         return [{"frame": f, "x": 1.0, "y": 1.0} for f in fs]
 
-    return {
+    payload = {
         "video": {"fps": fps, "width": width, "height": height, "total_frames": 10},
         "chosen_track": {"track_id": 0, "observations": observations(chosen_frames)},
         "tracks": [{"track_id": 0, "observations": observations(chosen_frames)},
                    {"track_id": 1, "observations": observations(other_frames)}],
         "frames": frames,
     }
+    if timeline is not None:
+        for track in payload["tracks"]:
+            track["in_timeline"] = track["track_id"] in timeline
+    return payload
 
 
 LABELS = {f: (10.0, 10.0) for f in range(10)}
@@ -37,10 +45,38 @@ def test_losses_are_bucketed_by_what_the_run_had_on_the_frame():
     assert breaks.missed == 4
 
 
+def test_a_timeline_track_s_dropped_observation_is_chosen_pruned_not_other_track():
+    """The chosen_track record is written pruned, so a frame a timeline track observed and the
+    selector let go is found through the tracks' ``in_timeline`` flag (schema 4); track 1 alone
+    seeing frame 8 stays other_track when it is not in the timeline, and becomes chosen_pruned
+    when it is."""
+    present = {0: (10.0, 10.0), 1: (12.0, 10.0), 2: (14.0, 10.0)}
+    without_flags = clip_breaks(_payload(present, [0, 1, 2], [3, 8]), LABELS)
+    assert (without_flags.chosen_pruned, without_flags.other_track) == (0, 2)
+    one_track = clip_breaks(_payload(present, [0, 1, 2], [3, 8], timeline={0}), LABELS)
+    assert (one_track.chosen_pruned, one_track.other_track) == (0, 2)
+    chained = clip_breaks(_payload(present, [0, 1, 2], [3, 8], timeline={0, 1}), LABELS)
+    assert (chained.chosen_pruned, chained.other_track, chained.no_track) == (2, 0, 4)
+
+
 def test_a_jump_counts_as_a_switch_only_over_the_diagonal_share():
     present = {0: (10.0, 10.0), 1: (40.0, 10.0)}     # 30 px of a 1118 px diagonal
     assert clip_breaks(_payload(present, [0, 1], []), LABELS, switch_frac=0.03).switches == 0
     assert clip_breaks(_payload(present, [0, 1], []), LABELS, switch_frac=0.02).switches == 1
+
+
+def test_a_fast_ball_on_one_track_is_not_a_switch_but_a_change_of_track_or_a_gap_is():
+    """Rows 0-3 jump 100 px a frame (9% of the diagonal): one track's observations with a recovered
+    row among them read as the ball moving; the same jump onto another track, or across a gap in
+    the output, is a switch. Rows that do not name their track (schema 3) are judged by distance."""
+    fast = {f: (10.0 + 100.0 * f, 10.0) for f in range(4)}
+    assert clip_breaks(_payload(fast, list(fast), []), LABELS).switches == 3
+    assert clip_breaks(_payload(fast, list(fast), [], tracks={0: 0, 1: 0, 2: None, 3: 0}), LABELS).switches == 0
+    assert clip_breaks(_payload(fast, list(fast), [], tracks={0: None, 1: None, 2: 0, 3: 0}), LABELS).switches == 0
+    assert clip_breaks(_payload(fast, list(fast), [], tracks={0: 0, 1: 0, 2: 1, 3: 1}), LABELS).switches == 1
+    assert clip_breaks(_payload(fast, list(fast), [], tracks={0: 0, 1: 0, 2: None, 3: 1}), LABELS).switches == 1
+    gapped = {0: (10.0, 10.0), 1: (110.0, 10.0), 3: (310.0, 10.0)}
+    assert clip_breaks(_payload(gapped, list(gapped), [], tracks={0: 0, 1: 0, 3: 0}), LABELS).switches == 1
 
 
 def test_pooling_sums_the_counts_and_keeps_the_longest_gap():
