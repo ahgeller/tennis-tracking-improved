@@ -672,7 +672,7 @@ def test_pass2_reports_a_short_second_decode(tmp_path, monkeypatch, fake_cuda, c
     real_read = pass2._FrameSource.read
 
     def read(self, frame_index):
-        return None if frame_index >= short else real_read(self, frame_index)
+        return (None, True) if frame_index >= short else real_read(self, frame_index)
 
     monkeypatch.setattr(pass2._FrameSource, "read", read)
     result = run_pipeline(tmp_path, monkeypatch, clip, **FULL_OVERRIDES, cache_input_frames_pass2=False)

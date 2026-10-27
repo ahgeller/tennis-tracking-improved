@@ -1,9 +1,10 @@
 """Pass 2: render the tracking video and the optional debug videos from pass 1's evidence.
 
-Frames come from the RAM cache pass 1 filled, or from a second decode of the
-clip.  Every frame gets the court, players, the selected ball and its trail;
-the track-debug video adds raw detections, ROIs, every candidate track and the
-chosen track's display path; the motion-debug video shows the masks.
+Frames come from the RAM cache pass 1 filled (the clip's first frames, as many
+as fit the budget) and, past it, from a second decode of the clip.  Every
+frame gets the court, players, the selected ball and its trail; the track-debug
+video adds raw detections, ROIs, every candidate track and the chosen track's
+display path; the motion-debug video shows the masks.
 """
 from __future__ import annotations
 
@@ -38,35 +39,59 @@ def _open_writer(ctx: RunContext, path: str) -> VideoWriter:
     return VideoWriter(path, video.fps, video.width, video.height, ctx.cfg, encoder=ctx.encoder)
 
 
+def _open_capture(path) -> cv2.VideoCapture:
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise RuntimeError(f"Could not reopen the input video for pass 2: {path}")
+    return capture
+
+
+def _reopen_at(path, first_frame: int) -> cv2.VideoCapture:
+    """The clip reopened with frame ``first_frame`` next to read: by a seek when the container
+    lands on it exactly, else by decoding from the start and dropping the frames before it."""
+    capture = _open_capture(path)
+    if first_frame == 0:
+        return capture
+    capture.set(cv2.CAP_PROP_POS_FRAMES, first_frame)
+    landed = int(round(capture.get(cv2.CAP_PROP_POS_FRAMES)))
+    if landed == first_frame:
+        return capture
+    print(f"[pass 2] The container did not seek to frame {first_frame} (landed on {landed}); "
+          f"decoding from the start and skipping the {first_frame} cached frames")
+    capture.release()
+    capture = _open_capture(path)
+    for _ in range(first_frame):
+        if not capture.grab():
+            break
+    return capture
+
+
 class _FrameSource:
-    """Pass-2 frames from the RAM cache when it holds the whole clip, else a fresh decode.
+    """Pass-2 frames: the prefix of the clip pass 1 cached, from RAM, and the rest from a decode
+    that starts where the cache ends.
 
     The decode runs on a reader thread ahead of the renderer, as in pass 1, so a frame's
-    decoding overlaps the drawing of the one before it.  ``owns_frames`` says whether the
-    frames handed out are the renderer's to draw on: a decoded frame is, a cached one is not.
+    decoding overlaps the drawing of the one before it.  ``read`` says whether the frame it hands
+    out is the renderer's to draw on: a decoded frame is, a cached one is not.
     """
 
     def __init__(self, ctx: RunContext, cached: Optional[List[np.ndarray]], frame_count: int) -> None:
-        self._cached = cached if (cached is not None and len(cached) == frame_count) else None
+        self._cached: List[np.ndarray] = cached or []
         self._reader: Optional[ThreadedFrameReader] = None
-        if self._cached is not None:
-            print(f"[pass 2] Using RAM frame cache ({len(self._cached)} frames)")
-        else:
-            capture = cv2.VideoCapture(str(ctx.video.path))
-            if not capture.isOpened():
-                raise RuntimeError(f"Could not reopen the input video for pass 2: {ctx.video.path}")
-            if cached is not None:
-                print("[pass 2] RAM frame cache incomplete; falling back to video decode")
-            self._reader = ThreadedFrameReader(capture, prefetch=max(2, ctx.cfg.frame_reader_prefetch))
+        n_cached = len(self._cached)
+        if cached is not None and n_cached >= frame_count:
+            print(f"[pass 2] Using RAM frame cache ({n_cached} frames)")
+            return
+        if n_cached:
+            print(f"[pass 2] Using RAM frame cache ({n_cached} of {frame_count} frames), decoding the rest")
+        capture = _reopen_at(ctx.video.path, n_cached)
+        self._reader = ThreadedFrameReader(capture, prefetch=max(2, ctx.cfg.frame_reader_prefetch))
 
-    @property
-    def owns_frames(self) -> bool:
-        return self._cached is None
-
-    def read(self, frame_index: int) -> Optional[np.ndarray]:
-        if self._cached is not None:
-            return self._cached[frame_index]
-        return self._reader.read()
+    def read(self, frame_index: int) -> Tuple[Optional[np.ndarray], bool]:
+        """Frame ``frame_index`` (None once the decode runs dry) and whether the renderer owns it."""
+        if frame_index < len(self._cached):
+            return self._cached[frame_index], False
+        return self._reader.read(), True
 
     def release(self) -> None:
         if self._reader is not None:
@@ -260,11 +285,11 @@ def render_pass2(ctx: RunContext, pass1: Pass1Result, selection: Selection, even
     try:
         for fi in range(n):
             read_t0 = timing.start()
-            frame = source.read(fi)
+            frame, owned = source.read(fi)
             if frame is None:
                 break
             timing.add("pass2_read", read_t0)
-            renderer.render(fi, frame, owned=source.owns_frames)
+            renderer.render(fi, frame, owned=owned)
             rendered += 1
             if cfg.progress_every and (fi + 1) % cfg.progress_every == 0:
                 print(f"  [pass2 {fi+1}/{n}] rendering...")
