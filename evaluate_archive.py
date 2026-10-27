@@ -1,8 +1,8 @@
-"""Score ball detectors and the full pipeline against the hand-labelled clips (``evaluation.archive``).
+"""Score ball detectors and the full pipeline against the hand-labelled clips (``finetune.scoring.archive``).
 
     python evaluate_archive.py --archive finetune --mode raw --clips video13
 """
-from evaluation.archive import main
+from finetune.scoring.archive import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

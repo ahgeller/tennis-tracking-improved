@@ -4,7 +4,7 @@ where a frame's ball is taken to be. Synthetic clips; no window, no file."""
 import pytest
 
 from finetune.labeling.label_session import GHOST_REACH, ZOOM_MAX, LabelSession
-from tests._helpers import fake_source
+from _workspace_helpers import fake_source
 
 
 def session_over(*sources):

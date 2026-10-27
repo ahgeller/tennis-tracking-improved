@@ -17,6 +17,7 @@ from typing import List, Optional, Sequence
 
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import finetune  # noqa: F401,E402  (which puts system/ on sys.path)
 
 from finetune.refiner import refiner_training
 from finetune.refiner.cnn_refiner import current, make_current, version_lines, versions

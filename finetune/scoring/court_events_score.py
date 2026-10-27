@@ -3,7 +3,7 @@
     python score_court_events.py --archive finetune --out-dir output/<run>/pipeline [--tier confirmed]
         [--tolerance-s 0.1] [--compare before.log] [--recompute]
 
-For every clip that may be scored (``evaluation.archive.list_clips``: reviewed, not excluded) and has
+For every clip that may be scored (``finetune.scoring.archive.list_clips``: reviewed, not excluded) and has
 a landing label file (``labels/<clip>_bounces.csv``, ``finetune.data.bounce_labels``), the run's tracking
 JSON ``<out-dir>/<clip>_<model>.json`` is read; it must have been written with ``--court``, so that its
 ``court_events`` block is filled. The block's landings at the chosen tier are matched one to one to the
@@ -37,11 +37,11 @@ import sys
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
-from evaluation.archive import archive_folders, default_archive, list_clips
 from finetune.data import workspace as ws
 from finetune.data.bounce_labels import BounceLabel, landing_text, read_bounce_labels, resolve_points
 from finetune.data.detector_metrics import scale_for_width
 from finetune.data.labels import read_labels
+from finetune.scoring.archive import archive_folders, default_archive, list_clips
 from tennis_tracker.court.bounce_events import infer_kinematic_bounces, predict_bounce_events
 from tennis_tracker.court.contact_events import detect_player_contacts
 from tennis_tracker.court.court_scene import EVENT_MERGE_S, BounceEvent, CourtScene, PlayerBoxes, seconds_to_frames

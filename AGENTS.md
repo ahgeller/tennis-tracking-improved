@@ -1,88 +1,49 @@
-# Project guide
+# Project guide: the train branch
 
-## Purpose and entry points
+## Layout
 
-This is an offline GPU tennis-video tracker, plus a labeling and GridTrackNet
-fine-tuning workspace. `clean_tracker.py` runs detection, selection and optional
-rendering (`--weights` points it at other ball-detector weights, `.npz` or `.pt`;
-the default, `models/ball_detector.pt`, is the heat-map network's control run of
-2026-10-26, and `models/legacy/` keeps the GridTrackNet `.npz` files and the old YOLO
-`ball.engine`). Outputs are an annotated MP4 and per-frame JSON. It is not a calibrated
-3D ball-flight or line-calling system.
+This branch is the tennis-video tracker plus its labelling and GridTrackNet
+fine-tuning workspace.
 
-- `tennis_tracker/gridtracknet.py`: PyTorch port and NPZ loader. Five raw RGB
-  frames at 768x432 become 15 input channels. Output is five confidence/x-offset/
-  y-offset grids at 48x27. Width-axis normalization reproduces the upstream export;
-  it is Keras BatchNormalization on that axis: gamma and beta train, mean and
-  variance are running statistics (buffers).
-- `tennis_tracker/heatmapnet.py`: the second ball-detector architecture, `HeatmapNet`,
-  a U-shaped encoder-decoder with skip connections (`encode`, `decode`) answering on a
-  192x108 grid (stride 4) in GridTrackNet's output layout, from the same 15-channel
-  input; `.pt` weights (`{"arch": <ARCH>, "state_dict"}`).
-  `tennis_tracker/ball_models.py` is the one front door: `arch_of` reads the
-  architecture off `Config.model_path` (`.npz` GridTrackNet; a `.pt` names
-  `heatmap_s4` inside, and a record naming another architecture is refused),
-  `load_ball_model` builds it, and both classes carry `ARCH`, `GRID_COLS`,
-  `GRID_ROWS`, `INPUT_CHANNELS` and `FRAMES_PER_UNIT`, so the detector,
-  `decode_predictions` (which reads the grid off the output's shape) and the trainer
-  never ask which class they hold. The trainer's `--arch heatmap_s4` (Gaussian target,
-  CenterNet focal loss) trains it from scratch or fine-tunes it from a `.pt`. The heat
-  recipe is versioned (`HEAT_RECIPE`, `heat_recipe` in config.json: offsets at weight 1,
-  the convolutions BatchNorm follows held at their Kaiming norm after every step by
-  `loop.hold_conv_scale`, `loop.check_finite` after every epoch; heat1 to heat3, the runs
-  that led there, are in the ledger). `README.md` ("Keeping one network") says what to
-  delete when an architecture loses, and that `memory_s4` and `heatmap_s2` were removed
-  on 2026-10-26 after the held-out comparison (the ledger has the runs).
-- `tennis_tracker/engines/`: `ball_detectors.py`, the progressive GridTrackNet
-  prepass and the single-frame TensorRT ball engine. At about 60 FPS, even and
-  odd phases each run at about 30 FPS. Preserve source-frame indices and
-  temporal order. `Config.gridtracknet_window_step` (1, the default since
-  2026-10-26) is the frames of a phase between unit starts: below 5 a frame's
-  overlapping units are averaged before one decode (`_UnitStream`,
-  `_HeatAverage`); 5 is the old prepass, one unit per frame;
-  `evaluate_archive.py --window-step` scores either. `engine_session.py`: the TensorRT session the ball, player
-  and court engines share; `engine_files.py`: locating engine files, their
-  Ultralytics metadata and I/O tensor table (no CUDA); `engine_boxes.py`:
-  decoding detection-engine outputs into boxes for the ball and player
-  backends. `build_engines.py`: YOLO checkpoint to ONNX to TensorRT engine, run
-  as `python -m tennis_tracker.engines.build_engines`. `player_detector.py`:
-  TensorRT players with ByteTrack association.
-  `court_detector.py`: court keypoints every N frames, last good result cached.
-  `tennis_tracker/paths.py`: the model asset paths every consumer (Config
-  defaults, scripts, the workspace) spells once. `headless.py`: the one Config
-  and run for a caller that wants the tracker's answer and no video
-  (`evaluation/archive.py`, `pretrack.py`).
-- `tennis_tracker/pipeline.py`: orders the stages, calls the selector and, with
-  `--court` (`Config.court_events`, implied by the minimap), the court events,
-  reports. `run_context.py`: data the stages pass each other (`CourtEvents`:
-  the bounces, candidates, kinematic bounces, contacts and legs found). `pass1.py`
-  (with `frame_window.py`): decoding, background/motion state, ROI collection,
-  detector calls. `pass2.py`: rendering pass. `export.py`: `RunResult`, what a
-  run returns, and the tracking JSON writer, whose `court_events` block carries
-  every event with its provenance (`{}` when they were not computed).
-  `tracking_schema.py`: the tracking JSON's shape (TypedDicts, typing only),
-  which the writer and the scorers share. `motion.py`, `roi_tracking.py`: CUDA
-  motion masks and ROI tracking.
-- `tennis_tracker/court/`: `court_geometry.py`, keypoints, side guides, polygon,
-  homography; the court-event stages, each reading one `CourtScene`:
-  `court_scene.py` (`CourtScene`, the event types and the player-box queries),
-  `ball_turns.py` (where the ball track turns: sample windows and short gaps),
-  `bounce_events.py` (CatBoost/kinematic bounce candidates), `contact_events.py`
-  (player contacts) and `rally_legs.py` (schematic rally legs);
-  `court_drawing.py`, the court layers; `court_minimap.py`, the minimap.
-- `tennis_tracker/render/`: `rendering.py` draws only: the canvas, colours,
-  markers and HUD, with `trails.py` (ball, display-path and candidate trails),
-  `display_path.py` (the chosen track's display path), `motion_debug.py`
-  (the motion-debug video's masks and selected ball) and `motion_trails.py` (its
-  raw-motion trails) beside it. `summaries.py`: the console track table
-  and timing report.
-- `ball_in_play_selector/`: candidate association (`association.py`), Kalman
-  state, track scoring, timeline selection, bounded recovery, trajectory refit.
-  Detections between the detector floor (`Config.conf`, 0.40) and
-  `SelectorConfig.start_conf` (0.50) are `weak`: they may continue an established
-  track but never start one. A minimal selector without the score and the timeline
-  chain was built and rejected on 2026-10-27 (it cannot choose between two balls on
-  screen; the selector ledger has why).
+- `system/` is the tracker: `main`'s whole tree, byte for byte (its `README.md`,
+  `AGENTS.md`, `tests/`, `audit/`, `models/`, `tennis_tracker/`,
+  `ball_in_play_selector/`, `evaluation/` with `validate.py` and `parity.py`,
+  `clean_tracker.py`). `system/AGENTS.md` is the map of that code and its change
+  discipline; read it before touching anything under `system/`.
+- Everything else is training and labelling: `finetune/` (the workspace, the trainer,
+  the scorers), the root scripts `evaluate_archive.py`, `score_court_events.py` and
+  `track_breaks.py` that front the scorers, `tests/` (the workspace suites),
+  `audit/` (the workspace's ledgers and records) and the launchers
+  `finetune.ps1` / `finetune.bat`.
+
+**The invariant.** `system/` equals `main`: after every change is ported,
+`git rev-parse main^{tree}` and `git rev-parse train:system` print the same hash
+(`git diff --stat main^{tree} train:system` is empty). So `system/` holds nothing
+`main` would not: no workspace code, no train-only docs (they go at the root), and
+nothing under it imports `finetune` (`tests/test_system_layout.py` checks that and
+that nothing at the root shadows a system package). A tracker change is made in one
+place and ported to the other, as its own commit with the same message (in Git Bash:
+a PowerShell pipe before 7.4 re-encodes the patch):
+
+```sh
+# train -> main: on main, the system/ part of train commits <a>..<b>
+git diff --binary <a> <b> -- system | git apply -p2
+# main -> train: on train, main commits <a>..<b>
+git diff --binary <a> <b> | git apply --directory=system
+```
+
+**Imports.** The train code imports the tracker's packages (`tennis_tracker`,
+`ball_in_play_selector`, `evaluation`) as top-level packages. `finetune/__init__.py`
+is the one place that puts `system/` on `sys.path`, and every way in passes through
+it: modules import `finetune.*`, and each script's `__main__` bootstrap puts the
+repository root on the path and imports `finetune`. `tennis_tracker.paths.ROOT` is
+therefore `system/` (the weights are `system/models/`); `finetune.REPOSITORY` is the
+repository root, which holds `finetune/` and `output/`. The Colab code zip
+(`finetune/colab_zip.py`) packs files at their repository paths, `system/` included,
+so the same `__init__` sets the path up there.
+
+## The workspace code
+
 - `finetune/refiner/refine.py`: model-free sub-pixel ball suggestions for the label tool
   (candidates chosen by trajectory, trust score); `motion_blobs.py` measures what moved
   on one frame (the change map, its motion centroid and blobs).
@@ -105,7 +66,7 @@ the default, `models/ball_detector.pt`, is the heat-map network's control run of
   `menu.py` is the interactive menu, `commands.py` has the in-process commands,
   `colab_zip.py` the `colab-zip` command, the one zip
   `GridTrackNet_FineTune_Colab.ipynb` unpacks, `interpreter.py` the venv
-  hand-over). The rest of the package is four
+  hand-over). The rest of the package is five
   subpackages. `finetune/labeling/`: `label_tool.py` (manual edits: the
   actions the key table names, the window and the loop), split into
   `label_session.py` (the one owner of the sitting's state: the rows, the
@@ -127,7 +88,7 @@ the default, `models/ball_detector.pt`, is the heat-map network's control run of
   `label_audit.py`, checks labels against the raw detector; `label_flags.py`, the frames an
   audit flagged for a person (the flag sidecar the label tool and the menu read); `detect.py`,
   the raw GridTrackNet prepass over one clip (torch only when a detector is built), which
-  the audit, `realign.py`, `pretrack.py`, `evaluation/archive.py` and the trainer's winner
+  the audit, `realign.py`, `pretrack.py`, `finetune/scoring/archive.py` and the trainer's winner
   metric all run; `bounce_labels.py`, the landing labels (`labels/<clip>_bounces.csv`, the
   frames where the ball landed, `frame_###.5` for a landing between two frames, points
   optional) the label tool's `/` key writes and the court-event scorer reads;
@@ -156,69 +117,68 @@ the default, `models/ball_detector.pt`, is the heat-map network's control run of
   7.9 GB), `dataset.py`
   (targets, the named augmentations behind `--augment`, the Dataset and the sampler
   with `--oversample-absent` and `--oversample-false-alarms`) and `pretrack.py` (drafts).
+  `--arch heatmap_s4` trains the tracker's `HeatmapNet` (Gaussian target, CenterNet focal
+  loss) from scratch or fine-tunes it from a `.pt`; its recipe is versioned (`HEAT_RECIPE`,
+  `heat_recipe` in config.json: offsets at weight 1, the convolutions BatchNorm follows held
+  at their Kaiming norm after every step by `loop.hold_conv_scale`, `loop.check_finite` after
+  every epoch; heat1 to heat3, the runs that led there, are in the ledger). `README.md`
+  ("Keeping one network") says what to delete when an architecture loses.
   `audit/records/gridtracknet_recipe_2026-10.md` is the ledger of the recipe runs.
-- `evaluation/`: `validate.py` scores a tracking JSON against annotations in native
-  pixels (the parity gate freezes its numbers), `archive.py` scores the detector or
-  the pipeline on workspace clips with `finetune/data/detector_metrics.py` (`pipeline_score.py`
-  scores one pipeline run's clip; raw mode also prints a `macro` per-clip-mean line, one
-  `source=<name>` line per source, the count beside each false-alarm rate and, with
-  `--cell-histogram`, recall by position within the grid cell), `court_events_score.py`
-  scores a `--court` pipeline run's landings against the landing labels (tiers, a 0.1 s
-  match, `--compare`, and `--recompute` to rerun the event stages on a run's frames without
-  the GPU), `parity.py` is the Pomona gate, `compare_eval_logs.py` sets two evaluator logs
-  side by side, `track_breaks.py` buckets a pipeline run's misses by cause and
-  `replay_selector.py` reruns the selector on the CPU over a pipeline run's recorded
-  detections and scores it (the chain, every track, or the detector alone), the tool a
-  selector change is measured with before a GPU run; `audit/records/selector_robustness_2026-10.md`
-  is the ledger of the selector changes.
-  `validate.py` and `parity.py` run as modules from the root (`python -m evaluation.validate`,
-  `python -m evaluation.parity`); `evaluate_archive.py`, `score_court_events.py` and
-  `track_breaks.py` at the root are thin entry points to the workspace scorers.
+- `finetune/scoring/`: the scorers over the workspace labels. `archive.py` scores the
+  detector or the pipeline on workspace clips with `finetune/data/detector_metrics.py`
+  (`pipeline_score.py` scores one pipeline run's clip; raw mode also prints a `macro`
+  per-clip-mean line, one `source=<name>` line per source, the count beside each
+  false-alarm rate and, with `--cell-histogram`, recall by position within the grid cell;
+  `--window-step` scores either prepass of `Config.gridtracknet_window_step`),
+  `court_events_score.py` scores a `--court` pipeline run's landings against the landing
+  labels (tiers, a 0.1 s match, `--compare`, and `--recompute` to rerun the event stages on
+  a run's frames without the GPU), `compare_eval_logs.py` sets two evaluator logs side by
+  side, `track_breaks.py` buckets a pipeline run's misses by cause and `replay_selector.py`
+  reruns the selector on the CPU over a pipeline run's recorded detections and scores it
+  (the chain, every track, or the detector alone), the tool a selector change is measured
+  with before a GPU run; `audit/records/selector_robustness_2026-10.md` is the ledger of
+  the selector changes. The root
+  `evaluate_archive.py`, `score_court_events.py` and `track_breaks.py` are thin entry points
+  to `archive`, `court_events_score` and `track_breaks`; the rest run as
+  `python -m finetune.scoring.<module>`.
 
 ## Environment and commands
 
-Run commands from the repository root. The verified local interpreter is
+Run commands from the repository root, except the tracker's own gate and suite,
+which run from `system/` as they do on `main`. The verified local interpreter is
 `C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe`. Plain `python` currently
 resolves to a different Python installation. Other machines should use their own
 environment, not copy this user-specific path into application code.
 
-Runtime dependencies include CUDA PyTorch, NumPy, OpenCV and TensorRT;
-BoxMOT supplies player tracking. FilterPy is not one: the selector's Kalman filter
-is NumPy (`ball_in_play_selector/physics.py`), and `tests/test_ball_kalman.py` only
-compares against FilterPy when it is installed. pip's `opencv-python` serves the
-tracker, but the label tool needs conda-forge's Qt build of OpenCV (see
-`requirements.txt`). CatBoost is needed for `--court`. Ultralytics is
-used by engine export. FFmpeg/NVENC can accelerate rendering. Versions and model/
-source hashes for the review are in `audit/records/snapshot.json`. There is no complete
-locked installation manifest. TensorRT engines may be GPU/version specific.
+The tracker's dependencies are in `system/AGENTS.md`. The label tool also needs
+conda-forge's Qt build of OpenCV (`requirements.txt`, the workspace's superset of
+`system/requirements.txt`).
 
 ```powershell
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m pytest -q
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --self-test
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' system/clean_tracker.py --self-test
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' finetune/train_gridtracknet.py --self-test
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --no-video --tracking-json output/new_review_tracking.json
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --court --no-video --tracking-json output/new_review_court_events.json
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' system/clean_tracker.py --no-video --tracking-json output/new_review_tracking.json
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode raw --clips video13
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.parity
+cd system; & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.parity
 ```
 
-`python -m pytest -q` (pytest required) runs every test: all suites live in
-`tests/` (`pytest.ini` sets `testpaths` and puts the root on the import path),
-use synthetic inputs only and need no GPU. `clean_tracker.py --self-test` runs
-the selector, court-event, ROI and GridTrackNet modules from `tests/` through
-pytest; `train_gridtracknet.py --self-test` is also run by
-`tests/test_train_gridtracknet.py`. Put new tests in `tests/` as plain pytest
-functions (fixtures and `parametrize`, not `unittest.TestCase`), shared synthetic
-fixtures in `tests/_helpers.py`. `audit/` keeps the review's reports and
-verification scripts; `audit/records/` holds their logs and results, and
-`audit/records/review_checks_2026-09.py.txt` is the September 2026 defect
-reproduction script, kept as text: it no longer runs.
+`python -m pytest -q` at the root (pytest required) runs every test: the workspace
+suites in `tests/` and the tracker's in `system/tests/` (the root `pytest.ini` names
+both and puts the root and `system/` on the import path); `cd system; python -m pytest -q`
+runs the tracker's alone, as on `main`. All use synthetic inputs only and need no GPU.
+Root `tests/` is not a package: `system/tests` is the package `tests`, so a workspace
+suite imports the tracker's helpers as `tests._helpers` and the workspace's own
+(the headless label tool, the trainer probes) from `_workspace_helpers`, and
+`system/tests/conftest.py`'s fixtures (`fake_cuda`) reach only the tracker's suites.
+Put new workspace tests in `tests/` as plain pytest functions (fixtures and
+`parametrize`, not `unittest.TestCase`). `train_gridtracknet.py --self-test` is also
+run by `tests/test_train_gridtracknet.py`.
 
 Always specify `--archive finetune` for workspace evaluation: the evaluator can
 otherwise prefer a separate Desktop archive. Use distinct output paths for new
-runs. `python -m evaluation.parity` verifies a frozen Pomona benchmark; the September 7, 2026
-worktree fails several of its gates. Do not silently refresh that baseline to
-make a change pass.
+runs. `python -m evaluation.parity` verifies a frozen Pomona benchmark; do not
+silently refresh that baseline to make a change pass.
 
 ## Label review status - October 25, 2026
 
@@ -244,32 +204,19 @@ frame indices, and a top-right sentinel for invisible balls. Labels on 60 FPS
 clips may use either odd or even phase. Missing labels are not absent-ball
 labels. Reviewed, edited and suspect flags live in sidecar JSON files.
 
-Preserve hand edits, phase, source mapping and backups. The worktree already had
-uncommitted edits to training/labeling tools, labels, manifests and Config before
-this review. Do not revert those or promote/retrain weights as incidental cleanup.
-`clips.csv` notes, `exclude.txt` and review sidecars convey different things:
-passing the format checker does not establish annotation correctness.
+Preserve hand edits, phase, source mapping and backups. Do not revert uncommitted
+edits to the training/labeling tools, labels or manifests, or promote/retrain
+weights, as incidental cleanup. `clips.csv` notes, `exclude.txt` and review sidecars
+convey different things: passing the format checker does not establish annotation
+correctness.
 
 Labels clicked in the label tool before commit 307f632 (2026-10-18) sat about half a
 pixel up-left of the ball; commit 8c36b5e moved them back (backups:
 `<csv>.before_halfpixel_fix`). Do not apply that correction again.
 
-Keep RGB detector inputs unchanged unless an experiment explicitly changes the
-model contract. Keep observations distinguishable from fitted positions. Short
-unsupported gaps should remain absent. Physics is presently an image-space
-prior; do not present its extrapolations as measured 3D positions or speeds.
-
-See `audit/PROJECT_REVIEW.md` before modifying evaluation, prepass publication,
-label frame identity, realignment pins, motion masks or physics.
-`audit/records/review_checks_2026-09.py.txt` records how the September 2026
-defects were reproduced; its pointer to `tests/test_fixes.py` is out of date: the
-tests that assert the fixes live next to each module's tests
-(`tests/test_<module>.py`). Convert relevant checks to desired-behavior
-regression tests when making fixes. The user has now authorized
-fixing the reviewed defects and running validation. Architecture experiments
-remain separate from the correctness fixes; do not promote a model implicitly.
-
-The disabled manual perspective scaling, homography gravity, color gate,
-flicker suppression and raw-component experiments were subsequently removed.
-Keep automatic FPS/resolution normalization and supported debug outputs.
-See `audit/CLEANUP_RESULTS.md` for rationale and measured output differences.
+See `system/audit/PROJECT_REVIEW.md` before modifying evaluation, prepass publication,
+label frame identity, realignment pins, motion masks or physics. The user has
+authorized fixing the reviewed defects and running validation; convert relevant
+checks to desired-behavior regression tests next to each module's tests. Architecture
+experiments remain separate from the correctness fixes; do not promote a model
+implicitly.

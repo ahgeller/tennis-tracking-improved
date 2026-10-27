@@ -91,7 +91,7 @@ Without the script, one run by hand:
 $env:TENNIS_WORKSPACE = 'C:\Users\Andrew\Desktop\clean_version_gridtracknet_restart\finetune'
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' finetune/train_gridtracknet.py --holdout mixed_v1 --epochs 10 --seed 7 --augment basic translate --run-dir output/R1/train --save output/R1/winner.npz
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode raw --holdout mixed_v1 --cell-histogram --gridtracknet-weights output/R1/train/best.npz
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluation/compare_eval_logs.py output/R0/eval_best.log output/R1/eval_best.log
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' finetune/scoring/compare_eval_logs.py output/R0/eval_best.log output/R1/eval_best.log
 ```
 
 For the scratch retrain the same protocol applies with `--from-scratch` and many more epochs

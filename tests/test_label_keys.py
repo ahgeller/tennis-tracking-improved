@@ -7,7 +7,7 @@ from finetune.labeling import label_window as win
 from finetune.labeling.label_keys import KeyHandler
 from finetune.labeling.label_tool import Tool
 from finetune.labeling.label_window import KEYS_NEXT, KEYS_PREV
-from tests._helpers import fake_source, fake_tool
+from _workspace_helpers import fake_source, fake_tool
 
 
 def tool_over():

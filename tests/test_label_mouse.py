@@ -5,7 +5,7 @@ from unittest.mock import patch
 import cv2
 
 from finetune.labeling.label_mouse import MouseHandler
-from tests._helpers import fake_source, fake_tool
+from _workspace_helpers import fake_source, fake_tool
 
 
 def shown_tool():

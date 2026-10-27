@@ -1,8 +1,7 @@
 """Validate exported tennis tracking JSON against hand-labeled frames.
 
 Errors are native pixels and the summary's numbers are what the parity gate (``evaluation.parity``)
-freezes, so this scorer stays as it is; the detector metric lives in ``finetune.data.detector_metrics``.
-Run as ``python -m evaluation.validate``.
+freezes, so this scorer stays as it is. Run as ``python -m evaluation.validate``.
 """
 
 from __future__ import annotations

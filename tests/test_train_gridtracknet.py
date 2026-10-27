@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from finetune.training import train_gridtracknet as training
+from finetune.data import workspace as ws
 from finetune.data.detector_metrics import DetectorMetrics
 from finetune.data.labels import write_labels
 from finetune.training.clips import ClipSelection, find_clips
@@ -27,7 +28,8 @@ from finetune.training.metrics import promotion_improves
 from tennis_tracker.ball_models import model_class
 from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
 from tennis_tracker.heatmapnet import save_model
-from tests._helpers import blank_template, metric_probe, write_clip
+from _workspace_helpers import blank_template, metric_probe
+from tests._helpers import write_clip
 
 SIZE = (64, 36)
 
@@ -37,6 +39,16 @@ def pt_record(path: Path, arch: str = "heatmap_s4") -> Path:
     architecture off the record, so a .pt the tests name must exist."""
     save_model(model_class(arch)(), path)
     return path
+
+
+@pytest.fixture
+def tracker_weights(workspace_dir) -> Path:
+    """The trainer's default --weights (the tracker's, ``Workspace.repo_weights``) as a fresh
+    heatmap_s4 record in the ``workspace_dir`` workspace: the real weights are not in the
+    repository, and a test that leaves --weights out needs only their architecture."""
+    path = ws.current().repo_weights
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return pt_record(path)
 
 
 def test_training_self_test_passes():
@@ -119,6 +131,7 @@ def test_train_fine_tunes_a_heatmap_winner_from_its_pt(tmp_path, capsys):
     assert config["arch"] == "heatmap_s4" and "chain" not in config
 
 
+@pytest.mark.usefixtures("tracker_weights")
 def test_resolve_arch_defaults_inherits_and_corrects_the_save_suffix(tmp_path, capsys):
     """No --arch: the architecture of --weights (the tracker's heatmap_s4 by default, gridtracknet
     for an .npz), or the selection run's; one that contradicts the selection run is refused;
@@ -234,6 +247,7 @@ def test_a_heatmap_run_writes_every_file_with_the_pt_suffix(tmp_path, capsys):
     assert "[eval] best.pt (epoch 1) on ['video10']" in capsys.readouterr().out and args.save.is_file()
 
 
+@pytest.mark.usefixtures("tracker_weights")
 def test_main_reports_a_run_that_cannot_start_as_status_1(tmp_path, capsys):
     """No clips, or an option the clips cannot satisfy: one line on stderr and exit status 1, the
     same as the other scripts' setup errors, before any cache or run folder is written."""
@@ -888,6 +902,7 @@ def test_a_checkpoint_from_elsewhere_is_refused_in_one_line(tmp_path):
         training.read_checkpoint(tmp_path / "checkpoint.pt", model, None, None)
 
 
+@pytest.mark.usefixtures("tracker_weights")
 def test_resume_needs_a_checkpoint_and_the_run_it_belongs_to(tmp_path, capsys):
     """--resume on a folder without checkpoint.pt, or with one from a run of other options, is a
     one-line error naming what is missing or which config.json field differs, before any cache
@@ -917,6 +932,7 @@ def test_resume_needs_a_checkpoint_and_the_run_it_belongs_to(tmp_path, capsys):
         training.read_checkpoint(run_dir / "checkpoint.pt", fresh_model(torch.device("cpu")), None, None)
 
 
+@pytest.mark.usefixtures("tracker_weights")
 def test_resume_through_main_keeps_the_run_and_raises_its_epochs(tmp_path, capsys):
     """The whole trainer on two tiny clips, CPU, one step per epoch, the CUDA-only scoring stubbed:
     one epoch, then --resume with --epochs 2 continues the same run (results.csv rows 1 and 2,
@@ -998,6 +1014,7 @@ def test_same_run_reads_the_learning_rate_through_the_schedule():
     assert training.run_config(training.build_parser().parse_args([]), [], [], {})["lr_schedule"] == [{"epoch": 1, "lr": 1.0}]
 
 
+@pytest.mark.usefixtures("tracker_weights")
 def test_lr_drop_through_main_records_the_schedule_and_the_lowered_rate_resumes_plainly(tmp_path, capsys):
     """The whole trainer on two tiny clips: one epoch at lr 1.0, then --resume --lr-drop --lr 0.1
     carries on at 0.1 (the checkpoint's param group says so, Adadelta's accumulators are kept) and

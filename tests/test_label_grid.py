@@ -6,7 +6,7 @@ import pytest
 
 from finetune.labeling.label_grid import GRID_SIZES
 from finetune.labeling.label_window import KEYS_CONFIRM
-from tests._helpers import fake_source as source, fake_tool as tool_over
+from _workspace_helpers import fake_source as source, fake_tool as tool_over
 
 
 # --------------------------------------------------------------------------- the grid's rows

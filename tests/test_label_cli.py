@@ -8,7 +8,7 @@ import pytest
 from finetune.labeling import label_cli
 from finetune.labeling.label_cli import announce, apply_settings, build_parser, open_sources, qt_backend, starting_cursor
 from finetune.labeling.label_draw import FILTERS
-from tests._helpers import fake_source, fake_tool
+from _workspace_helpers import fake_source, fake_tool
 
 
 def source(clip, count=4, cursor=0, flagged=0):

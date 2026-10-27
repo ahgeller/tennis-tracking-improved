@@ -1,4 +1,4 @@
-"""evaluation.court_events_score (score_court_events.py): the landing tiers, the matcher, the
+"""finetune.scoring.court_events_score (score_court_events.py): the landing tiers, the matcher, the
 scores and their lines, the recompute from a tracking JSON, and the command end to end on a
 temporary archive. No GPU, no real archive."""
 import json
@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from ball_in_play_selector.core import frame_result
-from evaluation import court_events_score as scorer
-from evaluation.court_events_score import (
+from finetune.scoring import court_events_score as scorer
+from finetune.scoring.court_events_score import (
     ALL, compare, format_line, landings_at_tier, match_landings, pooled, read_scores, scene_from_payload, score_clip,
 )
 from finetune.data.bounce_labels import BounceLabel

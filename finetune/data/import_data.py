@@ -40,6 +40,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import finetune  # noqa: F401,E402  (which puts system/ on sys.path)
 
 from finetune.data.fileio import copy_atomic
 from finetune.data.labels import read_label_rows, write_labels

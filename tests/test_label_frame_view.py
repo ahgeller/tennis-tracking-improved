@@ -4,7 +4,7 @@ inset does. Frames are blank arrays."""
 import numpy as np
 
 from finetune.labeling.label_frame_view import INSET_SHARE, THUMBNAILS_KEPT
-from tests._helpers import fake_source, fake_tool
+from _workspace_helpers import fake_source, fake_tool
 
 WIDTH, HEIGHT = 640, 360
 

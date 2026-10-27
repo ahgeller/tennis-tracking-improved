@@ -1,6 +1,6 @@
 """Which clips may be trained on, validated on or scored: read from explicit records, never
 inferred from a clip's source or file name alone. The trainer (``finetune.training.clips``),
-the evaluator (``evaluation.archive``, ``ft.py eval``) and the status listings all ask here, so
+the evaluator (``finetune.scoring.archive``, ``ft.py eval``) and the status listings all ask here, so
 one clip is admitted or kept out by the same rule everywhere.
 
 Three records say different things. ``review_status.json`` (``verified_clips`` and

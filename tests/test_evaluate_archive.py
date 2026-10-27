@@ -1,11 +1,11 @@
-"""evaluation.archive (evaluate_archive.py) helpers on synthetic inputs: no GPU, no real archive, never finetune/labels."""
+"""finetune.scoring.archive (evaluate_archive.py) helpers on synthetic inputs: no GPU, no real archive, never finetune/labels."""
 import json
 from pathlib import Path
 
 import pytest
 
-from evaluation.archive import list_clips
-from evaluation.pipeline_score import (ClipScore, LINE_PX, _inside_player, _near_court_line, _segment_distance,
+from finetune.scoring.archive import list_clips
+from finetune.scoring.pipeline_score import (ClipScore, LINE_PX, _inside_player, _near_court_line, _segment_distance,
                                        score_pipeline_clip)
 
 
@@ -68,7 +68,7 @@ def test_pipeline_mode_forwards_the_court_flag_the_weights_and_the_window_step_t
     ``--window-step`` as ``window_step`` (None without it: the Config default), so a new detector
     and either prepass are judged through the pipeline too; the tracker itself is replaced by a
     run that finds nothing."""
-    from evaluation import archive
+    from finetune.scoring import archive
     from tennis_tracker import headless
     from tennis_tracker.export import RunResult
     from tests._helpers import write_clip
@@ -183,7 +183,7 @@ def test_score_pipeline_clip_takes_the_court_as_last_seen_when_the_payload_does_
 
 
 def test_report_raw_pools_pairs_at_1080p_and_measures_the_hit_offset(capsys):
-    from evaluation.archive import PER_CLIP_CONF, LabelledDetection, RawClip, _hit_offset, _pooled_pairs, report_raw
+    from finetune.scoring.archive import PER_CLIP_CONF, LabelledDetection, RawClip, _hit_offset, _pooled_pairs, report_raw
     from finetune.data.detector_metrics import HIT_PX
     rows = [LabelledDetection((100.0, 100.0), (101.0, 102.0), 0.9),          # a hit, 1 right and 2 down
             LabelledDetection((100.0, 100.0), (100.0, 100.0), 0.3),          # too faint at the per-clip threshold
@@ -209,7 +209,7 @@ def _raw_clip(name, width, height, hits, misses, invisible, alarms, offset=(0.0,
     """A RawClip of `hits` labels the detector hit (at `offset` from the label, in native px),
     `misses` it missed, and `invisible` labels of which it fired on `alarms`, laid along a
     diagonal so every label sits in a different grid cell position."""
-    from evaluation.archive import LabelledDetection, RawClip
+    from finetune.scoring.archive import LabelledDetection, RawClip
     rows = []
     for index in range(hits + misses):
         label = (20.0 + index * 7.3, 15.0 + index * 5.1)
@@ -224,8 +224,8 @@ def test_report_raw_adds_a_macro_line_and_one_line_per_source(capsys):
     """The pooled line lets a long clip outvote a short one and a source with few invisible labels
     hide a false-alarm problem; the macro line weighs every clip the same, the source lines pool
     within one source, and every false-alarm rate carries the count it is made of."""
-    from evaluation.archive import macro_metrics, report_raw
-    from evaluation.compare_eval_logs import read_scores
+    from finetune.scoring.archive import macro_metrics, report_raw
+    from finetune.scoring.compare_eval_logs import read_scores
     long_prof = _raw_clip("video13", 1280, 720, hits=90, misses=10, invisible=20, alarms=1)        # recall 0.9, fa 0.05
     short_own = _raw_clip("video1", 1920, 1080, hits=5, misses=5, invisible=0, alarms=0)           # recall 0.5, no invisible
     grid = _raw_clip("grid_match8", 1920, 1080, hits=20, misses=0, invisible=4, alarms=2)          # recall 1.0, fa 0.5
@@ -256,7 +256,7 @@ def test_report_raw_adds_a_macro_line_and_one_line_per_source(capsys):
 def test_cell_histogram_bins_recall_by_position_within_the_grid_cell(capsys):
     """A label's place within its 48x27 cell decides the bin: at 1920x1080 a cell is 40 px wide,
     so x=20 sits mid-cell (fraction 0.5) and x=41 just inside the next one (0.025)."""
-    from evaluation.archive import CELL_BINS, LabelledDetection, RawClip, cell_histogram, report_raw
+    from finetune.scoring.archive import CELL_BINS, LabelledDetection, RawClip, cell_histogram, report_raw
     rows = [LabelledDetection((20.0, 20.0), (20.0, 20.0), 0.9),             # x 0.5, y 0.5: both middle bins, a hit
             LabelledDetection((41.0, 20.0), None, 0.0),                     # x 0.025: first bin, a miss
             LabelledDetection((79.0, 61.0), (79.0, 61.0), 0.9),             # x 0.975: last bin; y 1.525 -> 0.525

@@ -10,10 +10,9 @@ from unittest.mock import patch
 
 import pytest
 
-from finetune import ft, menu
+from finetune import REPOSITORY, ft, menu
 from finetune.data import workspace
 from finetune.data.labels import write_labels
-from tennis_tracker.paths import ROOT
 from tests._helpers import write_clip
 
 SIZE = (64, 36)
@@ -38,7 +37,7 @@ print("light")
 def test_ft_imports_without_cv2_numpy_or_torch():
     """ensure_interpreter can only hand over to an interpreter that has them if ft.py (and every
     module it imports at the top) loads without them."""
-    done = subprocess.run([sys.executable, "-c", BLOCKED_IMPORT], cwd=ROOT, capture_output=True, text=True)
+    done = subprocess.run([sys.executable, "-c", BLOCKED_IMPORT], cwd=REPOSITORY, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == "light"
 
@@ -147,7 +146,7 @@ def test_commands_hand_their_arguments_to_the_right_script(workspace_dir):
                             ("data/import_data.py", ["all"]), ("refiner/hints.py", ["list"]),
                             ("training/pretrack.py", ["--clips", "x"])]
     module, arguments = launched[4]
-    assert module == "evaluation.archive"
+    assert module == "finetune.scoring.archive"
     assert arguments[:6] == ["--mode", "raw", "--models", "gridtracknet", "--archive", str(workspace.current().root)]
     assert arguments[6:] == ["--gridtracknet-weights", str(Path("w.npz").resolve()), "--clips", "video13"]
     assert launched[5] == ("labeling/label_tool.py", ["video10", "video11", "--zoom", "3.0"])
@@ -250,11 +249,11 @@ def test_scripts_run_from_the_package_folder_and_modules_from_the_root():
     ran = []
     with patch.object(ft, "wait_child", lambda command, **kwargs: ran.append((command, kwargs)) or 0):
         ft.run_script("training/pretrack.py", ["--clips", "a"])
-        ft.run_module("evaluation.archive", ["--help"])
+        ft.run_module("finetune.scoring.archive", ["--help"])
     assert ran[0][0] == [sys.executable, str(ft.SCRIPTS / "training" / "pretrack.py"), "--clips", "a"]
-    assert ran[1][0] == [sys.executable, "-m", "evaluation.archive", "--help"]
-    assert all(kwargs == {"cwd": str(ft.ROOT)} for _, kwargs in ran)
-    assert ft.SCRIPTS == ROOT / "finetune"
+    assert ran[1][0] == [sys.executable, "-m", "finetune.scoring.archive", "--help"]
+    assert all(kwargs == {"cwd": str(REPOSITORY)} for _, kwargs in ran)
+    assert ft.SCRIPTS == REPOSITORY / "finetune"
 
 
 def test_menu_dispatches_a_number_or_a_name_and_quits(workspace_dir, capsys):

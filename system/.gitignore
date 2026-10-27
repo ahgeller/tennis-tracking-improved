@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+output/
+AiFolder/
+.venv/
+models/*finetuned*.npz
+models/legacy/gridtracknet_upstream.npz
+
+models/*_prev_*.npz
+models/*.before_promote_*
+
+# Local source media; the already tracked sample stays tracked.
+/sample/*.mp4
+.desloppify/
+scorecard.png
+.claude/worktrees/
+.claude/skills/desloppify/
+
+# model weights are proprietary: kept locally, never committed
+/models/*
+!/models/README.md
+*.pt
+*.pth
+*.npz
+*.engine
+*.onnx
+*.cbm
+

@@ -1,7 +1,7 @@
 """Replay the ball selector on the CPU over the detections a pipeline run recorded, and score it.
 
-    python -m evaluation.replay_selector output/ctrl_eval/pipeline --archive finetune
-    python -m evaluation.replay_selector output/ctrl_eval/pipeline --variant chain union raw control
+    python -m finetune.scoring.replay_selector output/ctrl_eval/pipeline --archive finetune
+    python -m finetune.scoring.replay_selector output/ctrl_eval/pipeline --variant chain union raw control
 
 The tracking JSON of a ``evaluate_archive.py --mode pipeline`` run holds, in its ``tracks``, every
 detection the selector saw (each at or above the run's detector threshold, with the motion-mask
@@ -47,12 +47,12 @@ from ball_in_play_selector import Detection, FrameResult, SelectorConfig, Track,
 from ball_in_play_selector import core
 from ball_in_play_selector.association import build_tracks
 from ball_in_play_selector.core import frame_result
-from evaluation.archive import archive_folders, default_archive, fmt
-from evaluation.pipeline_score import ClipScore, score_pipeline_clip
 from finetune.data.data_policy import clip_source
 from finetune.data.detector_metrics import DetectorMetrics
 from finetune.data.labels import Labels, read_labels
 from finetune.data.workspace import MANIFEST_NAME, natural_key, read_manifest
+from finetune.scoring.archive import archive_folders, default_archive, fmt
+from finetune.scoring.pipeline_score import ClipScore, score_pipeline_clip
 from tennis_tracker.court.court_geometry import build_court_polygon
 from tennis_tracker.export import frame_result_to_json, track_to_json
 from tennis_tracker.tracking_schema import FrameRow, TrackingJson

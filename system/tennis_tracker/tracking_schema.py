@@ -1,7 +1,6 @@
 """The tracking JSON's shape.  ``export.write_tracking_json`` writes a ``TrackingJson``; the
-scorers (``evaluation.validate``, ``evaluation.pipeline_score``) and ``finetune.training.pretrack``
-read its ``frames`` table of ``FrameRow``s, and ``evaluation.court_events_score`` its
-``court_events`` block.  Keys are listed in the order they are written.
+scorers (``evaluation.validate`` here, the workspace scorers on the ``train`` branch) read its
+``frames`` table of ``FrameRow``s and its ``court_events`` block.  Keys are listed in the order they are written.
 
 Only ``typing`` is imported, so a reader can use these types at runtime without loading the
 tracker's OpenCV, CUDA and TensorRT stack.

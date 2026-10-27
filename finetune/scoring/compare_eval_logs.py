@@ -1,6 +1,6 @@
 """Set two ``evaluate_archive.py`` logs side by side, clip by clip.
 
-    python evaluation/compare_eval_logs.py output/baseline/pipeline.log output/fix/pipeline.log
+    python finetune/scoring/compare_eval_logs.py output/baseline/pipeline.log output/fix/pipeline.log
 
 Both logs may be raw or pipeline mode; each ``name vis=... recall=... | ... | med=...px p90=...px``
 line the evaluator prints is read (with or without the counts beside the false-alarm rate, and

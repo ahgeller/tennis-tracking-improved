@@ -1,0 +1,35 @@
+# Runtime packages imported by the tracker and the tests.
+#
+# Pinned versions are the ones the October 2026 review ran with on Python
+# 3.10.19 / Windows / RTX 5080 (audit/records/snapshot.json, "versions").
+# Packages the snapshot does not record are left unpinned. This is not a complete lock file:
+# transitive dependencies are not pinned.
+#
+# Not installable from PyPI defaults:
+#   - torch must be a CUDA build; the review used 2.10.0+cu128. Install it from
+#     the PyTorch index for your CUDA version first, e.g.
+#       pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+#   - FFmpeg (optional, faster NVENC/libx264 rendering) is an external binary.
+#   - The tracker and evaluation only need cv2 itself, so pip's opencv-python is enough.
+#     (The label tool on the train branch needs conda-forge's Qt build instead.)
+
+# --- Required ------------------------------------------------------------------
+torch==2.10.0             # CUDA build; GridTrackNet inference, CUDA motion masks
+numpy==1.26.4
+opencv-python==4.9.0.*    # tracker and evaluation
+# TensorRT engines (models/*.engine) are specific to the GPU and TensorRT
+# version that built them; rebuild with `python -m tennis_tracker.engines.build_engines` after upgrading.
+tensorrt==10.15.1.29      # player and court engine backends
+boxmot==16.0.11           # ByteTrack player tracking; required whenever a player engine is configured
+
+# --- Optional, used only by some features -------------------------------------
+catboost==1.2.10          # --court: bounce model models/ctb_regr_bounce.cbm
+scipy                     # smoothed raw-motion trails in the motion-debug video
+psutil                    # sizes the automatic pass-2 frame cache (without it that cache is off)
+
+# --- Tools, install when needed -------------------------------------------------
+# ultralytics==8.4.51     # tennis_tracker.engines.build_engines: YOLO .pt -> ONNX export only
+# pytest                  # python -m pytest -q and clean_tracker.py --self-test
+# filterpy                # not a dependency: the selector's Kalman filter is NumPy
+#                         # (ball_in_play_selector/physics.py); tests/test_ball_kalman.py
+#                         # only compares against it when it happens to be installed

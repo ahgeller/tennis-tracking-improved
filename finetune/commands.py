@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
+from finetune import REPOSITORY
 from finetune.data.data_policy import OWN_SOURCES, clip_source
 from finetune.data.fileio import backup_copy, copy_atomic
 from finetune.data.label_audit import audit_labels
@@ -23,7 +24,6 @@ from finetune.data.detector_metrics import REFERENCE_HEIGHT, REFERENCE_WIDTH
 from finetune.data import workspace as ws
 from finetune.data.workspace import (DEFAULT_SOURCES, clip_of, draft_files, label_files, natural_key, read_exclusions,
                                      read_manifest, review_json, video_meta, videos_in, write_manifest)
-from tennis_tracker.paths import ROOT
 
 LISTED_CLIPS = 12                  # how many clip names status prints before "..."
 
@@ -114,7 +114,7 @@ def print_source_table(finals: Dict[str, Path], manifest: Dict[str, dict], video
 def shown(path: Path) -> str:
     """A path as status prints it: relative to the repository when it is inside it."""
     try:
-        return str(path.relative_to(ROOT))
+        return str(path.relative_to(REPOSITORY))
     except ValueError:
         return str(path)
 
@@ -242,7 +242,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
     if source.suffix != layout.repo_weights.suffix:
         print(f"{source.name} is a {source.suffix} file; the tracker reads the architecture off the suffix of "
               f"{layout.repo_weights.name}, so only a {layout.repo_weights.suffix} winner can be promoted "
-              f"(the other network runs with clean_tracker.py --weights {source})")
+              f"(the other network runs with system/clean_tracker.py --weights {source})")
         return 1
     if layout.repo_weights.is_file():
         if sha8(source) == sha8(layout.repo_weights):
@@ -253,7 +253,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
     copy_atomic(source, layout.repo_weights)
     print(f"[promote] {source} -> {layout.repo_weights}")
     print("next: python finetune/ft.py eval      (the reviewed clips)\n"
-          "      python -m evaluation.parity     (the Pomona gate; a new model may legitimately move its numbers)")
+          "      python -m evaluation.parity     (in system/: the Pomona gate; a new model may legitimately move its numbers)")
     return 0
 
 
@@ -348,7 +348,7 @@ def cmd_paths(args: argparse.Namespace) -> None:
     """Print the interpreter, workspace and data source paths (a listing: no exit status)."""
     print(f"python     {sys.executable}")
     print(f"workspace  {ws.current().root}")
-    print(f"repo       {ROOT}")
+    print(f"repo       {REPOSITORY}")
     print(f"weights    {ws.current().repo_weights}")
     for name, path in DEFAULT_SOURCES.items():
         print(f"source {name:11s} {'ok ' if path.exists() else 'MISSING'} {path}")

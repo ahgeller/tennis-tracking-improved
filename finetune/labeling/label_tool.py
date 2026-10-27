@@ -28,6 +28,7 @@ import numpy as np
 
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import finetune  # noqa: F401,E402  (which puts system/ on sys.path)
 
 from finetune.data.bounce_labels import between_frames
 from finetune.labeling import label_window as win

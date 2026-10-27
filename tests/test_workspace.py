@@ -7,12 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from finetune import REPOSITORY
 from finetune.data import workspace
 from finetune.data.workspace import (MANIFEST_COLUMNS, add_exclusion, clip_of, draft_csv, draft_files, find_video,
                                      label_csv, label_files, labelled_clips, natural_key, read_exclusions, read_manifest,
                                      recording_of, require_video, review_json, suspect_json, unsaved_csv, videos_in,
                                      write_manifest)
-from tennis_tracker.paths import ROOT
+from tennis_tracker.paths import BALL_WEIGHTS
 
 
 
@@ -107,13 +108,13 @@ def test_tennis_workspace_relocates_the_workspace_without_touching_the_code_path
     env = dict(os.environ, TENNIS_WORKSPACE=str(tmp_path))
     code = ("from finetune.data import workspace as w; "
             "layout = w.current(); print(layout.root); print(layout.labels); print(layout.manifest); print(layout.repo_weights)")
-    out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, check=True)
+    out = subprocess.run([sys.executable, "-c", code], cwd=REPOSITORY, env=env, capture_output=True, text=True, check=True)
     lines = out.stdout.splitlines()
     assert lines[:3] == [str(tmp_path.resolve()), str(tmp_path.resolve() / "labels"), str(tmp_path.resolve() / "clips.csv")]
-    assert lines[3] == str(ROOT / "models" / "ball_detector.pt")
+    assert lines[3] == str(BALL_WEIGHTS)
     env.pop("TENNIS_WORKSPACE")
-    out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, check=True)
-    assert out.stdout.splitlines()[0] == str(ROOT / "finetune")
+    out = subprocess.run([sys.executable, "-c", code], cwd=REPOSITORY, env=env, capture_output=True, text=True, check=True)
+    assert out.stdout.splitlines()[0] == str(REPOSITORY / "finetune")
 
 
 def test_tennis_workspace_reaches_the_label_tool_and_pretrack(tmp_path):
@@ -125,7 +126,7 @@ def test_tennis_workspace_reaches_the_label_tool_and_pretrack(tmp_path):
     code = ("from finetune.labeling import label_cli; from finetune.training import pretrack; "
             "args = label_cli.build_parser().parse_args(['clip']); print(args.videos); print(args.labels); "
             f"raise SystemExit(pretrack.main(['--clips', 'clip', '--weights', {str(weights)!r}]))")
-    out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True)
+    out = subprocess.run([sys.executable, "-c", code], cwd=REPOSITORY, env=env, capture_output=True, text=True)
     assert out.returncode == 1, out.stderr                       # no video named clip there: nothing drafted
     videos, labels = tmp_path.resolve() / "videos", tmp_path.resolve() / "labels"
     assert out.stdout.splitlines() == [str(videos), str(labels), f"No videos to track in {videos}"]
@@ -149,7 +150,7 @@ def test_the_layout_is_one_object_and_nothing_else_holds_a_workspace_path(tmp_pa
     monkeypatch.undo()
     monkeypatch.setenv(workspace.WORKSPACE_VARIABLE, str(tmp_path / "elsewhere"))
     assert workspace.current().root == (tmp_path / "elsewhere").resolve()
-    assert workspace.current().repo_weights == ROOT / "models" / "ball_detector.pt"
+    assert workspace.current().repo_weights == BALL_WEIGHTS
     monkeypatch.delenv(workspace.WORKSPACE_VARIABLE)
-    assert workspace.current().root == ROOT / "finetune"
+    assert workspace.current().root == REPOSITORY / "finetune"
 

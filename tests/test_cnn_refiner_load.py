@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tennis_tracker.paths import ROOT
+from finetune import REPOSITORY
 
 torch = pytest.importorskip("torch")
 
@@ -66,7 +66,7 @@ print("light")
 def test_cnn_refiner_loads_without_torch_and_builds_the_module_level_network():
     """The network class is module level in refiner_network, which imports torch; cnn_refiner
     reaches it only in build_network, so the label tool and hints.py list load without torch."""
-    done = subprocess.run([sys.executable, "-c", TORCH_BLOCKED], cwd=ROOT, capture_output=True, text=True)
+    done = subprocess.run([sys.executable, "-c", TORCH_BLOCKED], cwd=REPOSITORY, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == "light"
     with_check, first_design = cnn_refiner.build_network(True), cnn_refiner.build_network(False)

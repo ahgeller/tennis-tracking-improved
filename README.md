@@ -2,8 +2,15 @@
 
 This branch holds everything the tracker on `main` does not need to run: the
 labelling workspace, the trainer, the Colab notebook and the scorers. This
-README is the training playbook. The tracker itself is documented on `main`;
-the workspace commands (import, label, check, audit) are in `finetune/README.md`.
+README is the training playbook; the workspace commands (import, label, check,
+audit) are in `finetune/README.md`.
+
+The tracker itself is `system/`: `main`'s whole tree, byte for byte, documented
+by `system/README.md`. Everything outside it is training and labelling:
+`finetune/` (the workspace, the trainer, the scorers), the root scripts that front
+them, `tests/` (their suites) and `audit/` (their ledgers). Changes to the tracker
+are made in `system/` and ported to `main`, or made on `main` and ported here;
+`AGENTS.md` has the recipe.
 
 Everything below runs in the notebook `finetune/GridTrackNet_FineTune_Colab.ipynb`
 on a Colab GPU (A100 if you can get one) with the data zip on Google Drive. The PC
@@ -110,7 +117,7 @@ score it on the held-out set, per source, against the bundled weights:
 ```powershell
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode raw --holdout mixed_v1 --gridtracknet-weights <best.pt> > output/<TAG>_raw.log
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode raw --holdout mixed_v1 > output/bundled_raw.log
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluation/compare_eval_logs.py output/bundled_raw.log output/<TAG>_raw.log
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' finetune/scoring/compare_eval_logs.py output/bundled_raw.log output/<TAG>_raw.log
 ```
 
 The log has one `source=` line each for custom, prof and grid. The bundled
@@ -122,7 +129,7 @@ more recall at equal or lower false alarm, and the same commands with
 To run the tracker with the new weights on any video:
 
 ```powershell
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py -i <video.mp4> --weights <best.pt>
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' system/clean_tracker.py -i <video.mp4> --weights <best.pt>
 ```
 
 Add `--showtracks` to see what the selector chose from: every selector track is drawn on
@@ -187,22 +194,22 @@ name (`ball_models.arch_of`), and a `config.json` of their day may carry
 
 Two remain, and for each the whole of it is:
 
-- `gridtracknet`: `tennis_tracker/gridtracknet.py` stays (its loader, resize and
-  decoder serve every architecture); its entry in `tennis_tracker/ball_models.py`
+- `gridtracknet`: `system/tennis_tracker/gridtracknet.py` stays (its loader, resize and
+  decoder serve every architecture); its entry in `system/tennis_tracker/ball_models.py`
   (`GRIDTRACKNET` in `ARCHITECTURES`, `MODEL_CLASSES`, `WEIGHTS_SUFFIX`, `_MODULES`,
   the `.npz` branch of `arch_of`), the `GridTrackNet` class and its NPZ `load_model`,
   `gridtracknet_loss` in `finetune/training/loop.py` with the `.npz` branch of
   `save_weights` and the Kaiming branch of `fresh_model`, the one-hot branch of
   `dataset.make_target`, the `.npz` template handling of `--weights` in the trainer
   (`resolve_arch`), the `ARCH` option in the notebook, `ft.py promote`, and
-  `tests/test_gridtracknet.py` with the GridTrackNet cases of the trainer tests.
-- `heatmap_s4`: `tennis_tracker/heatmapnet.py` (the `HeatmapNet` class and the
+  `system/tests/test_gridtracknet.py` with the GridTrackNet cases of the trainer tests.
+- `heatmap_s4`: `system/tennis_tracker/heatmapnet.py` (the `HeatmapNet` class and the
   `.pt` record functions), its entry in `ball_models` (`HEATMAP_S4` in
   `ARCHITECTURES`, `MODEL_CLASSES`, `WEIGHTS_SUFFIX`, `_MODULES`, the record branch
   of `arch_of`), `heatmap_loss` and `HEATMAP_S4` in `loop.LOSSES` with the `.pt`
   branch of `save_weights`, the Gaussian branch of `dataset.make_target`, the
   trainer's `--arch` choice and `HEAT_RECIPE`, the notebook `ARCH` option and its
-  parent-start check, and `tests/test_heatmapnet.py` with the heatmap cases of
+  parent-start check, and `system/tests/test_heatmapnet.py` with the heatmap cases of
   the ball-models, trainer and loop tests.
 
 With one `.pt` architecture left, `read_record` with `arch=None` and `arch_of`'s
@@ -210,13 +217,13 @@ record read stay only so that a stale record is refused by name; if that is not
 wanted, `arch_of` can go back to the suffix alone.
 
 The winner's weights are promoted by copying them over the default path in
-`tennis_tracker/paths.py` (`BALL_WEIGHTS`, `models/ball_detector.pt`, what
+`system/tennis_tracker/paths.py` (`BALL_WEIGHTS`, `system/models/ball_detector.pt`, what
 `Config.model_path` defaults to), which `ft.py promote` does with a backup. On
 2026-10-26 that file became the heat-map control run's winner (ctrl1, the ledger
-has the numbers); the GridTrackNet `.npz` files moved to `models/legacy/`
+has the numbers); the GridTrackNet `.npz` files moved to `system/models/legacy/`
 (`gridtracknet_finetuned.npz`, the previous default, and `gridtracknet_upstream.npz`,
 the export it was fine-tuned from) beside the old YOLO `ball.engine`, and
-`clean_tracker.py --weights` still runs any of them. Record every promotion in
+`system/clean_tracker.py --weights` still runs any of them. Record every promotion in
 `audit/records/gridtracknet_recipe_2026-10.md` with its held-out numbers.
 
 ## Where things are
@@ -225,4 +232,5 @@ the export it was fine-tuned from) beside the old YOLO `ball.engine`, and
 - `finetune/training/train_gridtracknet.py`: the trainer; `--help` lists every flag.
 - `audit/records/gridtracknet_recipe_2026-10.md`: the ledger of runs and what each
   one changed.
-- `AGENTS.md`: the map of the code.
+- `AGENTS.md`: the map of the workspace code, the layout and the port recipe;
+  `system/AGENTS.md`: the map of the tracker's.

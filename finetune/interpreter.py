@@ -12,8 +12,8 @@ import sys
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
+from finetune import REPOSITORY
 from finetune.data.fileio import write_atomic
-from tennis_tracker.paths import ROOT
 
 # cheapest first: cv2 rules out most interpreters fast. Exit 3 means usable for training but with an
 # OpenCV whose windows are not Qt's, which the label tool refuses (see label_tool.highgui_backend).
@@ -30,7 +30,7 @@ def python_names() -> Tuple[str, ...]:
 
 def venv_pythons() -> Iterator[Path]:
     """Where a venv in or beside the repository would keep its interpreter (Windows and POSIX layouts)."""
-    for root in (ROOT, ROOT.parent):
+    for root in (REPOSITORY, REPOSITORY.parent):
         for venv in (".venv", "venv"):
             for name in python_names():
                 yield root / venv / "Scripts" / name

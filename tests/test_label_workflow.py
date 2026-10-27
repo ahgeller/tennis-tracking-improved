@@ -20,7 +20,8 @@ from finetune.labeling.label_sheet import SheetView
 from finetune.labeling.label_store import Row, apply_flags, apply_review, load_rows, save_flags, save_review
 from finetune.labeling.label_tool import Tool
 from finetune.labeling.label_window import KEYS_NEXT, KEYS_PREV
-from tests._helpers import ball_frames, fake_source, fake_tool, write_clip, write_frames
+from _workspace_helpers import fake_source, fake_tool
+from tests._helpers import ball_frames, write_clip, write_frames
 
 
 def source(clip, count=10, width=1280, height=720):

@@ -30,6 +30,7 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import finetune  # noqa: F401,E402  (which puts system/ on sys.path)
 
 from finetune.data import workspace as ws
 from finetune.data.labels import DraftRow, write_draft as write_draft_rows

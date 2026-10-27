@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from finetune.labeling.label_source import Source
-from tests._helpers import Capture, fake_source
+from _workspace_helpers import fake_source
+from tests._helpers import Capture
 
 
 def test_duplicate_video_frames_keep_sequential_identity():

@@ -26,7 +26,7 @@ The same actions exist as commands for scripts and power use:
 | `ft.py camera` | measure camera motion per clip and tag `clips.csv` `fixed` / `moving` (the background channel only learns from fixed) |
 | `ft.py eval` | raw detector recall / wrong / false-alarm on the reviewed clips not in `exclude.txt` (`--clips` narrows; `--all` scores every labelled clip; `--weights`) |
 | `ft.py train ...` | fine-tune or train from scratch; keeps the better of new vs starting weights |
-| `ft.py promote` | make the winner the tracker's model (`models/ball_detector.pt`, old one backed up) |
+| `ft.py promote` | make the winner the tracker's model (`system/models/ball_detector.pt`, old one backed up) |
 | `ft.py paths` | which python, which folders |
 | `ft.py colab-zip` | build `output/tennis_finetune_colab.zip`, the one file the Colab notebook unpacks (videos, labels, records, weights, trainer code) |
 
@@ -219,13 +219,13 @@ separately). `ft.py check` flags files that break this rule.
      everything is ~50k windows, about an hour on the 5080).
    - `--arch` picks the network; without it the run trains the architecture of
      `--weights`, the tracker's model by default. `heatmap_s4` is `HeatmapNet`
-     (`tennis_tracker/heatmapnet.py`), the tracker's network since 2026-10-26: a U-shaped encoder-decoder with skip
+     (`system/tennis_tracker/heatmapnet.py`), the tracker's network since 2026-10-26: a U-shaped encoder-decoder with skip
      connections answering on a 192x108 grid (stride 4) instead of
      GridTrackNet's 48x27, trained on a Gaussian heat target with CenterNet's
      focal loss. It takes the same five frames and answers in the same layout,
      so the tracker runs it the moment `Config.model_path` points at its `.pt`
-     file (`clean_tracker.py --weights runs/<tag>/best.pt`; the suffix is the switch: `.npz` is GridTrackNet, `.pt` is
-     HeatmapNet; `tennis_tracker/ball_models.py`), and the same metric scores
+     file (`system/clean_tracker.py --weights runs/<tag>/best.pt`; the suffix is the switch: `.npz` is GridTrackNet, `.pt` is
+     HeatmapNet; `system/tennis_tracker/ball_models.py`), and the same metric scores
      it (`evaluate_archive.py --gridtracknet-weights best.pt`). A fine-tune
      starts from `--weights`, which must then be the architecture's own file
      (`.pt` here; the `.npz` is refused in one line); a `--from-scratch` run
@@ -309,10 +309,10 @@ separately). `ft.py check` flags files that break this rule.
      follows that run's recipe (`EPOCHS` 0 takes its best epoch).
 
 5. **Use it** - `.\finetune.ps1 promote` copies the winner over
-   `models/ball_detector.pt` (the old file is kept as
+   `system/models/ball_detector.pt` (the old file is kept as
    `*.pt.before_promote_<timestamp>`) - only worth doing when `runs/<tag>/winner.json`
    says the new weights won. Then `.\finetune.ps1 eval` and
-   `python -m evaluation.parity`. Go back to step 1 with `--weights` pointing at
+   `python -m evaluation.parity` (in `system/`). Go back to step 1 with `--weights` pointing at
    the new model. `.\finetune.ps1 status` at any point shows what is
    labelled, what is still a draft, and which model the tracker is using.
 

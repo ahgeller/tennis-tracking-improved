@@ -13,7 +13,10 @@ import tempfile
 
 import pytest
 
+# Run as a script (--record): the repository root, and through finetune system/, whose tests
+# package holds the helpers.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import finetune  # noqa: E402,F401
 
 from tests._helpers import ball_frames, write_frames   # noqa: E402
 

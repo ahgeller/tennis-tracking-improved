@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
+from finetune import REPOSITORY
 from finetune.data.data_policy import clip_source, read_review_status, unscorable_reason
 from finetune.data.detect import ball_detector, detect_points
 from finetune.data.holdouts import holdout_clips
@@ -44,8 +45,8 @@ from finetune.data.detector_metrics import HIT_PX, DetectorMetrics, Point, scale
 from finetune.data import workspace as ws
 from finetune.data.workspace import (HOLDOUTS_NAME, MANIFEST_NAME, clip_of, find_video, natural_key, read_exclusions,
                                      read_manifest, video_meta)
-from evaluation.pipeline_score import ClipScore, score_pipeline_clip
-from tennis_tracker.paths import BALL_WEIGHTS, ROOT
+from finetune.scoring.pipeline_score import ClipScore, score_pipeline_clip
+from tennis_tracker.paths import BALL_WEIGHTS
 
 ARCHIVE_VARIABLE = "TENNIS_ARCHIVE"
 MODELS = {
@@ -346,7 +347,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--thresholds", nargs="+", type=float, default=DEFAULT_THRESHOLDS)
     parser.add_argument("--gridtracknet-conf", type=float, default=0.40)
     parser.add_argument("--device", default="0")
-    parser.add_argument("--out-dir", default=str(ROOT / "output" / "archive_eval"))
+    parser.add_argument("--out-dir", default=str(REPOSITORY / "output" / "archive_eval"))
     parser.add_argument("--archive", default=None,
                         help="Label set: the flat archive folder or a finetune-style folder with videos/ and "
                              f"labels/ (default: ${ARCHIVE_VARIABLE}, else finetune/)")

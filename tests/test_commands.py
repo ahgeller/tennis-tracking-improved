@@ -3,13 +3,13 @@ fixture's empty workspace and synthetic clips: the workspace facts status prints
 command and the camera measurement. promote, check and status themselves run through
 ft.run_cli in test_ft.py."""
 import math
+from pathlib import Path
 
-from finetune import commands
+from finetune import REPOSITORY, commands
 from finetune.commands import (clip_counts, cmd_paths, label_frame_size, label_stats, measure_camera_motion,
                                print_own_camera_clips, print_unfinished_clips, review_progress, sha8, shown)
 from finetune.data import workspace
 from finetune.data.labels import write_labels
-from tennis_tracker.paths import ROOT
 from tests._helpers import write_clip
 
 SIZE = (64, 36)
@@ -69,14 +69,14 @@ def test_sha8_and_shown(tmp_path):
     path = tmp_path / "w.npz"
     path.write_bytes(b"weights")
     assert len(sha8(path)) == 8 and sha8(path) == sha8(path)
-    assert shown(ROOT / "models" / "x.npz") == str(ROOT.joinpath("models", "x.npz").relative_to(ROOT))
+    assert shown(REPOSITORY / "system" / "models" / "x.npz") == str(Path("system", "models", "x.npz"))
     assert shown(tmp_path / "elsewhere") == str(tmp_path / "elsewhere")
 
 
 def test_paths_lists_the_interpreter_workspace_and_sources(workspace_dir, capsys):
     assert cmd_paths(None) is None                                           # a listing: no exit status
     out = capsys.readouterr().out
-    assert f"workspace  {workspace.current().root}" in out and f"repo       {ROOT}" in out
+    assert f"workspace  {workspace.current().root}" in out and f"repo       {REPOSITORY}" in out
     assert all(f"source {name:11s}" in out for name in workspace.DEFAULT_SOURCES)
 
 

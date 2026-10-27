@@ -5,7 +5,7 @@ import cv2
 
 from finetune.labeling.label_sheet import SHEET_ROWS
 from finetune.labeling.label_window import KEY_TAB
-from tests._helpers import fake_source as source, fake_tool as tool_over
+from _workspace_helpers import fake_source as source, fake_tool as tool_over
 
 
 # --------------------------------------------------------------------------- the trajectory sheet

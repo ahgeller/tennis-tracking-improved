@@ -1,11 +1,11 @@
-"""evaluation/replay_selector.py: the selector replayed over a tracking JSON's recorded
+"""finetune/scoring/replay_selector.py: the selector replayed over a tracking JSON's recorded
 detections, on a synthetic run, and scored against labels."""
 import json
 
 import pytest
 
 from ball_in_play_selector import core
-from evaluation.replay_selector import (DEFAULT_VARIANTS, VARIANTS, ReplayScene, main, recorded_detections,
+from finetune.scoring.replay_selector import (DEFAULT_VARIANTS, VARIANTS, ReplayScene, main, recorded_detections,
                                         recorded_rows, replay_variant, report)
 from finetune.data.labels import write_labels
 

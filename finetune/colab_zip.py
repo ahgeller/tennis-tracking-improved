@@ -11,6 +11,9 @@ the outputs). It unpacks a single ``tennis_finetune_colab.zip`` whose entries al
     tennis_finetune/models/ball_detector.pt                  (the tracker's weights: the start)
     tennis_finetune/code/<the trainer's import closure>      (the notebook's REQUIRED list)
 
+``code/`` is laid out as the repository is: ``finetune/`` at its top and the tracker's modules under
+``system/``, which ``finetune/__init__.py`` puts on ``sys.path`` there as it does here.
+
 ``--code-only`` writes ``tennis_finetune_code.zip`` with the records and the code alone; the
 notebook lays it over the big zip's copy when it is on Drive, so a code fix is a small upload.
 
@@ -36,22 +39,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
 
+from finetune import REPOSITORY
 from finetune.data import workspace as ws
 from finetune.data.fileio import replace_file, temporary_for
 from finetune.data.workspace import videos_in
-from tennis_tracker.paths import BALL_WEIGHTS, ROOT
+from tennis_tracker.paths import BALL_WEIGHTS
 
-NOTEBOOK = ROOT / "finetune" / "GridTrackNet_FineTune_Colab.ipynb"
+NOTEBOOK = REPOSITORY / "finetune" / "GridTrackNet_FineTune_Colab.ipynb"
 TOP = "tennis_finetune"                                 # the folder every entry sits under
-DEFAULT_OUT = ROOT / "output" / "tennis_finetune_colab.zip"
-DEFAULT_CODE_OUT = ROOT / "output" / "tennis_finetune_code.zip"      # --code-only: the code and records alone
+DEFAULT_OUT = REPOSITORY / "output" / "tennis_finetune_colab.zip"
+DEFAULT_CODE_OUT = REPOSITORY / "output" / "tennis_finetune_code.zip"      # --code-only: the code and records alone
 REQUIRED_RECORDS = (ws.MANIFEST_NAME, ws.REVIEW_STATUS_NAME)      # missing: the trainer trusts no clip
 OPTIONAL_RECORDS = (ws.HOLDOUTS_NAME, ws.EXCLUDE_NAME)
 
 
 def staged_files() -> List[str]:
     """The REQUIRED list in the notebook's staging cell: the repository files, relative to the
-    root with forward slashes, that the trainer imports on Colab."""
+    repository root (``system/...`` for the tracker's) with forward slashes, that the trainer imports on Colab."""
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     for cell in notebook["cells"]:
         source = "".join(cell["source"])
@@ -109,9 +113,9 @@ def plan_zip(code_only: bool = False) -> ZipPlan:
             raise ColabZipError(f"{layout.repo_weights} is missing; the notebook starts from the tracker's weights")
         plan.add("models", f"models/{BALL_WEIGHTS.name}", layout.repo_weights)
     for name in staged_files():
-        if not (ROOT / name).is_file():
+        if not (REPOSITORY / name).is_file():
             raise ColabZipError(f"{name} is in the notebook's REQUIRED list but not in the repository")
-        plan.add("code", f"code/{name}", ROOT / name)
+        plan.add("code", f"code/{name}", REPOSITORY / name)
     return plan
 
 

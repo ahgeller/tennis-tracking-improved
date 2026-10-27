@@ -3,15 +3,12 @@ __pycache__/
 output/
 AiFolder/
 .venv/
-models/*finetuned*.npz
-models/legacy/gridtracknet_upstream.npz
 
 # fine-tuning workspace: videos, caches, runs and drafts are regenerable; own labels are kept
 finetune/videos/
 finetune/cache/
 finetune/runs/
 finetune/models/*
-!/models/README.md
 finetune/labels/*.draft
 finetune/labels/*.review.json
 finetune/labels/label_tool.settings.json
@@ -24,26 +21,24 @@ finetune/labels/grid_*
 # clip lists, so the own-labels rule cannot tell it apart by name: spell the range out instead.
 finetune/labels/video1[3-9]_ball.csv
 finetune/labels/video[2-5][0-9]_ball.csv
-models/*_prev_*.npz
-models/*.before_promote_*
 finetune/.training-python
 
-# Local source media and label safety copies; already tracked samples stay tracked.
-/sample/*.mp4
+# Label safety copies and local source media; already tracked samples stay tracked.
 /finetune/labels/*.before_*
 /finetune/labels/*.premisaligned
+/system/sample/*.mp4
 .desloppify/
 scorecard.png
 .claude/worktrees/
 .claude/skills/desloppify/
 
-# model weights are proprietary: kept locally, never committed
-/models/*
-!/models/README.md
+# model weights are proprietary: kept locally, never committed (system/.gitignore, main's, says
+# the same inside system/; promotion's backups sit beside the weights)
+/system/models/*
+!/system/models/README.md
 *.pt
 *.pth
 *.npz
 *.engine
 *.onnx
 *.cbm
-

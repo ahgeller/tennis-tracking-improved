@@ -1,4 +1,5 @@
-"""Read-only inventory for the September 2026 review; writes audit/records/snapshot.json."""
+"""Read-only inventory for the September 2026 review; writes system/audit/records/snapshot.json (the
+review's record lives with the system it describes; port the refreshed file to main)."""
 import csv
 import hashlib
 import importlib.metadata
@@ -7,7 +8,8 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-SNAPSHOT = ROOT / "audit/records/snapshot.json"
+SYSTEM = ROOT / "system"
+SNAPSHOT = SYSTEM / "audit/records/snapshot.json"
 _HASH_BLOCK_BYTES = 1 << 20
 
 
@@ -20,8 +22,10 @@ def digest(path: Path) -> str:
 
 
 def main() -> None:
-    # Run as a script from audit/, so the project packages are not importable until ROOT is on the path.
+    # Run as a script from audit/, so the project packages are not importable until ROOT is on the path
+    # (and system/ with it: importing finetune puts it there).
     sys.path.insert(0, str(ROOT))
+    import finetune  # noqa: F401
     import torch
     from finetune.training.clips import find_clips, resolve_val_clips
     from tennis_tracker.gridtracknet import GridTrackNet
@@ -43,11 +47,11 @@ def main() -> None:
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             versions[package] = None
-    paths = [*ROOT.glob("*.py"), *ROOT.glob("tennis_tracker/**/*.py"),
-             *ROOT.glob("ball_in_play_selector/*.py"), *ROOT.glob("finetune/*.py"),
+    paths = [*ROOT.glob("*.py"), *SYSTEM.glob("*.py"), *SYSTEM.glob("tennis_tracker/**/*.py"),
+             *SYSTEM.glob("ball_in_play_selector/*.py"), *ROOT.glob("finetune/*.py"),
              ws / "clips.csv", ws / "exclude.txt", *ws.glob("labels/*_ball.csv"),
-             GRIDTRACKNET_WEIGHTS, PLAYER_ENGINE, COURT_ENGINE, ROOT / "sample/pomona.mp4",
-             ROOT / "sample/pomona_annotations.json"]
+             GRIDTRACKNET_WEIGHTS, PLAYER_ENGINE, COURT_ENGINE, SYSTEM / "sample/pomona.mp4",
+             SYSTEM / "sample/pomona_annotations.json"]
     model = GridTrackNet()
     snapshot = {"python": sys.version, "interpreter": sys.executable, "versions": versions,
                 "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,

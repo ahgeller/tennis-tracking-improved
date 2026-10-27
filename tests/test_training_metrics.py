@@ -12,7 +12,8 @@ from finetune.training import metrics
 from finetune.training.metrics import (FALSE_ALARM_CONF, METRIC_SLACK, epoch_score, false_alarm_units,
                                        promotion_improves, score_weights)
 from tennis_tracker.engines import ball_detectors
-from tests._helpers import Capture, cpu_detector, metric_probe
+from _workspace_helpers import metric_probe
+from tests._helpers import Capture, cpu_detector
 
 
 def rates(recall: float, wrong: float, false_alarm: float = 0.0) -> DetectorMetrics:

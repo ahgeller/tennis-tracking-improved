@@ -6,7 +6,7 @@ so the owner can measure and drop any one of them. This file records, per commit
 what the CPU replay measured; the last section says which changes only a GPU run can judge, and
 the commands.
 
-**How the numbers are made.** `python -m evaluation.replay_selector <run_dir>` feeds the
+**How the numbers are made.** `python -m finetune.scoring.replay_selector <run_dir>` feeds the
 detections a pipeline run recorded in its tracking JSONs (every track's observations, with the
 motion flag the run gave each) back into the selector on the CPU, with the run's court polygon
 and player boxes and no motion masks, and scores the output against the labels with the detector
@@ -29,7 +29,7 @@ and 162; `grid` = grid_match8, 16 and 22, 1592 and 149) and over ALL (8515 and 5
 |---|---|---|---|---|---|
 | control run (GPU, 0.50) | the run as written, with its motion rows | 3395 / 13 / 42 (31+11) | 3161 / 31 / 27 (27+0) | 1390 / 0 / 19 (19+0) | 7946 / 44 / 88 (77+11) / 134 |
 | 9fa1649 | detector metric: false alarms split into bridged and false; measurement only | as above | as above | as above | as above |
-| replay harness | `evaluation/replay_selector.py`; `core.output_trajectory` split from the chooser (no behaviour change, golden JSON unchanged); the baseline every row below compares to | 3384 / 9 / 36 (30+6) | 3158 / 33 / 26 (26+0) | 1381 / 0 / 19 (19+0) | 7923 / 42 / 81 (75+6) / 134 |
+| replay harness | `finetune/scoring/replay_selector.py`; `core.output_trajectory` split from the chooser (no behaviour change, golden JSON unchanged); the baseline every row below compares to | 3384 / 9 / 36 (30+6) | 3158 / 33 / 26 (26+0) | 1381 / 0 / 19 (19+0) | 7923 / 42 / 81 (75+6) / 134 |
 | 1b track_breaks | switch rule: adjacent rows of one track are the ball moving, not a switch (control: switches 202 to 67, the 135 were fast balls, 99 of them on the 720p prof clips); `chosen_pruned` counted through the tracks' `in_timeline` flag (control: 1 to 3, from `other_track`); the selector returns the chain's record as a pruned copy so a one-track chain's own record keeps every observation. Output unchanged | same | same | same | same |
 | 1c single-detection tracks | `build_tracks` keeps tracks of one observation (schema 5): never selected, written to the JSON, left off the candidate trails; the replay then sees every detection of a new run. Output unchanged; the control JSONs predate it, so the replay row is the same | same | same | same | same |
 | 2 two-level confidence | `SelectorConfig.start_conf` 0.50 over the detector floor `Config.conf` 0.40: a detection below it is `weak` (flagged per observation, schema 6), may not start a track or rejoin a stale one, and continues only a live track of `weak_continue_min_obs` (3) observations within `weak_gate_frac` (0.02 of the diagonal) of its Kalman prediction; otherwise dropped. The control JSONs hold nothing below 0.50, so the replay on them is unchanged; the 0.40 and 0.30 runs in `output/selector_baseline` (same 24 clips) are the measurement, see the rows below | same | same | same | same |
@@ -125,8 +125,8 @@ main checkout, on the `selector-robust` branch:
 ```powershell
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode pipeline --holdout mixed_v1 --gridtracknet-conf 0.40 --out-dir output/selector_robust_eval
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' track_breaks.py output/selector_robust_eval --compare output/ctrl_eval/track_breaks.log
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.compare_eval_logs output/ctrl_eval/pipeline.log output/selector_robust_eval/pipeline.log
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.replay_selector output/selector_robust_eval --archive finetune --variant control chain union raw
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m finetune.scoring.compare_eval_logs output/ctrl_eval/pipeline.log output/selector_robust_eval/pipeline.log
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m finetune.scoring.replay_selector output/selector_robust_eval --archive finetune --variant control chain union raw
 ```
 
 Results (held-out `mixed_v1`, 24 clips, detector floor 0.40, `evaluate_archive.py --mode pipeline`):

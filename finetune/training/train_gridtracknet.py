@@ -93,6 +93,7 @@ from torch.utils.data import DataLoader
 
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import finetune  # noqa: F401,E402  (which puts system/ on sys.path)
 
 from tennis_tracker import heatmapnet
 from tennis_tracker.ball_models import ARCHITECTURES, GRIDTRACKNET, HEATMAP_S4, arch_of, load_ball_model, weights_suffix

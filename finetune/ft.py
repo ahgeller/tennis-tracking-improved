@@ -37,10 +37,12 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import finetune  # noqa: F401,E402  (which puts system/ on sys.path)
 
 # Only stdlib-backed finetune modules at the top: ft.py must import without cv2, numpy or torch so
 # ensure_interpreter can hand over to an interpreter that has them.
 from finetune.colab_zip import DEFAULT_OUT, cmd_colab_zip
+from finetune import REPOSITORY
 from finetune.commands import cmd_camera, cmd_check, cmd_paths, cmd_promote, cmd_status
 from finetune.data.data_policy import OWN_SOURCE, evaluation_clips, read_review_status
 from finetune.data.label_flags import open_flags, outstanding_flags
@@ -51,7 +53,6 @@ from finetune.data.workspace import (
 )
 from finetune.interpreter import ensure_interpreter, wait_child
 from tennis_tracker.frame_rate import phase_stride
-from tennis_tracker.paths import ROOT
 
 SCRIPTS = Path(__file__).resolve().parent           # the package folder the scripts live under (not the data workspace)
 
@@ -60,7 +61,7 @@ SCRIPTS = Path(__file__).resolve().parent           # the package folder the scr
 
 def run_command(command: List[str]) -> int:
     print("$", " ".join(f'"{part}"' if " " in part else part for part in command), flush=True)
-    return wait_child(command, cwd=str(ROOT))
+    return wait_child(command, cwd=str(REPOSITORY))
 
 
 def run_script(script: str, arguments: List[str]) -> int:
@@ -241,7 +242,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
             return 1
     if clips:
         command += ["--clips", *clips]
-    return run_module("evaluation.archive", command + args.rest)
+    return run_module("finetune.scoring.archive", command + args.rest)
 
 
 def cmd_train(args: argparse.Namespace) -> int:
@@ -311,7 +312,7 @@ def run_cli(argv: List[str]) -> int:
     subparsers.add_parser("paths", help="show the interpreter, workspace and data source paths").set_defaults(func=cmd_paths)
     p = subparsers.add_parser("colab-zip", help="build the one zip the Colab notebook unpacks: videos, labels, "
                                                "clips.csv and the other records, the tracker's weights and the trainer's code")
-    p.add_argument("--out", help=f"where to write it (default: {DEFAULT_OUT.relative_to(ROOT).as_posix()})")
+    p.add_argument("--out", help=f"where to write it (default: {DEFAULT_OUT.relative_to(REPOSITORY).as_posix()})")
     p.add_argument("--code-only", action="store_true",
                    help="just the records and the code, as tennis_finetune_code.zip: the notebook lays it over the big zip")
     p.set_defaults(func=cmd_colab_zip)

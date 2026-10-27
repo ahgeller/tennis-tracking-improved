@@ -4,10 +4,10 @@ import json
 
 import pytest
 
+from finetune import REPOSITORY
 from finetune.data.holdouts import HoldoutSet, holdout_clips, holdout_set, read_holdouts
 from finetune.data.labels import LabelFormatError
 from finetune.data.workspace import read_manifest
-from tennis_tracker.paths import ROOT
 
 MANIFEST = {"video1": {"group": "own-camera"}, "video2": {"group": "own-camera"}, "video13": {"group": "prof_game2"},
             "grid_match8": {"group": "grid_match8"}, "grid_match16": {"group": "grid_match16"}}
@@ -76,11 +76,11 @@ def test_holdout_clips_refuses_an_entry_the_manifest_has_no_clip_for(tmp_path):
 
 
 def test_the_tracked_record_names_mixed_v1_over_groups_and_clips_the_manifest_has():
-    sets = read_holdouts(ROOT / "finetune" / "holdouts.json")
+    sets = read_holdouts(REPOSITORY / "finetune" / "holdouts.json")
     mixed = sets["mixed_v1"]
     assert mixed.groups == ("prof_game4", "prof_game7")
     assert mixed.clips == tuple(f"video{n}" for n in range(1, 11)) + ("grid_match8", "grid_match16", "grid_match22")
-    manifest = read_manifest(ROOT / "finetune" / "clips.csv")
-    members = holdout_clips("mixed_v1", list(manifest), manifest, ROOT / "finetune" / "holdouts.json")
+    manifest = read_manifest(REPOSITORY / "finetune" / "clips.csv")
+    members = holdout_clips("mixed_v1", list(manifest), manifest, REPOSITORY / "finetune" / "holdouts.json")
     assert len(members) == 24 and "video11" not in members and "video12" not in members
     assert {manifest[clip]["source"] for clip in members} == {"custom", "prof", "grid"}

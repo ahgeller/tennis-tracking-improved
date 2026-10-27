@@ -1,4 +1,4 @@
-from evaluation.compare_eval_logs import compare, is_pooled, read_scores
+from finetune.scoring.compare_eval_logs import compare, is_pooled, read_scores
 
 BEFORE = """
 [archive] finetune  (2 clips)

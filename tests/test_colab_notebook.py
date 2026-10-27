@@ -1,7 +1,8 @@
 """The Colab notebook stages every repository module the trainer imports.
 
 train_gridtracknet.py imports a handful of finetune.* and tennis_tracker.* modules (some inside
-functions); the notebook's staging cell lists the files it needs as REQUIRED (``finetune.colab_zip.staged_files``
+functions); the notebook's staging cell lists the files it needs as REQUIRED, by their path in the
+repository (``finetune/...`` at the top, the tracker's packages under ``system/``) (``finetune.colab_zip.staged_files``
 reads it; ``ft.py colab-zip`` packs those files). This walks the trainer's internal import closure
 from the source and checks the two agree, so a new import in the trainer fails here instead of
 with ModuleNotFoundError on Colab. The settings cell is checked for the trainer flags the notebook
@@ -11,22 +12,29 @@ import json
 from pathlib import Path
 from typing import Iterator, Set
 
+from finetune import REPOSITORY, SYSTEM
 from finetune.colab_zip import NOTEBOOK, staged_files
-from tennis_tracker.paths import ROOT
 
 PACKAGES = ("finetune", "tennis_tracker", "ball_in_play_selector")
 TRAINER = "finetune.training.train_gridtracknet"
 
 
+def package_root(name: str) -> Path:
+    """The folder a module's top-level package sits in: the repository for finetune, system/ for the
+    tracker's packages."""
+    return REPOSITORY if name.split(".")[0] == "finetune" else SYSTEM
+
+
 def module_path(name: str) -> Path:
-    path = ROOT / (name.replace(".", "/") + ".py")
-    return path if path.is_file() else ROOT / name.replace(".", "/") / "__init__.py"
+    root = package_root(name)
+    path = root / (name.replace(".", "/") + ".py")
+    return path if path.is_file() else root / name.replace(".", "/") / "__init__.py"
 
 
 def module_name(path: Path) -> str:
-    """The dotted name of a module file under the repository (``tennis_tracker/config.py`` ->
+    """The dotted name of a module file under the repository (``system/tennis_tracker/config.py`` ->
     ``tennis_tracker.config``; a package's ``__init__.py`` is the package)."""
-    parts = path.relative_to(ROOT).with_suffix("").parts
+    parts = path.relative_to(SYSTEM if path.is_relative_to(SYSTEM) else REPOSITORY).with_suffix("").parts
     return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
 
 
@@ -49,7 +57,7 @@ def internal_imports(path: Path) -> Iterator[str]:
                 continue
             yield module
             for alias in node.names:            # `from finetune import refine` names a module too
-                if (ROOT / module.replace(".", "/") / f"{alias.name}.py").is_file():
+                if (package_root(module) / module.replace(".", "/") / f"{alias.name}.py").is_file():
                     yield f"{module}.{alias.name}"
 
 
@@ -69,11 +77,11 @@ def import_closure(module: str) -> Set[str]:
 
 
 def test_the_notebook_stages_the_trainers_whole_import_closure():
-    needed = {module_path(name).relative_to(ROOT).as_posix() for name in import_closure(TRAINER)}
+    needed = {module_path(name).relative_to(REPOSITORY).as_posix() for name in import_closure(TRAINER)}
     staged = staged_files()
     assert set(staged) == needed, f"missing from the notebook: {sorted(needed - set(staged))}; " \
                                   f"staged but not imported: {sorted(set(staged) - needed)}"
-    assert all((ROOT / name).is_file() for name in staged)
+    assert all((REPOSITORY / name).is_file() for name in staged)
 
 
 def test_the_notebook_runs_the_trainer_as_a_module_from_the_staged_code():
@@ -135,7 +143,7 @@ def test_the_settings_cell_exposes_the_architectures_and_names_the_files_by_them
            "weights_only=True).get('arch')" in settings
     assert "allowed = {ARCH}" in settings
     assert "if start_arch not in allowed:" in settings
-    assert {"tennis_tracker/heatmapnet.py", "tennis_tracker/ball_models.py"} <= set(staged_files())
+    assert {"system/tennis_tracker/heatmapnet.py", "system/tennis_tracker/ball_models.py"} <= set(staged_files())
     text = "".join("".join(cell["source"]) for cell in json.loads(NOTEBOOK.read_text(encoding="utf-8"))["cells"])
     for gone in ("memory_s4", "heatmap_s2", "memorynet", "heatmapnet_s2"):      # removed 2026-10-26, see the README
         assert gone not in text, gone

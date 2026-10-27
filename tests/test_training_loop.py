@@ -13,7 +13,7 @@ from finetune.training.loop import (HEAT_OFFSET_WEIGHT, LOSSES, batch_loss, buil
 from tennis_tracker import heatmapnet
 from tennis_tracker.ball_models import load_ball_model
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
-from tests._helpers import blank_template
+from _workspace_helpers import blank_template
 
 
 def one_unit_loader():

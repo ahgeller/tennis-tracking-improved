@@ -20,8 +20,8 @@ The contract for every module that needs a path:
 - a test points the whole workspace somewhere else by replacing ``current`` alone
   (``tests/conftest.py: workspace_dir``); there is no second thing to patch.
 
-The repository itself is not a workspace path: ``tennis_tracker.paths.ROOT`` names it. ``REPO_WEIGHTS``
-(the weights the tracker runs, in the repository's ``models/``) is not under the workspace either, but
+The repository itself is not a workspace path: ``finetune.REPOSITORY`` names it. ``REPO_WEIGHTS``
+(the weights the tracker runs, in ``system/models/``: ``tennis_tracker.paths``) is not under the workspace either, but
 promotion writes it, so ``Workspace.repo_weights`` carries it and a test redirects it with the rest.
 """
 from __future__ import annotations

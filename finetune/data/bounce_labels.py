@@ -10,7 +10,7 @@ other 60 FPS phase), the midpoint of the ball labels on the frames either side o
 of them there is; a landing between two frames takes the same midpoint of the two
 (``resolve_points``). One coordinate without the other is an error. The file
 lists every landing of every rally, serves and faults included; a frame within the scorer's
-tolerance (``evaluation.court_events_score``, 0.1 s) of the true landing is close enough, so
+tolerance (``finetune.scoring.court_events_score``, 0.1 s) of the true landing is close enough, so
 either 60 FPS phase will do.
 
 It is a file of its own, not a column of ``_ball.csv``: ``labels.write_labels`` rewrites that file

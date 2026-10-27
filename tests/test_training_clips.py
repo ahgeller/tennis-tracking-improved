@@ -4,12 +4,12 @@ import json
 
 import pytest
 
+from finetune import REPOSITORY
 from finetune.data.data_policy import clip_source, is_trainable, read_review_status
 from finetune.data.holdouts import holdout_clips
 from finetune.data.labels import write_labels
 from finetune.data.workspace import HOLDOUTS_NAME, MANIFEST_NAME, read_exclusions, read_manifest
 from finetune.training.clips import DEFAULT_VAL_CLIP, ClipSelection, matches, resolve_val_clips, validation_split
-from tennis_tracker.paths import ROOT
 
 SIZE = (64, 36)
 
@@ -128,7 +128,7 @@ def test_mixed_v1_holds_out_the_same_24_clips_in_the_trainer_and_the_evaluator()
     own-camera footage the user reviewed and, since 2026-10-25, tagged ``custom``: they train
     (the set lists its own-camera members one by one, so sharing the group with video1 to
     video10 does not pull them in)."""
-    workspace = ROOT / "finetune"
+    workspace = REPOSITORY / "finetune"
     manifest = read_manifest(workspace / MANIFEST_NAME)
     status, excluded = read_review_status(workspace), set(read_exclusions(workspace))
     trainable = [clip for clip in manifest if is_trainable(clip, clip_source(clip, manifest), status, excluded)]

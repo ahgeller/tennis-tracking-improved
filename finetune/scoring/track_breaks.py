@@ -1,6 +1,6 @@
 """Where a pipeline run loses the ball, from its tracking JSONs and the clips' labels.
 
-    python evaluation/track_breaks.py output/fix1_no_court/pipeline [--compare before.log]
+    python track_breaks.py output/fix1_no_court/pipeline [--compare before.log]
 
 For every ``<clip>_<model>.json`` that ``evaluate_archive.py --mode pipeline`` wrote, the
 labelled-visible frames with no output are bucketed by what the run had on that frame:
