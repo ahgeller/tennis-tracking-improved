@@ -1,7 +1,7 @@
 """Export the YOLO checkpoints to ONNX and build TensorRT engines from them.
 
 Example:
-    python build_trt_engines.py --ball-pt models/ball.pt --player-pt models/player.pt \
+    python -m tennis_tracker.engines.build_engines --ball-pt models/ball.pt --player-pt models/player.pt \
         --court-pt models/courtdetection.pt --half --require-fp16 --force-onnx --force-engine \
         --device 0 --workspace-mb 4096 --include-court
 
@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from tennis_tracker.engines.engine_files import iter_engine_io, read_engine_header
+from .engine_files import iter_engine_io, read_engine_header
 
 _MIB = 1024 * 1024
 _MIN_WORKSPACE_MB = 256

@@ -40,7 +40,7 @@ unresolved detector gap remains a gap instead of becoming a long predicted path.
 - BoxMOT for player tracking (required with the player engine; unset the engine path to run without players)
 - CatBoost, only for `--court`
 - SciPy and psutil, optional (motion-debug trail smoothing; automatic frame-cache sizing)
-- Ultralytics, only for exporting new engines with `build_trt_engines.py`
+- Ultralytics, only for exporting new engines with `python -m tennis_tracker.engines.build_engines`
 - pytest, for the tests and `clean_tracker.py --self-test`
 - FFmpeg recommended for faster video encoding
 
@@ -195,8 +195,9 @@ Evaluate against annotations:
 python clean_tracker.py --no-video --annotations sample\pomona_annotations.json
 ```
 
-`check_parity.py` is a strict gate against the frozen Pomona benchmark, and
-`validate_tracking.py` scores an exported tracking JSON against hand labels.
+`python -m evaluation.parity` is a strict gate against the frozen Pomona benchmark,
+and `python -m evaluation.validate` scores an exported tracking JSON against hand
+labels.
 Scoring the detector or the pipeline on the workspace's hand-labelled clips
 (`evaluate_archive.py`) is on the `train` branch.
 
@@ -204,10 +205,9 @@ Scoring the detector or the pipeline on the workspace's hand-labelled clips
 
 ```text
 clean_tracker.py                         Command-line entry point
-validate_tracking.py                     Tracking JSON vs. hand labels (evaluation/validate.py)
-check_parity.py                          Frozen Pomona benchmark gate (evaluation/parity.py)
-evaluation/                              The scorer and the gate behind those two entry points
-build_trt_engines.py                     YOLO checkpoint -> ONNX -> TensorRT engine builder
+evaluation/                              Scoring, run as modules from the root:
+  validate.py                              Tracking JSON vs. hand labels (python -m evaluation.validate)
+  parity.py                                Frozen Pomona benchmark gate (python -m evaluation.parity)
 requirements.txt                         Python packages (see Requirements)
 tennis_tracker/pipeline.py               Run entry point: orders the stages, calls the selector
 tennis_tracker/run_context.py            Data the stages pass each other
@@ -230,6 +230,7 @@ tennis_tracker/engines/                  The TensorRT engines and the detector b
   engine_session.py                        TensorRT session shared by the engine backends
   engine_files.py                          Engine files on disk: metadata, class names, I/O tensors
   engine_boxes.py                          Decoding detection-engine outputs into boxes
+  build_engines.py                         YOLO checkpoint -> ONNX -> TensorRT engine builder (python -m)
 tennis_tracker/court/                    The court and what happens on it:
   court_geometry.py                        Court keypoints, side guides, polygon, homography
   court_scene.py                           CourtScene, the event types and the player-box queries

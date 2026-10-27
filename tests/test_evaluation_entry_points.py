@@ -1,5 +1,5 @@
-"""The evaluation package and the root scripts that front it: the documented commands keep
-working, and the package's two modules are the ones they name."""
+"""The evaluation package's two modules run from the repository root as ``python -m``: the
+documented commands keep working, and the gate scores with the tracking scorer."""
 import inspect
 import subprocess
 import sys
@@ -10,19 +10,15 @@ import pytest
 from tennis_tracker.paths import ROOT
 
 
-def test_root_scripts_front_the_package_modules():
-    import check_parity
-    import validate_tracking
+def test_the_gate_scores_with_the_tracking_scorer():
     from evaluation import parity, validate
 
-    assert validate_tracking.main is validate.main
-    assert check_parity.main is parity.main
-    assert parity.validate is validate.validate              # check_parity gates on the tracking scorer
+    assert parity.validate is validate.validate
 
 
-def test_every_script_main_takes_argv_and_returns_a_status():
+def test_every_module_main_takes_argv_and_returns_a_status():
     """main(argv=None) -> int everywhere, invoked as raise SystemExit(main()): a test can drive a
-    script without patching sys.argv, and the exit status is the return value, never implicit."""
+    module without patching sys.argv, and the exit status is the return value, never implicit."""
     from evaluation import parity, validate
     for module in (parity, validate):
         signature = inspect.signature(module.main)
@@ -34,8 +30,8 @@ def test_every_script_main_takes_argv_and_returns_a_status():
     assert stop.value.code == 2
 
 
-def test_the_documented_commands_still_answer_help():
-    for script in ("validate_tracking.py", "check_parity.py"):
-        done = subprocess.run([sys.executable, str(ROOT / script), "--help"], cwd=ROOT, capture_output=True, text=True)
-        assert done.returncode == 0, done.stderr
-        assert "usage:" in done.stdout
+@pytest.mark.parametrize("module", ["evaluation.validate", "evaluation.parity"])
+def test_the_documented_commands_answer_help(module):
+    done = subprocess.run([sys.executable, "-m", module, "--help"], cwd=ROOT, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert "usage:" in done.stdout

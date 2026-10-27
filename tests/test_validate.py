@@ -1,4 +1,4 @@
-"""evaluation.validate (validate_tracking.py): the tracking-JSON scorer on synthetic payloads."""
+"""evaluation.validate (python -m evaluation.validate): the tracking-JSON scorer on synthetic payloads."""
 from evaluation.validate import summary_lines, validate
 
 

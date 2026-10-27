@@ -57,7 +57,9 @@ tracker alone; do not add workspace code here.
   and court engines share; `engine_files.py`: locating engine files, their
   Ultralytics metadata and I/O tensor table (no CUDA); `engine_boxes.py`:
   decoding detection-engine outputs into boxes for the ball and player
-  backends. `player_detector.py`: TensorRT players with ByteTrack association.
+  backends. `build_engines.py`: YOLO checkpoint to ONNX to TensorRT engine, run
+  as `python -m tennis_tracker.engines.build_engines`. `player_detector.py`:
+  TensorRT players with ByteTrack association.
   `court_detector.py`: court keypoints every N frames, last good result cached.
   `tennis_tracker/paths.py`: the model asset paths every consumer (Config
   defaults, scripts) spells once. `headless.py`: the one Config and run for a
@@ -89,10 +91,9 @@ tracker alone; do not add workspace code here.
 - `ball_in_play_selector/`: candidate association (`association.py`), Kalman
   state, track scoring, timeline selection, bounded recovery, trajectory refit.
 - `evaluation/`: `validate.py` scores a tracking JSON against annotations in native
-  pixels (`check_parity` freezes its numbers); `parity.py` is the Pomona gate.
-  `validate_tracking.py` and `check_parity.py` at the root are thin entry points
-  to them.
-- `build_trt_engines.py`: YOLO checkpoint to ONNX to TensorRT engine.
+  pixels (the parity gate freezes its numbers); `parity.py` is the Pomona gate.
+  Both run as modules from the root: `python -m evaluation.validate` and
+  `python -m evaluation.parity`.
 
 ## Environment and commands
 
@@ -115,6 +116,7 @@ GPU/version specific.
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --self-test
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --no-video --tracking-json output/new_review_tracking.json
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --court --no-video --tracking-json output/new_review_court_events.json
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.parity
 ```
 
 `python -m pytest -q` (pytest required) runs every test: all suites live in
@@ -128,7 +130,7 @@ scripts; `audit/records/` holds their logs and results, and
 `audit/records/review_checks_2026-09.py.txt` is the September 2026 defect
 reproduction script, kept as text: it no longer runs.
 
-Use distinct output paths for new runs. `check_parity.py` verifies a frozen Pomona
+Use distinct output paths for new runs. `python -m evaluation.parity` verifies a frozen Pomona
 benchmark; the September 7, 2026 worktree fails several of its gates. Do not
 silently refresh that baseline to make a change pass.
 

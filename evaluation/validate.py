@@ -1,7 +1,7 @@
 """Validate exported tennis tracking JSON against hand-labeled frames.
 
-Errors are native pixels and the summary's numbers are what ``check_parity`` freezes, so this
-scorer stays as it is.
+Errors are native pixels and the summary's numbers are what the parity gate (``evaluation.parity``)
+freezes, so this scorer stays as it is. Run as ``python -m evaluation.validate``.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ class ErrorStatistics(TypedDict):
 
 
 class ValidationSummary(ErrorStatistics):
-    """The figures ``check_parity`` freezes (it adds a ``smoothness`` block of its own)."""
+    """The figures the parity gate freezes (it adds a ``smoothness`` block of its own)."""
 
     prediction_file_summary: SummaryJson
     labeled_visible_frames: int

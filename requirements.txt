@@ -18,7 +18,7 @@ torch==2.10.0             # CUDA build; GridTrackNet inference, CUDA motion mask
 numpy==1.26.4
 opencv-python==4.9.0.*    # tracker and evaluation
 # TensorRT engines (models/*.engine) are specific to the GPU and TensorRT
-# version that built them; rebuild with build_trt_engines.py after upgrading.
+# version that built them; rebuild with `python -m tennis_tracker.engines.build_engines` after upgrading.
 tensorrt==10.15.1.29      # player and court engine backends
 boxmot==16.0.11           # ByteTrack player tracking; required whenever a player engine is configured
 
@@ -28,7 +28,7 @@ scipy                     # smoothed raw-motion trails in the motion-debug video
 psutil                    # sizes the automatic pass-2 frame cache (without it that cache is off)
 
 # --- Tools, install when needed -------------------------------------------------
-# ultralytics==8.4.51     # build_trt_engines.py: YOLO .pt -> ONNX export only
+# ultralytics==8.4.51     # tennis_tracker.engines.build_engines: YOLO .pt -> ONNX export only
 # pytest                  # python -m pytest -q and clean_tracker.py --self-test
 # filterpy                # not a dependency: the selector's Kalman filter is NumPy
 #                         # (ball_in_play_selector/physics.py); tests/test_ball_kalman.py
