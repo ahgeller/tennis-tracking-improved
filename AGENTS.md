@@ -80,6 +80,10 @@ tracker alone; do not add workspace code here.
   and timing report.
 - `ball_in_play_selector/`: candidate association (`association.py`), Kalman
   state, track scoring, timeline selection, bounded recovery, trajectory refit.
+  Its changes are measured on the `train` branch (`evaluation/replay_selector.py` and
+  `audit/records/selector_robustness_2026-10.md` there). A minimal selector without the
+  score and the timeline chain was built and rejected on 2026-10-27: it cannot choose
+  between two balls on screen.
 - `evaluation/`: `validate.py` scores a tracking JSON against annotations in native
   pixels (the parity gate freezes its numbers); `parity.py` is the Pomona gate.
   Both run as modules from the root: `python -m evaluation.validate` and

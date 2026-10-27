@@ -6,6 +6,7 @@ trajectory and deliberately has no hidden handoff state.
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
@@ -25,8 +26,14 @@ from .utils import MaskLike, PackedMask, PlayerBoxesByFrame, ensure_mask_u8, pxp
 _FILL_WINDOW_SEC = 0.30
 _FILL_WINDOW_MIN_FRAMES = 3
 # A fill is only plausible for a ball moving at least this fast (px/frame at
-# 30 FPS); slower "gaps" are a static object the detector flickers on.
-_MIN_FILL_SPEED_PXPF = 10.0
+# 30 FPS and 1080p, scaled to the clip's frame rate and diagonal by make_scene);
+# slower "gaps" are a static object the detector flickers on. It was 10 until
+# 2026-10-27; replayed on the 24 held-out clips, 10 scaled by resolution gained
+# 17 hits over 10 unscaled, 4 gained 21, 2 gained 36 and 0 gained 37, all for
+# the same 8 extra fills through short occlusions and no false alarm outright:
+# a lob near its apex is slow, a static object the detector flickers on is
+# caught by the anchor and direction rules, not this one.
+_MIN_FILL_SPEED_PXPF = 2.0
 # Beside a player a fill needs a faster ball still: a slow point there is
 # usually the racket or a hand.
 _NEAR_PLAYER_FILL_SPEED_PXPF = 15.0
@@ -55,10 +62,19 @@ _TOP_REENTRY_FRAC = 0.15
 _SINGLE_HOLE_MAX_STEP_DIAG_FRAC = 0.015
 # A non-detector point further than max(120 px, 5.5% of the diagonal) from
 # its predecessor is dropped: better one missing row than a cross-court line.
+# The jump gate's floor, the kink and spike gates below and the relabel floor
+# are 1080p pixels, scaled to the clip's diagonal where they are read (``_px``).
+# The refit's bounds, Huber width and outlier floor are not: they describe the
+# detector's error, which the replay says is the same count of native pixels at
+# 720p as at 1080p (scaling them cost 17 hits on the 720p clips, 2026-10-27).
 _JUMP_GATE_MIN_PX = 120.0
 _JUMP_GATE_DIAG_FRAC = 0.055
 # Shortest continuous run the trajectory refit will touch.
 _MIN_REFIT_RUN = 9
+# The refit's kink finder ignores segments slower than this (px/frame); its
+# spike finder's deviation gate never falls below this many pixels.
+_KINK_MIN_SPEED_PX = 2.5
+_SPIKE_GATE_MIN_PX = 10.0
 # Refit weight per source: a detector point anchors the fit (a weak one a
 # little less), a motion blob is a coarse observation, a fitted fill carries
 # almost no information of its own, and a spike almost none at all.
@@ -82,8 +98,14 @@ _REFIT_BOUND_FILL_PX = 12.0
 _REFIT_OUTLIER_MIN_PX = 9.0
 _REFIT_OUTLIER_RESIDUAL_MULT = 4.0
 # Past this much correction a "det" point is no longer where the detector
-# fired, so it stops being reported as one (~44 px at 1080p).
+# fired, so it stops being reported as one (~44 px at 1080p, never under 12).
 _REFINE_DET_RELABEL_FRAC = 0.02
+_REFINE_DET_RELABEL_MIN_PX = 12.0
+
+
+def _px(value_at_1080p: float, diag: float) -> float:
+    """A length tuned in 1080p pixels, in the pixels of a frame with diagonal ``diag``."""
+    return value_at_1080p * diag / REFERENCE_DIAG_PX
 
 
 def selected_tracks(tracks: List[Track]) -> List[Track]:
@@ -360,11 +382,11 @@ def frame_result(
     )
 
 
-def _find_trajectory_kinks(x: np.ndarray, y: np.ndarray) -> List[int]:
+def _find_trajectory_kinks(x: np.ndarray, y: np.ndarray, diag: float = REFERENCE_DIAG_PX) -> List[int]:
     """Locate contact/bounce vertices so smoothing never rounds a real hit."""
     m = len(x)
     baseline = 3
-    min_speed = 2.5
+    min_speed = _px(_KINK_MIN_SPEED_PX, diag)
     max_cos = math.cos(math.radians(30.0))
     turns = np.zeros(m)
     for i in range(baseline, m - baseline):
@@ -387,9 +409,10 @@ def _find_trajectory_kinks(x: np.ndarray, y: np.ndarray) -> List[int]:
     return kinks
 
 
-def _find_spikes(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+def _find_spikes(x: np.ndarray, y: np.ndarray, diag: float = REFERENCE_DIAG_PX) -> np.ndarray:
     """Mark short detector excursions that immediately return to the path."""
     m = len(x)
+    gate_min = _px(_SPIKE_GATE_MIN_PX, diag)
     spikes = np.zeros(m, dtype=bool)
     if m < 4:
         return spikes
@@ -404,7 +427,7 @@ def _find_spikes(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         for i in range(1, m - length):
             a_x, a_y = x[i - 1], y[i - 1]
             b_x, b_y = x[i + length], y[i + length]
-            gate = max(10.0, 3.0 * local_step(i))
+            gate = max(gate_min, 3.0 * local_step(i))
             deviation = min(
                 math.hypot(
                     x[i + j] - (a_x + (b_x - a_x) * (j + 1) / (length + 1)),
@@ -543,17 +566,17 @@ def _refine_run(results: List[FrameResult], start: int, end: int, diag: float = 
     x = np.array([item.cx for item in points])
     y = np.array([item.cy for item in points])
     weights, is_strong_det = _refine_weights(points)
-    spikes = _find_spikes(x, y)
+    spikes = _find_spikes(x, y, diag)
     weights[spikes] = _REFINE_SPIKE_WEIGHT
     is_strong_det[spikes] = False
-    kinks = _find_trajectory_kinks(*_despiked(x, y, spikes))
+    kinks = _find_trajectory_kinks(*_despiked(x, y, spikes), diag)
     new_x, new_y = _refit_positions(points, x, y, weights, is_strong_det, spikes, kinks)
 
     # Repairing a short target switch needs a large correction, so the move
     # itself stays unbounded. Large relocations are labeled as fitted recovery;
     # smaller detector-supported adjustments retain their source. The immutable
     # measurement coordinates remain available separately in either case.
-    relabel_px = max(12.0, _REFINE_DET_RELABEL_FRAC * float(diag))
+    relabel_px = max(_px(_REFINE_DET_RELABEL_MIN_PX, diag), _REFINE_DET_RELABEL_FRAC * float(diag))
     for index, item in enumerate(points):
         if item.source == "det" and item.measurement is None:
             item.measurement = (float(item.cx), float(item.cy))
@@ -591,8 +614,9 @@ class _Scene:
     boost_masks: Optional[Sequence[Optional[MaskLike]]]
     raw_motions: Optional[Sequence[Optional[MaskLike]]]
     player_boxes_by_frame: Optional[PlayerBoxesByFrame]
-    fill_frames: int        # longest gap or tail the selector fills
-    min_fill_speed: float   # px/frame at this fps
+    fill_frames: int                # longest gap or tail the selector fills
+    min_fill_speed: float           # px/frame at this fps and resolution
+    near_player_fill_speed: float   # the same floor beside a player
 
     def motion_candidate(
         self, frame: int, x: float, y: float, area: float, steps: int, speed: float
@@ -685,7 +709,7 @@ def _fill_gap(
     # Judged once for the whole gap, but re-read per frame below: a single
     # frame vetoed beside a player must not disqualify the rest of the gap.
     gap_pair_supported = _gap_is_supported(scene, observations, index, speed, direction_supported)
-    near_player_slow = speed < pxpf_at_fps(_NEAR_PLAYER_FILL_SPEED_PXPF, scene.fps, clamp=False)
+    near_player_slow = speed < scene.near_player_fill_speed
     cfg = scene.cfg
     offset_x = offset_y = 0.0
     offset_active = False
@@ -862,7 +886,7 @@ def _drop_implausible_fills(scene: _Scene, results: List[Optional[FrameResult]])
 
     One missing row is safer than connecting two balls across the court.
     """
-    jump_gate = max(_JUMP_GATE_MIN_PX, _JUMP_GATE_DIAG_FRAC * scene.cfg.diag)
+    jump_gate = max(_px(_JUMP_GATE_MIN_PX, scene.cfg.diag), _JUMP_GATE_DIAG_FRAC * scene.cfg.diag)
     previous = None
     for frame, result in enumerate(results):
         if (
@@ -906,13 +930,7 @@ def select_ball_in_play(
     """
     total = len(detections_by_frame)
     cfg = SelectorConfig(fps=fps, width=width, height=height)
-    scene = _Scene(
-        cfg=cfg, fps=fps, total=total, width=width, height=height,
-        boost_masks=boost_masks, raw_motions=raw_motions,
-        player_boxes_by_frame=player_boxes_by_frame,
-        fill_frames=max(_FILL_WINDOW_MIN_FRAMES, int(round(float(fps) * _FILL_WINDOW_SEC))),
-        min_fill_speed=pxpf_at_fps(_MIN_FILL_SPEED_PXPF, fps, clamp=False),
-    )
+    scene = make_scene(cfg, fps, total, width, height, boost_masks, raw_motions, player_boxes_by_frame)
     detections = build_detections(detections_by_frame, boost_masks)
     tracks = score_tracks(
         build_tracks(detections, cfg),
@@ -925,12 +943,62 @@ def select_ball_in_play(
     for track in selected:
         track.in_timeline = True
     chosen = stitch_track_chain(selected, cfg)
-    selected_observations = {
-        id(track): trajectory_observations(track, fps) for track in selected
-    }
+    if debug:
+        print(f"[clean selector] selected tracks: {[track.track_id for track in selected]}")
+    results = output_trajectory(scene, selected)
     if chosen is not None:
-        chosen.observations = trajectory_observations(chosen, fps)
-    results: List[Optional[FrameResult]] = [None] * total
+        # The chain's record holds the observations that were drawn. A copy: for a one-track
+        # chain ``chosen`` is that very track, whose own record (in ``tracks``) keeps every
+        # observation, so the diagnostics can see what the pruning let go.
+        chosen = _pruned_copy(chosen, fps)
+    return results, chosen, tracks
+
+
+def _pruned_copy(track: Track, fps: float) -> Track:
+    """``track`` with its observations cut to ``trajectory_observations``; the track is untouched."""
+    pruned = copy.copy(track)
+    pruned.observations = trajectory_observations(track, fps)
+    pruned._kin_cache_key = None
+    return pruned
+
+
+def make_scene(
+    cfg: SelectorConfig,
+    fps: float,
+    total: int,
+    width: int,
+    height: int,
+    boost_masks: Optional[Sequence[Optional[MaskLike]]],
+    raw_motions: Optional[Sequence[Optional[MaskLike]]],
+    player_boxes_by_frame: Optional[PlayerBoxesByFrame],
+) -> _Scene:
+    """The inputs the output phase reads, with the fill window at this clip's frame rate and the
+    speed floors at its frame rate and resolution: a floor tuned in 1080p pixels is a fraction of
+    the picture, and a 720p ball moving the same way covers two thirds of the pixels."""
+    res_scale = cfg.diag / REFERENCE_DIAG_PX
+    return _Scene(
+        cfg=cfg, fps=fps, total=total, width=width, height=height,
+        boost_masks=boost_masks, raw_motions=raw_motions,
+        player_boxes_by_frame=player_boxes_by_frame,
+        fill_frames=max(_FILL_WINDOW_MIN_FRAMES, int(round(float(fps) * _FILL_WINDOW_SEC))),
+        min_fill_speed=pxpf_at_fps(_MIN_FILL_SPEED_PXPF * res_scale, fps, clamp=False),
+        near_player_fill_speed=pxpf_at_fps(_NEAR_PLAYER_FILL_SPEED_PXPF * res_scale, fps, clamp=False),
+    )
+
+
+def output_trajectory(scene: _Scene, selected: List[Track]) -> List[Optional[FrameResult]]:
+    """The per-frame output from the tracks the chooser kept: their trajectory observations
+    placed (the stronger track winning a shared frame), the gaps between them filled where the
+    evidence allows, the tails extended on motion, single holes closed, the refit, and the
+    implausible fills dropped. The tracks themselves are not changed.
+
+    Separate from ``select_ball_in_play`` so a chooser other than the timeline chain (the
+    evaluation's replay variants) produces its output the same way.
+    """
+    selected_observations = {
+        id(track): trajectory_observations(track, scene.fps) for track in selected
+    }
+    results: List[Optional[FrameResult]] = [None] * scene.total
 
     _place_detections(results, selected, selected_observations)
     _fill_internal_gaps(scene, results, selected, selected_observations)
@@ -939,9 +1007,8 @@ def select_ball_in_play(
         if len(observations) >= 2:
             _extend_tail(scene, results, selected, observations)
     _close_single_frame_holes(scene, results)
-    refine_trajectory(results, cfg.diag)
-
-    if debug:
-        print(f"[clean selector] selected tracks: {[track.track_id for track in selected]}")
+    # Drop before the refit, so a fill that left the frame or jumped the court is not among the
+    # points the refit smooths its neighbours towards.
     _drop_implausible_fills(scene, results)
-    return results, chosen, tracks
+    refine_trajectory(results, scene.cfg.diag)
+    return results

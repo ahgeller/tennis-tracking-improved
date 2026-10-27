@@ -24,7 +24,7 @@ def fps_scale(fps: float) -> float:
 # silently invert a penalty.
 _NON_NEGATIVE_FIELDS = (
     "timeline_min_track_score", "timeline_coverage_weight", "timeline_score_weight",
-    "timeline_max_gap_frac", "timeline_overlap_tol_frac", "timeline_small_gap_frac",
+    "timeline_max_gap_sec", "timeline_overlap_tol_frac", "timeline_small_gap_sec",
     "timeline_small_gap_jump_reject_frac", "trail_jump_break_growth_frac", "bounce_restitution",
 )
 # Frame counts the selector divides by or uses as loop bounds.
@@ -56,13 +56,10 @@ class SelectorConfig:
     # fast and slow; a step this many frames long stays in one phase.
     detector_phase_stride: int = field(init=False)
     assoc_gate_growth_cap_frames: int = 6   # gate stops growing after this many misses
-    assoc_min_speed_for_dir: float = 2.5    # 30 FPS px/frame below which direction is not judged
+    assoc_min_speed_for_ratio: float = 2.5  # 30 FPS px/frame below which the speed ratio is not judged
     assoc_speed_ratio_min: float = 0.15
     assoc_speed_ratio_max: float = 3.80
-    assoc_dir_cos_min: float = -1.0         # bounces and racket hits reverse direction
     assoc_accel_frac: float = 0.09          # per-frame velocity change ceiling, diag fraction
-    assoc_area_ratio_min: float = 0.15
-    assoc_area_ratio_max: float = 6.00
     # A track that has sat still for eight observations may not absorb a
     # detection moving twice this fast (diag fraction per frame): that is a
     # ball passing a static false positive, not the false positive moving.
@@ -84,9 +81,12 @@ class SelectorConfig:
     timeline_min_track_score: float = 2.0  # hard floor for timeline candidates
     timeline_coverage_weight: float = 1000.0  # emphasize covering more of the video
     timeline_score_weight: float = 6.0  # keep score as secondary preference
-    timeline_max_gap_frac: float = 0.85  # tighter max forward gap between stitched tracks
+    # The gaps the timeline chain tolerates between two tracks, in seconds: a rally does not
+    # know how long the clip around it is. Until 2026-10-27 they were fractions of the clip
+    # (0.85 and 0.02); these are those fractions of the 13 s median held-out clip.
+    timeline_max_gap_sec: float = 11.0    # longest forward gap a handover may skip
     timeline_overlap_tol_frac: float = 0.050  # small overlap tolerance for handover
-    timeline_small_gap_frac: float = 0.02  # "small gap" window for strict jump rejects
+    timeline_small_gap_sec: float = 0.26  # "small gap" window for strict jump rejects
     timeline_small_gap_jump_reject_frac: float = 0.08  # reject cross-court jumps on tiny gaps
     timeline_switch_penalty: float = 34.0  # stronger cost for switching track ids
     timeline_gap_penalty: float = 180.0  # cost per uncovered time fraction between stitched tracks

@@ -186,7 +186,10 @@ class _FrameRenderer:
         self.search_smoother = SearchCentreSmoother()
         self.ball_trail = BallTrail(cfg, video.fps, video.width, video.height)
         self.path_trail = DisplayPathTrail(video.fps, video.width)
-        self.candidate_trails = CandidateTrackTrails(selection.all_tracks, selection.chosen_track, video.fps)
+        # A single-detection track is a record for the diagnostics, not a trail: its one dot would
+        # scatter the detector's strays over the video.
+        self.candidate_trails = CandidateTrackTrails([t for t in selection.all_tracks if len(t.observations) >= 2],
+                                                     selection.chosen_track, video.fps)
         self.raw_motion_trails = RawMotionTrails(video.width)
 
     def _draw(self, fi: int, frame: np.ndarray, result, court_kps, draw_in_place: bool) -> Canvas:

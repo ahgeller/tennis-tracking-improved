@@ -85,7 +85,9 @@ class TrackStartJson(TypedDict):
 
 class TrackJson(TypedDict):
     """A selector track: its score, how it began and ended, what the selection made of it and
-    every detection it holds (``track_to_json``)."""
+    every detection it holds (``track_to_json``). Since schema 5 the list holds the tracks of one
+    detection too (``num_obs == 1``), so every detection the selector saw is in some track; the
+    selection never takes them."""
 
     track_id: int
     score: float

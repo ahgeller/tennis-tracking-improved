@@ -48,7 +48,9 @@ _MAX_CANDIDATES_PER_FRAME = 5
 # Tracking version 4: frame rows say which track supplied them (``track_id``), tracks say how
 # they started and ended and what the selection made of them (``start``, ``end_reason``,
 # ``selection``, ``in_timeline``) and the summary lists the timeline's ``timeline_track_ids``.
-_TRACKING_SCHEMA_VERSION = 4
+# Tracking version 5: ``tracks`` holds the single-detection tracks too (the association used to
+# drop them), so every detection the selector saw is in some track; they are never selected.
+_TRACKING_SCHEMA_VERSION = 5
 _MOTION_DIAGNOSTICS_SCHEMA_VERSION = 2
 
 

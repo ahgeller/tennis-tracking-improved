@@ -392,6 +392,22 @@ def test_stale_static_false_positive_does_not_absorb_a_later_moving_ball():
     assert len(build_tracks(separated, _cfg(30.0))) == 2
 
 
+def test_a_lone_detection_is_a_recorded_track_that_is_never_selected():
+    # Frame 30 holds one stray detection far from the ball. The association keeps it as a track
+    # of one observation (the diagnostics must see every detection the selector was given), the
+    # chooser never takes it, and the output is the ball's alone.
+    detections, masks = _moving_ball()
+    detections += [[] for _ in range(18)] + [[([500, 300, 504, 304], 0.9)]]
+    masks += [_empty_mask() for _ in range(19)]
+    results, chosen, tracks = select_ball_in_play(detections, 30.0, WIDTH, HEIGHT, boost_masks=masks)
+    stray = next(track for track in tracks if track.num_obs == 1)
+    assert stray.first_frame == 30 and stray.span == 0 and stray.end_reason == "clip_end"
+    assert not any(stray.selection.values()) and not stray.in_timeline
+    assert chosen is not None and chosen.num_obs == 12 and results[30] is None
+    assert sorted(track.num_obs for track in build_tracks([[] for _ in range(5)] + [[
+        Detection(5, 100.0, 100.0, 0, 0, 4, 4, 0.9, 16.0, False)]], _cfg(30.0))) == [1]
+
+
 def test_moving_ball_crossing_a_live_static_track_starts_its_own_track():
     # A moving ball crossing a live static false track must start its own track.
     crossing = [[] for _ in range(15)]
@@ -448,6 +464,21 @@ def test_a_stitched_chain_carries_its_tracks_record_and_sits_in_the_timeline():
     assert stitched.score_value("timeline_tracks") == 2.0
     assert (stitched.start_reason, stitched.start_rival, stitched.end_reason) == ("first", None, "clip_end")
     assert stitched.in_timeline and stitched.selection == {}
+
+
+def test_the_chosen_record_is_pruned_but_the_track_s_own_record_keeps_every_observation():
+    # The ball's track reacquires a lone detection nine frames after it vanished (no mask under
+    # it): trajectory_observations drops it from what is drawn. The chain's record (chosen) says
+    # so, but the track in ``tracks`` is the same object for a one-track chain and must keep the
+    # observation, or the diagnostics read the dropped frame as one no track ever saw.
+    detections, masks = _moving_ball()
+    detections += [[] for _ in range(8)] + [[([248, 25, 252, 29], 0.9)]]
+    masks += [_empty_mask() for _ in range(9)]
+    results, chosen, tracks = select_ball_in_play(detections, 30.0, WIDTH, HEIGHT, boost_masks=masks)
+    [track] = tracks
+    assert track.num_obs == 13 and track.last_obs_frame == 20
+    assert chosen is not track and chosen.num_obs == 12 and chosen.track_id == track.track_id
+    assert results[20] is None and sum(result is not None for result in results) == 12
 
 
 def test_the_selection_verdicts_and_the_timeline_are_recorded_and_exported():

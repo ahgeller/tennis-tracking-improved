@@ -2,7 +2,7 @@ import math
 import numpy as np
 from typing import Optional, Tuple
 
-from .config import SelectorConfig
+from .config import REFERENCE_DIAG_PX, SelectorConfig
 from .utils import clamp01, pxpf_at_fps
 
 
@@ -122,8 +122,26 @@ class LinearKalman:
         self.P = np.dot(np.dot(I_KH, self.P), I_KH.T) + np.dot(np.dot(K, self.R), K.T)
 
 
+def _bounce_scale(cfg: SelectorConfig) -> float:
+    """The clip's pixels per 1080p pixel, for the bounce heuristic's thresholds."""
+    return cfg.diag / REFERENCE_DIAG_PX
+
+
 class BallKalmanFilter:
-    """Constant-velocity (x, y, vx, vy) filter with the projectile transition and adaptive gating."""
+    """A linear filter over (x, y, vx, vy) in image pixels and frames, driven by the ball's
+    detections.
+
+    Not a constant-velocity filter: ``predict`` steps the state with the projectile transition
+    (``_projectile_matrices``: drag on both velocities, gravity added to vy), so the prediction
+    between detections falls the way the ball does. ``update`` sets the measurement noise from
+    the detection's confidence (2 px at 1.0 to 7 px at 0.0), inflates it and the velocity
+    covariance when the measurement fails the chi-square gate (so an outlier bends the state
+    rather than snapping it), and flips a descending vy to ``-bounce_restitution`` times itself
+    when a measurement lands 10 px above the prediction: the bounce heuristic. The filter's
+    velocity is therefore a smoothed estimate that the association's gates read as the ball's
+    expected motion; right after a bounce or a gated outlier it is deliberately not the last
+    observed step.
+    """
 
     def __init__(self, x0: float, y0: float, cfg: SelectorConfig) -> None:
         self.cfg = cfg
@@ -234,8 +252,10 @@ class BallKalmanFilter:
         # This keeps bounces plausible without forbidding racket hits (which can look similar).
         hx = np.dot(self.kf.H, x).astype(float)
         residual = np.array([z_x, z_y], dtype=float) - hx
+        # The thresholds are 1080p pixels (per frame), scaled to the clip's diagonal.
+        res_scale = _bounce_scale(self.cfg)
         pred_vy = float(x[3])
-        if pred_vy > 2.0 and float(residual[1]) < -10.0:
+        if pred_vy > 2.0 * res_scale and float(residual[1]) < -10.0 * res_scale:
             self.kf.x[3, 0] = -abs(pred_vy) * self.cfg.bounce_restitution
             self.kf.P[3, 3] += 80.0
 
