@@ -1,5 +1,8 @@
 """tennis_tracker/pass2.py: where the renderer's frames come from (the RAM cache pass 1 filled and the
 second decode past it) and its per-frame court model, with the golden harness's fakes."""
+import shutil
+import subprocess
+import time
 from types import SimpleNamespace
 
 import cv2
@@ -19,25 +22,29 @@ from tests.test_pipeline_run import (  # noqa: F401
 
 
 class SeekableCapture(Capture):
-    """``Capture`` that seeks with ``CAP_PROP_POS_FRAMES``; with ``seeks=False`` a set is ignored,
-    as by a container that cannot seek exactly."""
+    """``Capture`` that seeks with ``CAP_PROP_POS_FRAMES``.  With ``seeks=False`` a set is ignored, as
+    by a container that cannot seek exactly; with ``lands_past=n`` the position reads as asked while
+    the next picture is ``n`` frames later, as OpenCV's FFmpeg backend answers on a variable frame
+    rate (the position is computed from the timestamp and the average rate, not from the picture)."""
 
     opened = []
 
-    def __init__(self, count: int, seeks: bool = True):
+    def __init__(self, count: int, seeks: bool = True, lands_past: int = 0):
         super().__init__(count)
-        self.seeks = seeks
+        self.seeks, self.lands_past = seeks, lands_past
+        self.reported = None
         self.opened.append(self)
 
     def set(self, prop, value) -> bool:
         assert prop == cv2.CAP_PROP_POS_FRAMES
         if self.seeks:
-            self.index = int(value)
+            self.index = int(value) + self.lands_past
+            self.reported = int(value)
         return self.seeks
 
     def get(self, prop) -> float:
         assert prop == cv2.CAP_PROP_POS_FRAMES
-        return float(self.index)
+        return float(self.index if self.reported is None else self.reported)
 
     def grab(self) -> bool:
         ok, _ = self.read()
@@ -83,13 +90,89 @@ def test_frame_source_serves_the_cached_prefix_and_decodes_the_rest_from_a_seek(
     assert len(captures) == 1                                                      # one open, seeked to frame 4
 
 
+MISMATCH = ("[pass 2] The container's seek to frame 4 decoded a picture that does not match the cache; "
+            "decoding from the start and skipping the 4 cached frames")
+
+
 def test_frame_source_decodes_from_the_start_when_the_seek_does_not_land(monkeypatch, captures, capsys):
     monkeypatch.setattr(pass2.cv2, "VideoCapture", lambda path: SeekableCapture(10, seeks=False))
     source = pass2._FrameSource(_ctx(), _cached(4), 10)
-    assert ("[pass 2] The container did not seek to frame 4 (landed on 0); decoding from the start and "
-            "skipping the 4 cached frames") in capsys.readouterr().out
+    assert MISMATCH in capsys.readouterr().out
     assert _frames(source, 10) == [(value, value >= 4) for value in range(10)]
     assert len(captures) == 2                                                      # the failed seek's capture was released
+
+
+def test_frame_source_judges_a_seek_by_its_picture_not_by_the_reported_position(monkeypatch, captures, capsys):
+    """A seek that reports the frame asked for but decodes a later picture (a variable-frame-rate
+    clip) is not trusted: the position is read back from the picture, which must equal the last
+    cached frame, or the decode starts over."""
+    monkeypatch.setattr(pass2.cv2, "VideoCapture", lambda path: SeekableCapture(10, lands_past=6))
+    source = pass2._FrameSource(_ctx(), _cached(4), 10)
+    assert captures[0].get(cv2.CAP_PROP_POS_FRAMES) == 3.0                        # what the container claimed
+    assert MISMATCH in capsys.readouterr().out
+    assert _frames(source, 10) == [(value, value >= 4) for value in range(10)]
+    assert len(captures) == 2
+
+
+def test_frame_source_verifies_a_cache_of_one_frame_against_frame_zero(captures, capsys):
+    source = pass2._FrameSource(_ctx(), _cached(1), 10)
+    assert "does not match" not in capsys.readouterr().out
+    assert _frames(source, 10) == [(value, value >= 1) for value in range(10)]
+    assert len(captures) == 1
+
+
+def _painted_index(frame: np.ndarray) -> int:
+    """The frame index ``_index_painted_clip`` wrote into the picture: one 32 px block per bit."""
+    return sum(1 << bit for bit in range(8) if frame[16, bit * 32 + 16].mean() > 128)
+
+
+def _index_painted_clip(path, count: int) -> None:
+    """A ``count``-frame H.264 mp4 whose timestamps run at 60 fps for the first 100 frames and
+    slower after (a variable frame rate, as phone recordings have), each frame's index painted into
+    its pixels in binary.  The B-frames and the rate change are what make a timestamp seek land on
+    another picture than the one ``CAP_PROP_POS_FRAMES`` names."""
+    args = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", "256x32", "-r", "60",
+            "-i", "-", "-vf", "setpts='if(lt(N,100),N,N+N/3)/60/TB'", "-fps_mode", "vfr", "-c:v", "libx264",
+            "-g", "50", "-bf", "3", "-pix_fmt", "yuv420p", "-crf", "10", str(path)]
+    encoder = subprocess.Popen(args, stdin=subprocess.PIPE)
+    for index in range(count):
+        frame = np.zeros((32, 256, 3), np.uint8)
+        for bit in range(8):
+            if (index >> bit) & 1:
+                frame[:, bit * 32:(bit + 1) * 32] = 255
+        encoder.stdin.write(frame.tobytes())
+    encoder.stdin.close()
+    assert encoder.wait() == 0
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg to encode the clip")
+@pytest.mark.parametrize("n_cached", [50, 100, 150])
+def test_frame_source_puts_every_frame_of_a_variable_frame_rate_clip_on_its_own_index(tmp_path, n_cached):
+    """Pass 1 fills the cache from a sequential decode; pass 2's source, continuing from where
+    the cache ends, must hand out the same pictures in the same order on a clip whose seeks land
+    on the wrong picture while reporting the frame asked for (with OpenCV 4.9's FFmpeg backend the
+    seek to frame 49 of this clip decodes frame 57 and the seek to 99 decodes 123; the seek to 149
+    lands).  The whole test, encode included, stays under ten seconds."""
+    started = time.perf_counter()
+    path = tmp_path / "vfr.mp4"
+    _index_painted_clip(path, 200)
+    capture = cv2.VideoCapture(str(path))
+    frames = []
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        frames.append(frame)
+    capture.release()
+    assert [_painted_index(frame) for frame in frames] == list(range(200))      # the clip decodes in order
+    ctx = SimpleNamespace(cfg=Config(), video=SimpleNamespace(path=str(path)))
+    source = pass2._FrameSource(ctx, frames[:n_cached], len(frames))
+    try:
+        served = [source.read(fi)[0] for fi in range(len(frames))]
+    finally:
+        source.release()
+    assert [_painted_index(frame) for frame in served] == list(range(200))
+    assert time.perf_counter() - started < 10.0
 
 
 def test_frame_source_uses_the_cache_alone_when_it_holds_the_clip(captures, capsys):
