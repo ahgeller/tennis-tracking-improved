@@ -23,7 +23,7 @@ import csv
 import math
 import re
 from pathlib import Path
-from typing import Iterable, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Iterable, List, Mapping, NamedTuple
 
 from finetune.data.fileio import atomic_csv
 from finetune.data.labels import COLUMNS, COORDINATE_DECIMALS, LabelFormatError, LabelPoint, frame_name

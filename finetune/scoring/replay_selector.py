@@ -35,7 +35,6 @@ import argparse
 import contextlib
 import io
 import json
-import math
 import sys
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
