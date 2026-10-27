@@ -166,8 +166,9 @@ class Capture:
 def cpu_detector(decode, conf: float = 0.5, frame_tensor=None) -> "CpuGridTrackNet":
     """A GridTrackNet backend on the CPU whose model is the identity and whose decoder is
     ``decode(output, width, height, threshold)``; each frame's tensor is its first pixel's value
-    unless ``frame_tensor`` says otherwise."""
-    return CpuGridTrackNet(Config(device="0", conf=conf), model=lambda batch: batch, decode=decode,
+    unless ``frame_tensor`` says otherwise. The model answers no grid, so the prepass runs at one
+    unit per frame (window step 5), where its answer goes straight to the decoder."""
+    return CpuGridTrackNet(Config(device="0", conf=conf, gridtracknet_window_step=5), model=lambda batch: batch, decode=decode,
                            frame_tensor=frame_tensor or (lambda frame, device: torch.tensor([float(frame[0, 0, 0])])))
 
 
