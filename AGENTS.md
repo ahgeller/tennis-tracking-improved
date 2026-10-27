@@ -78,6 +78,11 @@ the default, `models/ball_detector.pt`, is the heat-map network's control run of
   and timing report.
 - `ball_in_play_selector/`: candidate association (`association.py`), Kalman
   state, track scoring, timeline selection, bounded recovery, trajectory refit.
+  Detections between the detector floor (`Config.conf`, 0.40) and
+  `SelectorConfig.start_conf` (0.50) are `weak`: they may continue an established
+  track but never start one. A minimal selector without the score and the timeline
+  chain was built and rejected on 2026-10-27 (it cannot choose between two balls on
+  screen; the selector ledger has why).
 - `finetune/refiner/refine.py`: model-free sub-pixel ball suggestions for the label tool
   (candidates chosen by trajectory, trust score); `motion_blobs.py` measures what moved
   on one frame (the change map, its motion centroid and blobs).
