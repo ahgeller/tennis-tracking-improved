@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -48,18 +48,27 @@ def _open_capture(path) -> cv2.VideoCapture:
     return capture
 
 
-def _reopen_at(path, first_frame: int) -> cv2.VideoCapture:
-    """The clip reopened with frame ``first_frame`` next to read: by a seek when the container
-    lands on it exactly, else by decoding from the start and dropping the frames before it."""
+def _reopen_at(path, cached: Sequence[np.ndarray]) -> cv2.VideoCapture:
+    """The clip reopened with the frame after the cached prefix next to read: by a seek when its
+    picture proves it landed, else by decoding from the start and dropping the cached frames.
+
+    A seek is judged by what it decodes, not by ``CAP_PROP_POS_FRAMES``: OpenCV's FFmpeg backend
+    derives that position from the timestamp and the average frame rate, so it reports the frame
+    asked for while the picture is another one (a variable frame rate, dropped timestamps, an
+    MPEG-TS clip), and every overlay past the cache would then sit on the wrong frame.  The seek
+    goes to the last cached frame, which is read back and must equal the cache's copy; a seek
+    that lands decodes bit-identically on every container tried (mp4, mkv, TS, 59.94 fps).
+    """
+    first_frame = len(cached)
     capture = _open_capture(path)
     if first_frame == 0:
         return capture
-    capture.set(cv2.CAP_PROP_POS_FRAMES, first_frame)
-    landed = int(round(capture.get(cv2.CAP_PROP_POS_FRAMES)))
-    if landed == first_frame:
+    capture.set(cv2.CAP_PROP_POS_FRAMES, first_frame - 1)
+    ok, frame = capture.read()
+    if ok and frame is not None and np.array_equal(frame, cached[-1]):
         return capture
-    print(f"[pass 2] The container did not seek to frame {first_frame} (landed on {landed}); "
-          f"decoding from the start and skipping the {first_frame} cached frames")
+    print(f"[pass 2] The container's seek to frame {first_frame} decoded a picture that does not match "
+          f"the cache; decoding from the start and skipping the {first_frame} cached frames")
     capture.release()
     capture = _open_capture(path)
     for _ in range(first_frame):
@@ -86,7 +95,7 @@ class _FrameSource:
             return
         if n_cached:
             print(f"[pass 2] Using RAM frame cache ({n_cached} of {frame_count} frames), decoding the rest")
-        capture = _reopen_at(ctx.video.path, n_cached)
+        capture = _reopen_at(ctx.video.path, self._cached)
         self._reader = ThreadedFrameReader(capture, prefetch=max(2, ctx.cfg.frame_reader_prefetch))
 
     def read(self, frame_index: int) -> Tuple[Optional[np.ndarray], bool]:
@@ -177,7 +186,7 @@ class _FrameRenderer:
         self.search_smoother = SearchCentreSmoother()
         self.ball_trail = BallTrail(cfg, video.fps, video.width, video.height)
         self.path_trail = DisplayPathTrail(video.fps, video.width)
-        self.candidate_trails = CandidateTrackTrails(selection.all_tracks, selection.chosen_track)
+        self.candidate_trails = CandidateTrackTrails(selection.all_tracks, selection.chosen_track, video.fps)
         self.raw_motion_trails = RawMotionTrails(video.width)
 
     def _draw(self, fi: int, frame: np.ndarray, result, court_kps, draw_in_place: bool) -> Canvas:

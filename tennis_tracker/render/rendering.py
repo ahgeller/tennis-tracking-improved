@@ -1,13 +1,15 @@
 """Drawing primitives for the tracking video and its track-debug twin: the colours, the
-``Canvas`` that writes a mark onto both frames at once, the static layers (players, raw
-detections, ROIs), the selected result's marker and the HUD.
+``Canvas`` that writes a mark onto both frames at once, ``paint_blended`` (a mark at partial
+opacity), the static layers (players, raw detections, ROIs), the selected result's marker in
+either frame's ``MarkerStyle`` and the HUD.
 
 The court layers are in ``court_drawing``, the trails in ``trails`` and the chosen track's
 display path in ``display_path``; all three draw with what is here.
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional, Sequence, Tuple
+import math
+from typing import Callable, Dict, Iterable, NamedTuple, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -48,6 +50,9 @@ HUD_LABEL_DEFAULT = "PHY"
 # Marker geometry.
 _DET_MARKER_DEFAULT_RADIUS = 3
 _LABEL_OFFSET: Point = (10, -5)
+# The glowing marker's halo: translucent discs round the filled one, outermost first, each a
+# multiple of the marker radius at an opacity; where they overlap the glow builds up toward the ball.
+_GLOW_HALO: Tuple[Tuple[float, float], ...] = ((2.5, 0.15), (1.9, 0.25), (1.4, 0.40))
 _ANCHOR_RADIUS_EMA_KEEP, _ANCHOR_RADIUS_EMA_NEW = 0.80, 0.20   # running ball-radius estimate weights
 _ANCHOR_RADIUS_CAP_SCALE = 3               # cap = ball_marker_max_radius * this
 SEARCH_MARKER_SIZE = 12
@@ -120,6 +125,31 @@ def cross(targets: Iterable[np.ndarray], centre: Point, color: Color, size: int)
         cv2.drawMarker(img, centre, color, cv2.MARKER_CROSS, size, 1)
 
 
+Painter = Callable[[np.ndarray, Point], None]
+
+
+def paint_blended(target: np.ndarray, box: Tuple[int, int, int, int], alpha: float, paint: Painter) -> None:
+    """Show what ``paint`` draws at opacity ``alpha`` over ``target``.
+
+    ``paint`` gets the image to draw on and the offset to subtract from frame coordinates.  At
+    full opacity it draws straight onto the frame; below it, onto a copy of the frame's ``box``
+    (x0, y0, x1, y1, the ends exclusive, clipped to the frame) that one ``cv2.addWeighted``
+    blends back, so a mark costs a copy of its own neighbourhood and not of the frame.
+    """
+    if alpha >= 1.0:
+        paint(target, (0, 0))
+        return
+    h, w = target.shape[:2]
+    x0, y0 = max(0, box[0]), max(0, box[1])
+    x1, y1 = min(w, box[2]), min(h, box[3])
+    if x0 >= x1 or y0 >= y1:
+        return
+    roi = target[y0:y1, x0:x1]
+    overlay = roi.copy()
+    paint(overlay, (x0, y0))
+    cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0.0, dst=roi)
+
+
 # ---------------------------------------------------------------------------
 # Static layers: players, raw detections, ROIs
 # ---------------------------------------------------------------------------
@@ -154,29 +184,33 @@ def draw_motion_rois(targets: Iterable[np.ndarray], rois: Optional[Sequence[Sequ
 # ---------------------------------------------------------------------------
 
 class MarkerSizer:
-    """Running estimate of the ball's radius from detector boxes, for marker sizes."""
+    """Running estimate of the ball's radius from detector boxes, for marker sizes.
+
+    The markers stay within ``ball_marker_min_radius`` and ``ball_marker_max_radius``; a minimum
+    set above the maximum (one tuned under an earlier, larger maximum) raises the maximum to it
+    rather than ``np.clip`` quietly answering the maximum for every size.
+    """
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.radius = float(max(cfg.ball_marker_min_radius, 2))
-        self._cap = float(max(cfg.ball_marker_max_radius * _ANCHOR_RADIUS_CAP_SCALE, cfg.ball_marker_min_radius))
+        self.min_radius = int(cfg.ball_marker_min_radius)
+        self.max_radius = max(int(cfg.ball_marker_max_radius), self.min_radius)
+        self.radius = float(max(self.min_radius, 2))
+        self._cap = float(max(self.max_radius * _ANCHOR_RADIUS_CAP_SCALE, self.min_radius))
 
     def observe_box(self, box_w: float, box_h: float) -> int:
         """Fold a detector box in; returns the marker radius for that detection."""
-        cfg = self.cfg
         det_radius = 0.5 * max(box_w, box_h)
         self.radius = float(np.clip(
-            _ANCHOR_RADIUS_EMA_KEEP * self.radius + _ANCHOR_RADIUS_EMA_NEW * det_radius,
-            cfg.ball_marker_min_radius, self._cap))
+            _ANCHOR_RADIUS_EMA_KEEP * self.radius + _ANCHOR_RADIUS_EMA_NEW * det_radius, self.min_radius, self._cap))
         ball_px = max(int(round(box_w)), int(round(box_h)), 1)
-        return int(np.clip(round(ball_px * cfg.ball_marker_box_scale),
-                           cfg.ball_marker_min_radius, cfg.ball_marker_max_radius))
+        return int(np.clip(round(ball_px * self.cfg.ball_marker_box_scale), self.min_radius, self.max_radius))
 
     @property
     def estimate_radius(self) -> int:
         """Marker radius for a position without a detector box (motion/interp), within the same
         limits as a detection's marker so the two shrink together."""
-        return int(np.clip(round(self.radius), self.cfg.ball_marker_min_radius, self.cfg.ball_marker_max_radius))
+        return int(np.clip(round(self.radius), self.min_radius, self.max_radius))
 
 
 class SearchCentreSmoother:
@@ -208,32 +242,82 @@ class SearchCentreSmoother:
         self._last_frame = -1
 
 
+class MarkerStyle(NamedTuple):
+    """How ``draw_selected_result`` marks the chosen position on one frame."""
+    glow: bool      # a soft halo round the filled disc, else a 1 px dark ring round a detection's disc
+    box: bool       # the detection box with its emphasised bottom edge
+    label: bool     # the DET/MOT/PHY text beside the marker
+
+
+# The tracking video: a glowing dot and nothing else, so the ball's movement shows through.
+GLOW_MARKER_STYLE = MarkerStyle(glow=True, box=False, label=False)
+# The track-debug video: the flat disc, the detection box and the source label.
+DEBUG_MARKER_STYLE = MarkerStyle(glow=False, box=True, label=True)
+
+# Marker colour per FrameResult.source; a source outside it gets no marker.
+MARKER_SOURCE_COLOR: Dict[str, Color] = {"det": COLOR_DET, "motion": COLOR_MOTION, "interp": COLOR_INTERP}
+
+
+def draw_glowing_marker(target: np.ndarray, centre: Point, radius: int, color: Color) -> None:
+    """A bright glowing dot: the ``_GLOW_HALO`` discs blended in from the outside, then the
+    filled disc of ``radius`` on top."""
+    cx, cy = centre
+    reach = int(math.ceil(radius * _GLOW_HALO[0][0])) + 2
+    box = (cx - reach, cy - reach, cx + reach + 1, cy + reach + 1)
+    for scale, alpha in _GLOW_HALO:
+        halo_radius = int(round(radius * scale))
+
+        def paint(img: np.ndarray, offset: Point, halo_radius: int = halo_radius) -> None:
+            cv2.circle(img, (cx - offset[0], cy - offset[1]), halo_radius, color, -1, cv2.LINE_AA)
+
+        paint_blended(target, box, alpha, paint)
+    cv2.circle(target, centre, radius, color, -1, cv2.LINE_AA)
+
+
+def _draw_marker(target: np.ndarray, result: FrameResult, centre: Point, radius: int, color: Color,
+                 style: MarkerStyle) -> None:
+    """The chosen position on one frame: in the style's order, the detection box, the disc (glowing
+    or flat under its ring) and the source label."""
+    if style.box and result.source == "det" and result.bbox:
+        bx1, by1, bx2, by2 = (int(float(v)) for v in result.bbox)
+        # High-contrast box: dark halo + bright box + emphasised bottom edge, each one pixel
+        # wide so the box does not hide the ball's movement.
+        cv2.rectangle(target, (bx1, by1), (bx2, by2), COLOR_OUTLINE, 2)
+        cv2.rectangle(target, (bx1, by1), (bx2, by2), color, 1)
+        cv2.line(target, (bx1, by2), (bx2, by2), COLOR_WHITE, 1)
+    if style.glow:
+        draw_glowing_marker(target, centre, radius, color)
+    else:
+        if result.source == "det":
+            cv2.circle(target, centre, radius + 1, COLOR_OUTLINE, 1)
+        cv2.circle(target, centre, radius, color, -1)
+    if style.label:
+        label_at = (centre[0] + _LABEL_OFFSET[0], centre[1] + _LABEL_OFFSET[1])
+        cv2.putText(target, HUD_LABEL.get(result.source, HUD_LABEL_DEFAULT), label_at, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, color)
+
+
 def draw_selected_result(canvas: Canvas, result: FrameResult, frame_index: int, sizer: MarkerSizer,
                          search_smoother: SearchCentreSmoother, draw_search_regions: bool) -> None:
-    """The chosen position, colour-coded by source, with its search region on the debug frame
+    """The chosen position, colour-coded by source: the ``GLOW_MARKER_STYLE`` on the main frame
+    and the ``DEBUG_MARKER_STYLE`` on the debug frame, with its search region on the debug frame
     (and on the main frame when ``draw_search_regions``)."""
     rcx, rcy = int(result.cx), int(result.cy)
-    label_at = (rcx + _LABEL_OFFSET[0], rcy + _LABEL_OFFSET[1])
-    both = canvas.both
-    if result.source == "det":
-        marker_radius = _DET_MARKER_DEFAULT_RADIUS
-        if result.bbox:
-            bx1f, by1f, bx2f, by2f = map(float, result.bbox)
-            bx1, by1, bx2, by2 = map(int, (bx1f, by1f, bx2f, by2f))
-            # High-contrast box: dark halo + bright box + emphasised bottom edge, each one pixel
-            # wide so the box does not hide the ball's movement.
-            rectangle(both, (bx1, by1), (bx2, by2), COLOR_OUTLINE, 2)
-            rectangle(both, (bx1, by1), (bx2, by2), COLOR_DET, 1)
-            line(both, (bx1, by2), (bx2, by2), COLOR_WHITE, 1)
-            marker_radius = sizer.observe_box(max(bx2f - bx1f, 1.0), max(by2f - by1f, 1.0))
-        # The marker sits on the measured centre, not a bottom anchor.
-        circle(both, (rcx, rcy), marker_radius + 1, COLOR_OUTLINE, 1)
-        circle(both, (rcx, rcy), marker_radius, COLOR_DET, -1)
-        text(both, "DET", label_at, 0.4, COLOR_DET)
-    elif result.source == "motion":
-        radius = sizer.estimate_radius
-        circle(both, (rcx, rcy), radius, COLOR_MOTION, -1)
-        text(both, "MOT", label_at, 0.4, COLOR_MOTION)
+    color = MARKER_SOURCE_COLOR.get(result.source)
+    if color is not None:
+        # The marker sits on the measured centre, not a bottom anchor; a detection's box sets its size.
+        if result.source == "det":
+            radius = _DET_MARKER_DEFAULT_RADIUS
+            if result.bbox:
+                bx1f, by1f, bx2f, by2f = map(float, result.bbox)
+                radius = sizer.observe_box(max(bx2f - bx1f, 1.0), max(by2f - by1f, 1.0))
+        else:
+            radius = sizer.estimate_radius
+        _draw_marker(canvas.main, result, (rcx, rcy), radius, color, GLOW_MARKER_STYLE)
+        for debug in canvas.debug_only:
+            _draw_marker(debug, result, (rcx, rcy), radius, color, DEBUG_MARKER_STYLE)
+
+    if result.source == "motion":
         if result.search_radius > 0:
             scx, scy = search_smoother.smooth(frame_index, int(result.search_cx), int(result.search_cy))
             targets = canvas.select(main=draw_search_regions)
@@ -244,9 +328,6 @@ def draw_selected_result(canvas: Canvas, result: FrameResult, frame_index: int, 
             search_smoother.reset()
     elif result.source == "interp":
         search_smoother.reset()
-        radius = sizer.estimate_radius
-        circle(both, (rcx, rcy), radius, COLOR_INTERP, -1)
-        text(both, "PHY", label_at, 0.4, COLOR_INTERP)
 
     # The selector's search region for det/interp frames (court-scaled radius).
     if result.source in ("det", "interp") and float(result.search_radius) > 0.0:

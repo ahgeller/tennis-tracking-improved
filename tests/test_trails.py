@@ -1,17 +1,21 @@
-"""tennis_tracker.render.trails: the chosen ball's trail breaks where it should, the display-path trail
-keeps exact and filled points apart, and the candidate overlay draws every track. Synthetic
-frames and results only."""
+"""tennis_tracker.render.trails: the chosen ball's trail breaks where it should and draws as a comet,
+the display-path trail keeps exact and filled points apart, and the candidate overlay draws
+every track. Synthetic frames and results only."""
+import timeit
+
+import cv2
 from types import SimpleNamespace
 
 import numpy as np
 from ball_in_play_selector import Detection, FrameResult
 
 from tennis_tracker.config import Config
-from tennis_tracker.render.rendering import Canvas
+from tennis_tracker.render.rendering import COLOR_OUTLINE, Canvas
 from tennis_tracker.render.trails import (
-    CANDIDATE_TRAIL_LEN, DEBUG_TRACK_STYLE, LIGHT_TRACK_STYLE, TRAIL_MIN_LEN, TRAIL_SECONDS,
-    _TRAIL_DIRECTION_BRIDGE_SCALE, BallTrail, CandidateTrackTrails, DisplayPathTrail, _reversal_breaks,
-    _segment_source, _SegmentLimits, _trail_jump_fracs, _transition_too_far, track_color,
+    CANDIDATE_TRAIL_LEN, COMET_HEAD_THICKNESS, COMET_TAIL_ALPHA, COMET_TAIL_THICKNESS, DEBUG_TRACK_STYLE,
+    LIGHT_TRACK_STYLE, TRAIL_MIN_LEN, TRAIL_SECONDS, _TRAIL_DIRECTION_BRIDGE_SCALE, BallTrail,
+    CandidateTrackTrails, DisplayPathTrail, Stroke, _reversal_breaks, _segment_source, _SegmentLimits,
+    _trail_jump_fracs, _transition_too_far, draw_fading_strokes, track_color,
 )
 
 WIDTH, HEIGHT, FPS = 640, 360, 30.0
@@ -23,6 +27,27 @@ def result(cx, cy, source="det", conf=0.9):
 
 def blank():
     return np.zeros((HEIGHT, WIDTH, 3), np.uint8)
+
+
+GREY = (90, 90, 90)
+
+
+def grey():
+    return np.full((HEIGHT, WIDTH, 3), GREY, np.uint8)
+
+
+def _between(pixel, a, b) -> bool:
+    """``pixel`` is a blend of the colours ``a`` and ``b``: every channel within their range, and
+    the pixel neither colour itself."""
+    pixel = tuple(int(v) for v in pixel)
+    return pixel not in (tuple(a), tuple(b)) and all(min(x, y) <= v <= max(x, y) for v, x, y in zip(pixel, a, b))
+
+
+def _painted_rows(frame, column, min_contrast: int = 24) -> int:
+    """How many pixels of ``column`` stand out from the grey background by ``min_contrast`` in
+    some channel: a line's height there, without the faint anti-aliased fringe."""
+    contrast = np.abs(frame[:, column].astype(np.int16) - np.array(GREY, np.int16)).max(axis=1)
+    return int((contrast >= min_contrast).sum())
 
 
 # --------------------------------------------------------------------------- BallTrail
@@ -103,6 +128,109 @@ def test_drawn_trail_colours_follow_the_segment_source():
     assert _is_green(main[200, 136])            # back on a detection
 
 
+def _straight_trail(fps: float, frame_w: int = WIDTH, frame_h: int = HEIGHT) -> BallTrail:
+    """A full-length detector trail along one row, the head at the right."""
+    trail = BallTrail(Config(), fps, frame_w, frame_h)
+    for i in range(trail.max_len):
+        trail.advance(result(40.0 + 8 * i, 200.0), None)
+    return trail
+
+
+def test_the_main_frame_comet_tapers_and_fades_from_head_to_tail():
+    trail = _straight_trail(fps=60.0)                                    # 15 points: 40 to 152
+    main = grey()
+    trail.draw(Canvas(main, None), draw_main=True)
+    head_x, tail_x = 40 + 8 * (trail.max_len - 1) - 4, 44
+    assert _painted_rows(main, head_x) > _painted_rows(main, tail_x)    # thicker at the head ...
+    assert _painted_rows(main, head_x) >= COMET_HEAD_THICKNESS
+    assert _painted_rows(main, tail_x) <= COMET_TAIL_THICKNESS + 1       # ... a 1 px line at the tail
+    green = (40, 255, 40)
+    assert tuple(main[200, head_x]) == green                             # the head at full strength
+    assert _between(main[200, tail_x], GREY, green)                      # the tail blended toward the frame
+    assert _is_green(main[200, tail_x])
+    assert not (main == np.array(COLOR_OUTLINE, np.uint8)).all(axis=2).any()   # the outline is blended too
+
+
+def test_the_debug_frame_trail_is_the_thin_line_it_was():
+    trail = _straight_trail(fps=60.0)
+    main, debug = grey(), grey()
+    trail.draw(Canvas(main, debug), draw_main=True)
+    head_x = 40 + 8 * (trail.max_len - 1) - 4
+    assert _painted_rows(debug, head_x) < _painted_rows(main, head_x)
+    assert (debug == np.array(COLOR_OUTLINE, np.uint8)).all(axis=2).any()   # its outline is solid
+
+
+def test_fading_strokes_take_the_newest_stroke_opacity_where_strokes_meet():
+    frame = blank()
+    color = (0, 0, 200)
+    strokes = [Stroke((20, 50), (60, 50), color, 2, 0.0), Stroke((60, 50), (100, 50), color, 2, 1.0)]
+    draw_fading_strokes(frame, strokes, head_alpha=1.0, tail_alpha=0.25, outline=True)
+    assert tuple(frame[50, 80]) == color                                 # the head at full opacity
+    assert tuple(frame[50, 40]) == (0, 0, 50)                            # the tail at a quarter
+    assert tuple(frame[50, 60]) == color                                 # the joint is colour, not the head's outline ...
+    assert tuple(frame[50, 52]) == (0, 0, 50)                            # ... and the head's opacity reaches no further than its cap
+    assert COMET_TAIL_ALPHA == 0.25
+
+
+def _rises_toward_the_tail(frame, row: int, tail_x: int, head_x: int, channel: int = 1):
+    """``(x, rise)`` for every centre-line pixel brighter than its neighbour on the head side: on a
+    straight comet, whose opacity falls from head to tail, there should be none worth a level."""
+    values = frame[row, tail_x:head_x + 1, channel].astype(int)
+    return [(tail_x + i, int(values[i] - values[i + 1])) for i in range(len(values) - 1) if values[i] > values[i + 1]]
+
+
+def test_a_straight_comet_fades_monotonically_with_no_bead_where_strokes_meet():
+    """Each pixel is blended with the frame once, at the newest stroke's opacity, so a straight
+    comet's centre line darkens step by step from head to tail; blending band by band left a bead
+    some 50 levels bright where a band's first stroke was blended over the end of the one before."""
+    frame = np.full((HEIGHT, WIDTH, 3), 128, np.uint8)
+    n, step = 12, 20
+    strokes = [Stroke((40 + step * i, 180), (40 + step * (i + 1), 180), (40, 255, 40),
+                      2 + round(2 * i / (n - 1)), i / (n - 1)) for i in range(n)]
+    draw_fading_strokes(frame, strokes, head_alpha=1.0, tail_alpha=0.25, outline=True)
+    rises = _rises_toward_the_tail(frame, 180, tail_x=42, head_x=40 + step * n - 2)
+    assert all(rise <= 1 for _, rise in rises), rises
+    assert frame[180, 40 + step * n - 2, 1] == 255 and frame[180, 42, 1] < 180   # and it does fade
+
+
+def test_the_comet_of_a_ball_trail_fades_monotonically_past_its_one_pixel_tail():
+    """The ``BallTrail`` comet, strokes of 4 px down to 1 px: monotone wherever the strokes are
+    2 px or wider.  Where two 1 px strokes meet, OpenCV's anti-aliased 1 px line covers the shared
+    end pixel by three quarters only, a dimmer dot that is the line's own and not the blend's."""
+    trail = _straight_trail(fps=60.0)                                    # 15 points: 40 to 152
+    frame = np.full((HEIGHT, WIDTH, 3), 128, np.uint8)
+    trail.draw(Canvas(frame, None), draw_main=True)
+    one_px = [i for i in range(1, trail.max_len)
+              if trail._comet_stroke(i, (0, 0), (1, 0), (0, 0, 0)).thickness == COMET_TAIL_THICKNESS]
+    assert one_px and one_px == list(range(1, one_px[-1] + 1))            # the oldest strokes, and only those
+    first_wide_x = 40 + 8 * one_px[-1] + 2                               # past the last 1 px stroke's cap
+    rises = _rises_toward_the_tail(frame, 200, tail_x=first_wide_x, head_x=40 + 8 * (trail.max_len - 1) - 2)
+    assert all(rise <= 1 for _, rise in rises), rises
+
+
+def test_fading_strokes_at_full_opacity_are_a_plain_polyline_draw():
+    """The track-debug video's trails (``DEBUG_TRACK_STYLE``, no fade) must stay byte-identical:
+    at full opacity the strokes draw straight onto the frame, segment by segment, as
+    ``cv2.polylines`` draws the same points."""
+    points = [(20, 40), (60, 48), (100, 44), (140, 60), (180, 52)]
+    color = (120, 200, 40)
+    strokes = [Stroke(a, b, color, 1, i / 4) for i, (a, b) in enumerate(zip(points, points[1:]), start=1)]
+    ours, plain = grey(), grey()
+    draw_fading_strokes(ours, strokes, head_alpha=1.0, tail_alpha=1.0, outline=False)
+    cv2.polylines(plain, [np.array(points, np.int32)], False, color, 1, cv2.LINE_AA)
+    assert np.array_equal(ours, plain)
+    assert ours.any() and not np.array_equal(ours, grey())
+
+
+def test_drawing_a_sixty_point_comet_on_a_1080p_frame_is_fast():
+    trail = _straight_trail(fps=240.0, frame_w=1920, frame_h=1080)
+    assert trail.max_len == 60
+    frame = np.full((1080, 1920, 3), GREY, np.uint8)
+    canvas = Canvas(frame, None)
+    seconds = min(timeit.repeat(lambda: trail.draw(canvas, draw_main=True), number=20, repeat=3)) / 20
+    assert seconds < 0.005, f"{seconds * 1e3:.2f} ms per draw"
+
+
 # --------------------------------------------------------------------------- DisplayPathTrail
 
 def test_display_path_trail_rounds_points_and_records_gaps_once():
@@ -156,7 +284,7 @@ def test_track_colour_is_stable_and_never_dark():
 def test_candidate_trails_follow_each_track_and_mark_the_chosen_one():
     a = track(1, 10.0, det(0, 50.0, 50.0), det(1, 60.0, 50.0), det(3, 80.0, 50.0))
     b = track(2, 30.0, det(0, 300.0, 200.0))
-    trails = CandidateTrackTrails([a, b], chosen_track=b)
+    trails = CandidateTrackTrails([a, b], chosen_track=b, fps=FPS)
     assert [int(t.track_id) for t in trails.tracks] == [2, 1]        # best score first
     assert trails.chosen_id == 2
     debug = blank()
@@ -169,7 +297,7 @@ def test_candidate_trails_follow_each_track_and_mark_the_chosen_one():
 
 def test_candidate_trails_are_bounded():
     long = track(1, 1.0, *(det(f, 10.0 + f, 10.0) for f in range(CANDIDATE_TRAIL_LEN + 20)))
-    trails = CandidateTrackTrails([long], chosen_track=None)
+    trails = CandidateTrackTrails([long], chosen_track=None, fps=FPS)
     debug = blank()
     for frame in range(CANDIDATE_TRAIL_LEN + 20):
         trails.advance_and_draw(debug, frame)
@@ -186,7 +314,7 @@ def test_advance_once_then_draw_on_two_targets_at_two_weights():
     weight and the tracking frame at the light one hold the same trails."""
     a = track(1, 10.0, det(0, 50.0, 50.0), det(1, 60.0, 50.0), det(2, 70.0, 50.0))
     b = track(2, 30.0, det(0, 300.0, 200.0), det(1, 300.0, 210.0), det(2, 300.0, 220.0))
-    trails = CandidateTrackTrails([a, b], chosen_track=b)
+    trails = CandidateTrackTrails([a, b], chosen_track=b, fps=FPS)
     debug, main = blank(), blank()
     for frame in range(3):
         trails.advance(frame)
@@ -211,10 +339,77 @@ def test_advance_once_then_draw_on_two_targets_at_two_weights():
 def test_the_debug_style_is_the_default_of_advance_and_draw():
     a = track(1, 10.0, det(0, 50.0, 50.0))
     by_default, explicit = blank(), blank()
-    CandidateTrackTrails([a], chosen_track=a).advance_and_draw(by_default, 0)
-    CandidateTrackTrails([a], chosen_track=a).advance_and_draw(explicit, 0, DEBUG_TRACK_STYLE)
+    CandidateTrackTrails([a], chosen_track=a, fps=FPS).advance_and_draw(by_default, 0)
+    CandidateTrackTrails([a], chosen_track=a, fps=FPS).advance_and_draw(explicit, 0, DEBUG_TRACK_STYLE)
     assert np.array_equal(by_default, explicit)
     assert _painted(by_default, track_color(1))[50, 50]                        # the chosen dot is filled
+
+
+def _straight_track(track_id, first_frame, last_frame, y=100.0, step=4.0):
+    """A track along row ``y``, ``step`` px per frame, seen on every frame of the range."""
+    return track(track_id, 10.0, *(det(f, 40.0 + step * f, y) for f in range(first_frame, last_frame + 1)))
+
+
+def _both_frames(trails, frame_index):
+    """The debug and main frames of ``frame_index`` after one ``advance``."""
+    debug, main = blank(), blank()
+    trails.advance(frame_index)
+    trails.draw(debug, frame_index, DEBUG_TRACK_STYLE)
+    trails.draw(main, frame_index, LIGHT_TRACK_STYLE)
+    return debug, main
+
+
+def test_a_style_counts_its_seconds_in_the_clip_frames():
+    assert LIGHT_TRACK_STYLE.trail_seconds == 1.0 and LIGHT_TRACK_STYLE.linger_seconds == 0.5
+    assert DEBUG_TRACK_STYLE.trail_seconds is None and DEBUG_TRACK_STYLE.linger_seconds is None
+    at_30, at_60 = (CandidateTrackTrails([], None, fps=fps) for fps in (30.0, 60.0))
+    assert (at_30.frames(1.0), at_30.frames(0.5)) == (30, 15)
+    assert (at_60.frames(1.0), at_60.frames(0.5)) == (60, 30)       # 60 fps doubles them
+    assert at_30.frames(0.001) == 1
+
+
+def _tinted(frame, color):
+    """Pixels of ``frame`` in ``color`` at a tenth strength or more (the light trail's tail is a
+    fifth, less the anti-aliasing)."""
+    color = np.array(color, np.int16)
+    return (frame >= color // 10).all(axis=2) & (frame <= color).all(axis=2) & frame.any(axis=2)
+
+
+def test_the_light_trail_holds_the_last_second_and_fades_while_the_debug_trail_keeps_its_stored_length():
+    trails = CandidateTrackTrails([_straight_track(1, 0, 90)], chosen_track=None, fps=FPS)
+    for frame in range(90):
+        trails.advance(frame)
+    debug, main = _both_frames(trails, 90)
+    color = track_color(1)
+    # The middle of the stroke from a frame to the next, clear of the anti-aliased joints.
+    mid = lambda frame, img: img[100, int(40 + 4 * frame) + 2]      # noqa: E731
+    assert tuple(mid(89, main)) == color                            # the head stroke at full strength
+    assert _between(mid(61, main), (0, 0, 0), color)                # the oldest of the 30 frames, blended to the frame
+    assert _tinted(main, color)[100, int(40 + 4 * 61) + 2]
+    assert not mid(60, main).any() and not mid(30, main).any()      # nothing older
+    strong = np.array(color) * 0.85                                 # a 1 px anti-aliased line, unfaded
+    assert (mid(61, debug) >= strong).all() and (mid(0, debug) >= strong).all()   # the debug trail: all 91 points
+
+
+def test_a_track_that_ended_leaves_the_main_frame_after_the_linger_and_stays_on_the_debug_frame():
+    ended = _straight_track(1, 0, 20)
+    trails = CandidateTrackTrails([ended], chosen_track=None, fps=FPS)
+    linger = trails.frames(LIGHT_TRACK_STYLE.linger_seconds)
+    assert linger == 15
+    for frame in range(20):
+        trails.advance(frame)
+    for frame in range(20, 20 + linger + 3):
+        debug, main = _both_frames(trails, frame)
+        on_debug, on_main = _tinted(debug, track_color(1)).any(), _tinted(main, track_color(1)).any()
+        assert on_debug                                             # the debug video keeps it
+        assert on_main == (frame - 20 <= linger), frame             # the main frame lets it go after the linger
+    # The last main frame that shows it still shows its (shrinking) trail, not just its dot.
+    trails = CandidateTrackTrails([ended], chosen_track=None, fps=FPS)
+    for frame in range(20 + linger):
+        trails.advance(frame)
+    _, main = _both_frames(trails, 20 + linger)
+    tinted = _tinted(main, track_color(1))[100]
+    assert tinted[int(40 + 4 * 15) + 2] and not tinted[int(40 + 4 * 0) + 2]   # frames 6 to 20 are its last second
 
 
 # --------------------------------------------------------------------------- the break rules

@@ -1,7 +1,8 @@
 """The trails of the tracking video and its track-debug twin: the chosen ball's recent path
-(``BallTrail``), the chosen track's display path (``DisplayPathTrail``) and every selector
-track's dots and short trails (``CandidateTrackTrails``, at the debug video's full weight or
-the lighter ``LIGHT_TRACK_STYLE`` the tracking video takes with ``Config.show_all_tracks``).
+(``BallTrail``: a comet on the tracking video, a thin fading line on the debug video), the
+chosen track's display path (``DisplayPathTrail``) and every selector track's dots and short
+trails (``CandidateTrackTrails``, at the debug video's full weight or the lighter
+``LIGHT_TRACK_STYLE`` the tracking video takes with ``Config.show_all_tracks``).
 Each one advances once per frame in pass 2 and draws onto the ``rendering.Canvas``.
 """
 from __future__ import annotations
@@ -31,9 +32,13 @@ TRAIL_SECONDS = 0.25
 TRAIL_MIN_LEN = 10
 DISPLAY_PATH_TRAIL_MIN_LEN = 40
 DISPLAY_PATH_TRAIL_EXTRA = 20
-_TRAIL_FADE_BASE, _TRAIL_FADE_RANGE = 0.55, 0.45    # alpha = base + range * age fraction
-_TRAIL_THICKNESS = 2
-_TRAIL_MIN_THICKNESS = 1
+# The debug video's ball trail: a thin line whose colour darkens with age.
+_DEBUG_TRAIL_FADE_BASE, _DEBUG_TRAIL_FADE_RANGE = 0.55, 0.45    # colour scale = base + range * position in the trail
+_DEBUG_TRAIL_THICKNESS = 2
+_DEBUG_TRAIL_MIN_THICKNESS = 1
+# The tracking video's comet: the trail tapers and fades toward the frame from head to tail.
+COMET_HEAD_THICKNESS, COMET_TAIL_THICKNESS = 4, 1
+COMET_HEAD_ALPHA, COMET_TAIL_ALPHA = 1.0, 0.25
 _TRAIL_HARD_MIN_X_PX, _TRAIL_HARD_MIN_Y_PX = 34.0, 26.0
 _TRAIL_BRIDGE_FRAC, _TRAIL_BRIDGE_MIN_PX = 0.035, 18.0
 _TRAIL_TRANSITION_FRAC, _TRAIL_TRANSITION_MIN_PX = 0.020, 14.0
@@ -46,7 +51,7 @@ _DIRECTION_BREAK_COS = -0.32
 _DIRECTION_BREAK_MIN_DY_PX = 12.0
 _DISPLAY_PATH_MAX_SEGMENT_FRAC, _DISPLAY_PATH_MAX_SEGMENT_MIN_PX = 0.15, 200.0
 # Candidate-track overlay.
-CANDIDATE_TRAIL_LEN = 120     # long enough to show full rally segments
+CANDIDATE_TRAIL_LEN = 120     # the stored trail, long enough to show full rally segments
 _CANDIDATE_LABEL_OFFSET: Point = (6, 6)
 _TRACK_COLOR_MIN_COMPONENT, _TRACK_COLOR_TARGET = 100, 150.0
 
@@ -112,6 +117,69 @@ def _trail_direction_break(prev2: Sequence[float], prev: Sequence[float], curr_x
 TrailPoint = Tuple[int, int, str, float]
 
 
+class Stroke(NamedTuple):
+    """One trail segment waiting to be painted by ``draw_fading_strokes``."""
+    p0: Point
+    p1: Point
+    color: Color
+    thickness: int
+    newness: float      # 1.0 at the trail's head, 0.0 at the oldest point it may hold
+
+
+def _paint_strokes(img: np.ndarray, offset: Point, strokes: Sequence[Stroke], outline: bool) -> None:
+    """Draw the strokes on ``img`` (frame coordinates less ``offset``), in order, so a newer stroke
+    lies on top where the trail crosses itself.  With ``outline`` every stroke sits on a dark line
+    one pixel wider, all the outlines under all of the colour, so the outline cap of a stroke does
+    not darken the end of the one it meets."""
+    ox, oy = offset
+    if outline:
+        for stroke in strokes:
+            cv2.line(img, (stroke.p0[0] - ox, stroke.p0[1] - oy), (stroke.p1[0] - ox, stroke.p1[1] - oy),
+                     COLOR_OUTLINE, stroke.thickness + 1, cv2.LINE_AA)
+    for stroke in strokes:
+        cv2.line(img, (stroke.p0[0] - ox, stroke.p0[1] - oy), (stroke.p1[0] - ox, stroke.p1[1] - oy),
+                 stroke.color, stroke.thickness, cv2.LINE_AA)
+
+
+def draw_fading_strokes(target: np.ndarray, strokes: Sequence[Stroke], head_alpha: float, tail_alpha: float,
+                        outline: bool) -> None:
+    """Paint the strokes blended toward the frame by age: a stroke's opacity runs from
+    ``tail_alpha`` at newness 0 to ``head_alpha`` at newness 1.
+
+    At full opacity throughout, the strokes draw straight onto the frame (``_paint_strokes``).
+    Otherwise they are all drawn once on a copy of the frame region they cover, each writes its
+    opacity into a float mask over its whole width (the outline and the anti-aliased fringe
+    included), newer over older, and the copy is blended back through the mask in one step.
+    Every pixel is thus mixed with the frame exactly once, at the opacity of the newest stroke
+    over it; blending the trail in bands, each over the result of the last, left a bright bead
+    where a band's first stroke was blended over the end of the band before and a dark spot where
+    its outline cap reached that end.
+    """
+    if not strokes:
+        return
+    if head_alpha >= 1.0 and tail_alpha >= 1.0:
+        _paint_strokes(target, (0, 0), strokes, outline)
+        return
+    h, w = target.shape[:2]
+    pad = max(stroke.thickness for stroke in strokes) + 2
+    xs = [x for stroke in strokes for x in (stroke.p0[0], stroke.p1[0])]
+    ys = [y for stroke in strokes for y in (stroke.p0[1], stroke.p1[1])]
+    x0, y0 = max(0, min(xs) - pad), max(0, min(ys) - pad)
+    x1, y1 = min(w, max(xs) + pad + 1), min(h, max(ys) + pad + 1)
+    if x0 >= x1 or y0 >= y1:
+        return
+    frame = target[y0:y1, x0:x1]
+    painted = frame.copy()
+    _paint_strokes(painted, (x0, y0), strokes, outline)
+    alpha = np.zeros(frame.shape[:2], np.float32)
+    extra = 3 if outline else 2     # the outline's pixel and the fringe anti-aliasing adds on either side
+    for stroke in strokes:
+        opacity = tail_alpha + (head_alpha - tail_alpha) * stroke.newness
+        cv2.line(alpha, (stroke.p0[0] - x0, stroke.p0[1] - y0), (stroke.p1[0] - x0, stroke.p1[1] - y0),
+                 opacity, stroke.thickness + extra, cv2.LINE_8)
+    cv2.blendLinear(painted, frame, alpha, 1.0 - alpha, dst=frame)
+
+
 class _SegmentLimits(NamedTuple):
     """The pixel distances beyond which a trail segment breaks (see ``BallTrail._breaks_before``)."""
     hard_x_px: float        # a jump along the court's width axis
@@ -139,8 +207,8 @@ def _reversal_breaks(src: str, prev_src: str, dist: float, limits: _SegmentLimit
 class BallTrail:
     """The chosen ball's recent path, broken into segments at jumps and reversals.
 
-    ``advance`` appends this frame's position (or a break) and ``draw`` paints
-    the segments, newest brightest and thickest.
+    ``advance`` appends this frame's position (or a break) and ``draw`` paints the segments,
+    newest brightest and thickest: a comet on the main frame, a thin line on the debug frame.
     """
 
     def __init__(self, cfg: TrailSettings, fps: float, frame_w: int, frame_h: int) -> None:
@@ -218,26 +286,38 @@ class BallTrail:
         while len(self.points) > self.max_len:
             self.points.pop(0)
 
+    def _comet_stroke(self, i: int, p0: Point, p1: Point, base: Color) -> Stroke:
+        """The main frame's segment ending on ``points[i]``: its width tapers from
+        ``COMET_HEAD_THICKNESS`` at the head to ``COMET_TAIL_THICKNESS`` at the age the trail
+        may hold, over which ``draw_fading_strokes`` also fades it."""
+        age = len(self.points) - 1 - i
+        newness = 1.0 - age / max(self.max_len - 1, 1)
+        thickness = int(round(COMET_TAIL_THICKNESS + (COMET_HEAD_THICKNESS - COMET_TAIL_THICKNESS) * newness))
+        return Stroke(p0, p1, base, thickness, newness)
+
     def draw(self, canvas: Canvas, draw_main: bool) -> None:
         """Paint the segments: the debug frame always, the main frame when ``draw_main``.  Each
-        segment takes its end point's source colour (``_segment_source``) and fades with age."""
+        segment takes its end point's source colour (``_segment_source``).  The debug frame's line
+        darkens and thins with the segment's position in the trail; the main frame's comet tapers
+        and blends toward the frame with the segment's age."""
         n = len(self.points)
+        strokes: List[Stroke] = []
         for i in range(1, n):
             a, b = self.points[i - 1], self.points[i]
             if a is None or b is None:
                 continue
             p0, p1 = (a[0], a[1]), (b[0], b[1])
             base = _trail_base_color(_segment_source(self.points, i))
-            alpha = _TRAIL_FADE_BASE + _TRAIL_FADE_RANGE * (i / n)
-            color = (int(base[0] * alpha), int(base[1] * alpha), int(base[2] * alpha))
             if canvas.debug is not None:
-                th = max(_TRAIL_MIN_THICKNESS, int(_TRAIL_THICKNESS * alpha))
+                scale = _DEBUG_TRAIL_FADE_BASE + _DEBUG_TRAIL_FADE_RANGE * (i / n)
+                color = (int(base[0] * scale), int(base[1] * scale), int(base[2] * scale))
+                th = max(_DEBUG_TRAIL_MIN_THICKNESS, int(_DEBUG_TRAIL_THICKNESS * scale))
                 cv2.line(canvas.debug, p0, p1, COLOR_OUTLINE, th + 1, cv2.LINE_AA)
                 cv2.line(canvas.debug, p0, p1, color, th, cv2.LINE_AA)
             if draw_main:
-                th = max(_TRAIL_MIN_THICKNESS, int(round(_TRAIL_THICKNESS * alpha)))
-                cv2.line(canvas.main, p0, p1, COLOR_OUTLINE, th + 1, cv2.LINE_AA)
-                cv2.line(canvas.main, p0, p1, color, th, cv2.LINE_AA)
+                strokes.append(self._comet_stroke(i, p0, p1, base))
+        if strokes:
+            draw_fading_strokes(canvas.main, strokes, COMET_HEAD_ALPHA, COMET_TAIL_ALPHA, outline=True)
 
 
 # A display-path trail point: (x, y, exact); None marks a gap.
@@ -304,35 +384,42 @@ def track_color(track_id: int) -> Color:
     return (b, g, r)
 
 
-def _draw_trail_segments(debug: np.ndarray, trail: Sequence[Optional[Tuple[float, float]]], color: Color) -> None:
-    """One thin polyline per unbroken stretch of a candidate trail (None marks a gap)."""
-    segment: List[Tuple[float, float]] = []
-    for p in list(trail) + [None]:
-        if p is None:
-            for i in range(1, len(segment)):
-                p0 = (int(segment[i - 1][0]), int(segment[i - 1][1]))
-                p1 = (int(segment[i][0]), int(segment[i][1]))
-                cv2.line(debug, p0, p1, color, 1, cv2.LINE_AA)
-            segment = []
-        else:
-            segment.append(p)
-
-
 class TrackStyle(NamedTuple):
     """The weight ``CandidateTrackTrails`` draws a frame at.  The trail segments are 1 px in
-    every style; the dot, its dark halo and the label are what differ."""
-    label: bool             # the track's id and score beside its dot
-    dot_radius: int         # the ring's radius
-    ring_thickness: int     # ... and its line width
-    fill_chosen: bool       # the chosen track's dot is filled and 2 px wider, else every track draws alike
-    halo_filled: bool       # a dark disc under the dot, else a dark 1 px ring around it
+    every style; what differs is how much trail shows and for how long, the dot, its dark halo
+    and the label.  The times are seconds so the trails hold the same play at any frame rate."""
+    label: bool                     # the track's id and score beside its dot
+    dot_radius: int                 # the ring's radius
+    ring_thickness: int             # ... and its line width
+    fill_chosen: bool               # the chosen track's dot is filled and 2 px wider, else every track draws alike
+    halo_filled: bool               # a dark disc under the dot, else a dark 1 px ring around it
+    trail_seconds: Optional[float]  # the trail is the track's last so many seconds, else the whole stored trail
+    tail_alpha: float               # the trail's opacity at its oldest point, from 1.0 at the head; 1.0 is no fade
+    linger_seconds: Optional[float]  # a track unseen for longer than this is not drawn at all, else it stays
 
 
-# The track-debug video: ids and scores, a filled dot on the chosen track, dark discs under the dots.
-DEBUG_TRACK_STYLE = TrackStyle(label=True, dot_radius=3, ring_thickness=2, fill_chosen=True, halo_filled=True)
+# The track-debug video: ids and scores, a filled dot on the chosen track, dark discs under the dots,
+# the whole stored trail at full strength for as long as the track is stored.
+DEBUG_TRACK_STYLE = TrackStyle(label=True, dot_radius=3, ring_thickness=2, fill_chosen=True, halo_filled=True,
+                               trail_seconds=None, tail_alpha=1.0, linger_seconds=None)
 # The tracking video with ``Config.show_all_tracks``: a 2 px ring per track, no label, under the
-# chosen track's own trail and marker, which keep the chosen one recognisable.
-LIGHT_TRACK_STYLE = TrackStyle(label=False, dot_radius=2, ring_thickness=1, fill_chosen=False, halo_filled=False)
+# chosen track's own trail and marker, which keep the chosen one recognisable; a second of fading
+# trail that leaves the frame half a second after the track does.
+LIGHT_TRACK_STYLE = TrackStyle(label=False, dot_radius=2, ring_thickness=1, fill_chosen=False, halo_filled=False,
+                               trail_seconds=1.0, tail_alpha=0.2, linger_seconds=0.5)
+
+
+def _trail_strokes(points: Sequence[Optional[Tuple[float, float]]], color: Color) -> List[Stroke]:
+    """One 1 px stroke per consecutive pair of points (None marks a gap), its newness the end
+    point's position along ``points``."""
+    span = max(len(points) - 1, 1)
+    strokes: List[Stroke] = []
+    for i in range(1, len(points)):
+        a, b = points[i - 1], points[i]
+        if a is None or b is None:
+            continue
+        strokes.append(Stroke((int(a[0]), int(a[1])), (int(b[0]), int(b[1])), color, 1, i / span))
+    return strokes
 
 
 class CandidateTrackTrails:
@@ -340,17 +427,42 @@ class CandidateTrackTrails:
     track-debug video's ``DEBUG_TRACK_STYLE``.
 
     ``advance`` moves the trails to a frame once; ``draw`` paints them on any number of targets
-    at a ``TrackStyle`` each; ``advance_and_draw`` does both for a single target.
+    at a ``TrackStyle`` each; ``advance_and_draw`` does both for a single target.  ``fps`` turns
+    a style's seconds into frames.
     """
 
-    def __init__(self, tracks: Sequence[Track], chosen_track: Optional[Track]) -> None:
+    def __init__(self, tracks: Sequence[Track], chosen_track: Optional[Track], fps: float) -> None:
         self.tracks = sorted(tracks, key=lambda t: float(t.score), reverse=True)
         self.chosen_id = int(chosen_track.track_id) if chosen_track is not None else None
+        self.fps = float(fps)
         # track id -> {frame: (cx, cy)}
         self.positions: Dict[int, Dict[int, Tuple[float, float]]] = {
             int(t.track_id): {o.frame: (o.cx, o.cy) for o in t.observations} for t in self.tracks}
         self.scores = {int(t.track_id): float(t.score) for t in self.tracks}
         self.trails: Dict[int, List[Optional[Tuple[float, float]]]] = {int(t.track_id): [] for t in self.tracks}
+        self.last_seen: Dict[int, int] = {}     # track id -> the latest advanced frame it was observed on
+
+    def frames(self, seconds: float) -> int:
+        """A style's time as whole frames of this clip, at least one."""
+        return max(1, int(round(seconds * self.fps)))
+
+    def _lingers(self, tid: int, frame_index: int, style: TrackStyle) -> bool:
+        """Whether the style still draws the track on ``frame_index``: always, unless it has a
+        ``linger_seconds`` and the track has not been seen for longer than that."""
+        if style.linger_seconds is None:
+            return True
+        last = self.last_seen.get(tid)
+        return last is not None and frame_index - last <= self.frames(style.linger_seconds)
+
+    def _trail_points(self, tid: int, frame_index: int, style: TrackStyle) -> Sequence[Optional[Tuple[float, float]]]:
+        """The points the style's trail runs through, oldest first, None where the track had no
+        observation: the stored trail (which holds each gap once), or the track's positions on
+        the last ``trail_seconds`` of frames ending on ``frame_index``."""
+        if style.trail_seconds is None:
+            return self.trails[tid]
+        n = max(2, self.frames(style.trail_seconds))
+        positions = self.positions[tid]
+        return [positions.get(f) for f in range(frame_index - n + 1, frame_index + 1)]
 
     def _draw_dot(self, target: np.ndarray, tid: int, pt: Tuple[float, float], color: Color,
                   style: TrackStyle) -> None:
@@ -380,20 +492,24 @@ class CandidateTrackTrails:
             trail = self.trails[tid]
             if pt is not None:
                 trail.append((pt[0], pt[1]))
+                self.last_seen[tid] = frame_index
             elif trail and trail[-1] is not None:
                 trail.append(None)          # a break for the gap
             while len(trail) > CANDIDATE_TRAIL_LEN:
                 trail.pop(0)
 
     def draw(self, target: np.ndarray, frame_index: int, style: TrackStyle) -> None:
-        """Paint the trails as ``advance`` left them, and a dot on every track seen on ``frame_index``."""
+        """Paint the trails as ``advance`` left them, as much of each as the style shows and fading
+        to its ``tail_alpha``, and a dot on every track seen on ``frame_index``."""
         for trk in self.tracks:
             tid = int(trk.track_id)
+            if not self._lingers(tid, frame_index, style):
+                continue
             pt = self.positions[tid].get(frame_index)
-            trail = self.trails[tid]
             color = track_color(tid)
-            if len(trail) > 1:
-                _draw_trail_segments(target, trail, color)
+            strokes = _trail_strokes(self._trail_points(tid, frame_index, style), color)
+            if strokes:
+                draw_fading_strokes(target, strokes, 1.0, style.tail_alpha, outline=False)
             if pt is not None:
                 self._draw_dot(target, tid, pt, color, style)
 

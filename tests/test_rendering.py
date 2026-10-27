@@ -18,13 +18,16 @@ from tennis_tracker.render.rendering import (
     COLOR_RAW,
     COLOR_SEARCH,
     COLOR_WHITE,
+    _GLOW_HALO,
     _SEARCH_CENTRE_MAX_STEP_PX,
     Canvas,
     MarkerSizer,
     SearchCentreSmoother,
+    draw_glowing_marker,
     draw_hud,
     draw_raw_detections,
     draw_selected_result,
+    paint_blended,
 )
 from tennis_tracker.render.trails import BallTrail
 
@@ -82,6 +85,18 @@ def test_estimated_marker_shrinks_with_the_configured_maximum():
     assert sizer.estimate_radius == 6                             # the motion marker follows the same ceiling
 
 
+def test_a_minimum_radius_above_the_maximum_raises_the_maximum_to_it():
+    """``ball_marker_min_radius`` 8 was within the maximum of 12 the markers once had; over the
+    maximum of 6 ``np.clip`` answered 6 for every size, below the minimum asked for."""
+    sizer = MarkerSizer(Config(ball_marker_min_radius=8, ball_marker_max_radius=6))
+    assert (sizer.min_radius, sizer.max_radius) == (8, 8)
+    assert sizer.radius == 8.0 and sizer.estimate_radius == 8
+    assert sizer.observe_box(2.0, 2.0) == 8 and sizer.observe_box(400.0, 400.0) == 8
+    for _ in range(100):
+        sizer.observe_box(400.0, 400.0)
+    assert sizer.radius == 24.0 and sizer.estimate_radius == 8                 # the cap follows the raised maximum
+
+
 # --------------------------------------------------------------------------- SearchCentreSmoother
 
 def test_search_centre_smoother_caps_a_jump_only_between_consecutive_frames():
@@ -94,22 +109,70 @@ def test_search_centre_smoother_caps_a_jump_only_between_consecutive_frames():
     assert smoother.smooth(14, 10, 10) == (10, 10)
 
 
+# --------------------------------------------------------------------------- paint_blended
+
+def _between(pixel, a, b) -> bool:
+    """``pixel`` is a blend of the colours ``a`` and ``b``: every channel within their range, and
+    the pixel neither colour itself."""
+    pixel = tuple(int(v) for v in pixel)
+    return pixel not in (tuple(a), tuple(b)) and all(min(x, y) <= v <= max(x, y) for v, x, y in zip(pixel, a, b))
+
+
+def test_paint_blended_shows_the_painting_at_its_opacity_within_the_box():
+    frame = np.full((HEIGHT, WIDTH, 3), 100, np.uint8)
+    seen = []
+
+    def paint(img, offset):
+        seen.append((img.shape[:2], offset))
+        cv2.rectangle(img, (10 - offset[0], 10 - offset[1]), (29 - offset[0], 29 - offset[1]), COLOR_WHITE, -1)
+
+    paint_blended(frame, (5, 5, 35, 35), 1.0, paint)
+    assert seen == [((HEIGHT, WIDTH), (0, 0))] and tuple(frame[20, 20]) == COLOR_WHITE   # straight onto the frame
+    frame[:] = 100
+    paint_blended(frame, (5, 5, 35, 35), 0.5, paint)
+    assert seen[-1] == ((30, 30), (5, 5))                          # a copy of the box, offset for the painter
+    assert tuple(frame[20, 20]) == (178, 178, 178)                 # half way from 100 to 255 (rounded)
+    assert tuple(frame[5, 5]) == (100, 100, 100) and tuple(frame[40, 40]) == (100, 100, 100)
+    # A box over the frame's edge is clipped; one off the frame paints nothing.
+    frame[:] = 100
+    paint_blended(frame, (-20, -20, 15, 15), 0.5, paint)
+    assert seen[-1] == ((15, 15), (0, 0)) and tuple(frame[12, 12]) == (178, 178, 178)
+    paint_blended(frame, (WIDTH, 0, WIDTH + 10, 10), 0.5, paint)
+    assert len(seen) == 3
+
+
 # --------------------------------------------------------------------------- draw_selected_result
 
-def test_detection_marker_and_box_land_on_both_frames():
+def test_glowing_marker_is_a_solid_disc_in_a_halo_that_fades_outward():
+    frame = np.full((HEIGHT, WIDTH, 3), 60, np.uint8)
+    draw_glowing_marker(frame, (100, 80), 4, COLOR_DET)
+    assert tuple(frame[80, 100]) == COLOR_DET and tuple(frame[80, 103]) == COLOR_DET   # the disc, to its radius
+    halo = [tuple(frame[80, 100 + dx]) for dx in (5, 7, 9)]        # inside each of the three halo discs
+    assert all(_between(px, (60, 60, 60), COLOR_DET) for px in halo)
+    assert halo[0][1] > halo[1][1] > halo[2][1]                   # the glow fades outward
+    reach = int(round(4 * _GLOW_HALO[0][0]))
+    assert tuple(frame[80, 100 + reach + 2]) == (60, 60, 60)      # nothing past 2.5 radii
+
+
+def test_detection_marker_glows_on_the_main_frame_and_keeps_its_box_and_ring_on_the_debug_frame(recorder):
     main, debug = blank(), blank()
     canvas = Canvas(main, debug)
     res = result(100.0, 80.0, "det", bbox=(94.0, 74.0, 106.0, 86.0))
     draw_selected_result(canvas, res, 5, MarkerSizer(Config()), SearchCentreSmoother(), draw_search_regions=False)
     for frame in (main, debug):
         assert tuple(frame[80, 100]) == COLOR_DET                  # the filled marker at the centre
-        assert tuple(frame[80, 103]) == COLOR_DET                  # ... out to its 3 px radius
-        assert tuple(frame[80, 104]) == COLOR_OUTLINE              # the one-pixel halo ring around it
-        assert tuple(frame[74, 94]) == COLOR_DET                   # the box's top-left corner, one pixel wide
-        assert tuple(frame[73, 94]) == COLOR_OUTLINE               # inside the box's halo
-        assert tuple(frame[86, 100]) == COLOR_WHITE                # the emphasised bottom edge
-        assert tuple(frame[88, 100]) == (0, 0, 0)                  # ... and nothing below the halo
         assert not frame[150:, :].any()                            # nothing far from the ball
+    assert tuple(debug[80, 103]) == COLOR_DET                      # ... out to its 3 px radius
+    assert tuple(debug[80, 104]) == COLOR_OUTLINE                  # the one-pixel halo ring around it
+    assert tuple(debug[74, 94]) == COLOR_DET                       # the box's top-left corner, one pixel wide
+    assert tuple(debug[73, 94]) == COLOR_OUTLINE                   # inside the box's halo
+    assert tuple(debug[86, 100]) == COLOR_WHITE                    # the emphasised bottom edge
+    assert tuple(debug[88, 100]) == (0, 0, 0)                      # ... and nothing below the halo
+    # The main frame: a glow in place of the ring, and neither the box nor the label.
+    assert _between(main[80, 105], (0, 0, 0), COLOR_DET)
+    assert not (main == np.array(COLOR_OUTLINE, np.uint8)).all(axis=2).any()
+    assert not (main == np.array(COLOR_WHITE, np.uint8)).all(axis=2).any()
+    assert [target for kind, target, _ in recorder if kind == "text"] == [id(debug)]
 
 
 def test_motion_marker_draws_its_search_region_on_the_debug_frame_only(recorder):
@@ -129,12 +192,12 @@ def test_motion_marker_draws_its_search_region_on_the_debug_frame_only(recorder)
     assert tuple(main[90, 140]) == COLOR_SEARCH
 
 
-def test_interpolated_marker_is_the_interp_colour_with_its_label(recorder):
-    main = blank()
-    draw_selected_result(Canvas(main, None), result(50.0, 50.0, "interp"), 1, MarkerSizer(Config()),
+def test_interpolated_marker_is_the_interp_colour_with_its_label_on_the_debug_frame(recorder):
+    main, debug = blank(), blank()
+    draw_selected_result(Canvas(main, debug), result(50.0, 50.0, "interp"), 1, MarkerSizer(Config()),
                          SearchCentreSmoother(), False)
-    assert tuple(main[50, 50]) == COLOR_INTERP
-    assert [label for kind, _, label in recorder if kind == "text"] == ["PHY"]
+    assert tuple(main[50, 50]) == COLOR_INTERP and tuple(debug[50, 50]) == COLOR_INTERP
+    assert [(target, label) for kind, target, label in recorder if kind == "text"] == [(id(debug), "PHY")]
 
 
 # --------------------------------------------------------------------------- HUD and raw detections
@@ -173,8 +236,8 @@ def test_ball_trail_draws_one_outlined_segment_per_consecutive_pair(recorder):
     main, debug = blank(), blank()
     trail.draw(Canvas(main, debug), draw_main=True)
     lines = [call for call in recorder if call[0] == "line"]
-    # Four segments before the break and one after, each an outline plus a coloured line,
-    # on both frames.
+    # Four segments before the break and one after, each an outline plus a coloured line, on the
+    # debug frame; the main frame's comet is painted on overlays of it, band by band.
     assert len([call for call in lines if call[1] == id(debug)]) == 2 * 5
-    assert len([call for call in lines if call[1] == id(main)]) == 2 * 5
-    assert not any(call[2] == ((90, 60), (200, 60)) for call in lines)   # nothing bridges the break
+    assert len([call for call in lines if call[1] == id(main)]) < 2 * 5
+    assert not any(p1[0] - p0[0] == 200 - 90 for _, _, (p0, p1) in lines)   # nothing bridges the break
