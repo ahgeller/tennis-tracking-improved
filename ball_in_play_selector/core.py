@@ -26,8 +26,14 @@ from .utils import MaskLike, PackedMask, PlayerBoxesByFrame, ensure_mask_u8, pxp
 _FILL_WINDOW_SEC = 0.30
 _FILL_WINDOW_MIN_FRAMES = 3
 # A fill is only plausible for a ball moving at least this fast (px/frame at
-# 30 FPS); slower "gaps" are a static object the detector flickers on.
-_MIN_FILL_SPEED_PXPF = 10.0
+# 30 FPS and 1080p, scaled to the clip's frame rate and diagonal by make_scene);
+# slower "gaps" are a static object the detector flickers on. It was 10 until
+# 2026-10-27; replayed on the 24 held-out clips, 10 scaled by resolution gained
+# 17 hits over 10 unscaled, 4 gained 21, 2 gained 36 and 0 gained 37, all for
+# the same 8 extra fills through short occlusions and no false alarm outright:
+# a lob near its apex is slow, a static object the detector flickers on is
+# caught by the anchor and direction rules, not this one.
+_MIN_FILL_SPEED_PXPF = 2.0
 # Beside a player a fill needs a faster ball still: a slow point there is
 # usually the racket or a hand.
 _NEAR_PLAYER_FILL_SPEED_PXPF = 15.0
@@ -592,8 +598,9 @@ class _Scene:
     boost_masks: Optional[Sequence[Optional[MaskLike]]]
     raw_motions: Optional[Sequence[Optional[MaskLike]]]
     player_boxes_by_frame: Optional[PlayerBoxesByFrame]
-    fill_frames: int        # longest gap or tail the selector fills
-    min_fill_speed: float   # px/frame at this fps
+    fill_frames: int                # longest gap or tail the selector fills
+    min_fill_speed: float           # px/frame at this fps and resolution
+    near_player_fill_speed: float   # the same floor beside a player
 
     def motion_candidate(
         self, frame: int, x: float, y: float, area: float, steps: int, speed: float
@@ -686,7 +693,7 @@ def _fill_gap(
     # Judged once for the whole gap, but re-read per frame below: a single
     # frame vetoed beside a player must not disqualify the rest of the gap.
     gap_pair_supported = _gap_is_supported(scene, observations, index, speed, direction_supported)
-    near_player_slow = speed < pxpf_at_fps(_NEAR_PLAYER_FILL_SPEED_PXPF, scene.fps, clamp=False)
+    near_player_slow = speed < scene.near_player_fill_speed
     cfg = scene.cfg
     offset_x = offset_y = 0.0
     offset_active = False
@@ -949,14 +956,17 @@ def make_scene(
     raw_motions: Optional[Sequence[Optional[MaskLike]]],
     player_boxes_by_frame: Optional[PlayerBoxesByFrame],
 ) -> _Scene:
-    """The inputs the output phase reads, with the fill window and speed floor at this clip's
-    frame rate."""
+    """The inputs the output phase reads, with the fill window at this clip's frame rate and the
+    speed floors at its frame rate and resolution: a floor tuned in 1080p pixels is a fraction of
+    the picture, and a 720p ball moving the same way covers two thirds of the pixels."""
+    res_scale = cfg.diag / REFERENCE_DIAG_PX
     return _Scene(
         cfg=cfg, fps=fps, total=total, width=width, height=height,
         boost_masks=boost_masks, raw_motions=raw_motions,
         player_boxes_by_frame=player_boxes_by_frame,
         fill_frames=max(_FILL_WINDOW_MIN_FRAMES, int(round(float(fps) * _FILL_WINDOW_SEC))),
-        min_fill_speed=pxpf_at_fps(_MIN_FILL_SPEED_PXPF, fps, clamp=False),
+        min_fill_speed=pxpf_at_fps(_MIN_FILL_SPEED_PXPF * res_scale, fps, clamp=False),
+        near_player_fill_speed=pxpf_at_fps(_NEAR_PLAYER_FILL_SPEED_PXPF * res_scale, fps, clamp=False),
     )
 
 
