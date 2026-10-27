@@ -31,6 +31,7 @@ and 162; `grid` = grid_match8, 16 and 22, 1592 and 149) and over ALL (8515 and 5
 | 9fa1649 | detector metric: false alarms split into bridged and false; measurement only | as above | as above | as above | as above |
 | replay harness | `evaluation/replay_selector.py`; `core.output_trajectory` split from the chooser (no behaviour change, golden JSON unchanged); the baseline every row below compares to | 3384 / 9 / 36 (30+6) | 3158 / 33 / 26 (26+0) | 1381 / 0 / 19 (19+0) | 7923 / 42 / 81 (75+6) / 134 |
 | 1b track_breaks | switch rule: adjacent rows of one track are the ball moving, not a switch (control: switches 202 to 67, the 135 were fast balls, 99 of them on the 720p prof clips); `chosen_pruned` counted through the tracks' `in_timeline` flag (control: 1 to 3, from `other_track`); the selector returns the chain's record as a pruned copy so a one-track chain's own record keeps every observation. Output unchanged | same | same | same | same |
+| 1c single-detection tracks | `build_tracks` keeps tracks of one observation (schema 5): never selected, written to the JSON, left off the candidate trails; the replay then sees every detection of a new run. Output unchanged; the control JSONs predate it, so the replay row is the same | same | same | same | same |
 
 ## What the chooser is worth
 

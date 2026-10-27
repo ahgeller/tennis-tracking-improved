@@ -373,7 +373,13 @@ def build_tracks(
     all_dets: List[List[Detection]],
     cfg: SelectorConfig
 ) -> List[Track]:
-    """Greedy association with stale reconnect + anti-jump trail guards."""
+    """Greedy association with stale reconnect + anti-jump trail guards.
+
+    Every track is returned, the ones holding a single detection included: they never qualify for
+    selection (``core.selected_tracks`` asks for several observations) and never take a stale
+    reconnect (``trail_stitch_min_obs``), but the diagnostics want to see every detection the
+    selector was given, and a detection that joined no track is where the association failed.
+    """
     active: List[Track] = []      # only live tracks: the dead ones leave at the end of each frame
     finished: List[Track] = []
     next_id = 0
@@ -412,14 +418,13 @@ def build_tracks(
         for trk in active:
             if trk.alive:
                 still_active.append(trk)
-            elif trk.num_obs >= 2:
+            else:
                 finished.append(trk)
         active = still_active
 
     # Finalize remaining active tracks
     for trk in active:
         trk.end_reason = "clip_end"
-        if trk.num_obs >= 2:
-            finished.append(trk)
+        finished.append(trk)
 
     return finished

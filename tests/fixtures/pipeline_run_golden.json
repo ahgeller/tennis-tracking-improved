@@ -3936,7 +3936,7 @@
     }
    }
   },
-  "schema_version": 4,
+  "schema_version": 5,
   "summary": {
    "chosen_track_id": 0,
    "filled_frames": 40,
@@ -3945,7 +3945,7 @@
    "timeline_track_ids": [
     0
    ],
-   "track_count": 1
+   "track_count": 2
   },
   "tracks": [
    {
@@ -4474,6 +4474,71 @@
      "rival_track": null
     },
     "track_id": 0
+   },
+   {
+    "end_reason": "max_gap",
+    "first_frame": 14,
+    "in_timeline": false,
+    "last_obs_frame": 14,
+    "num_obs": 1,
+    "observations": [
+     {
+      "area": 144.0,
+      "bbox": [
+       446.0,
+       144.0,
+       458.0,
+       156.0
+      ],
+      "conf": 0.57,
+      "frame": 14,
+      "on_motion": false,
+      "x": 452.0,
+      "y": 150.0
+     }
+    ],
+    "score": 0.0,
+    "score_breakdown": {
+     "additive_core": 1.0,
+     "avg_speed_pxpf": 0.0,
+     "coverage_frac": 0.025,
+     "end_frac": 0.358974358974359,
+     "end_frame": 14.0,
+     "extent_px": 0.0,
+     "inside_frac": 1.0,
+     "inside_mult": 1.0,
+     "inside_strict_frac": 1.0,
+     "jump_penalty": 0.0,
+     "motion_evidence": 0.0,
+     "motion_kin_frac": 0.0,
+     "motion_mult": 0.0,
+     "motion_overlap": 0.0,
+     "movement_quality": 0.5,
+     "near_player_court_frac": 1.0,
+     "near_player_frac": 1.0,
+     "near_player_mult": 1.0,
+     "num_obs": 1,
+     "obs_add": 1.0,
+     "peak_speed_pxpf": 0.0,
+     "span": 0,
+     "span_add": 0.0,
+     "span_frac": 0.0,
+     "start_frac": 0.358974358974359,
+     "start_frame": 14.0,
+     "total": 0.0
+    },
+    "selection": {
+     "airborne": false,
+     "established": false,
+     "reacquired": false,
+     "rolling": false
+    },
+    "span": 0,
+    "start": {
+     "reason": "gate",
+     "rival_track": 0
+    },
+    "track_id": 1
    }
   ],
   "video": {
@@ -8342,7 +8407,7 @@
     }
    }
   },
-  "schema_version": 4,
+  "schema_version": 5,
   "summary": {
    "chosen_track_id": 0,
    "filled_frames": 40,
@@ -8351,7 +8416,7 @@
    "timeline_track_ids": [
     0
    ],
-   "track_count": 1
+   "track_count": 2
   },
   "tracks": [
    {
@@ -8880,6 +8945,71 @@
      "rival_track": null
     },
     "track_id": 0
+   },
+   {
+    "end_reason": "max_gap",
+    "first_frame": 14,
+    "in_timeline": false,
+    "last_obs_frame": 14,
+    "num_obs": 1,
+    "observations": [
+     {
+      "area": 144.0,
+      "bbox": [
+       446.0,
+       144.0,
+       458.0,
+       156.0
+      ],
+      "conf": 0.57,
+      "frame": 14,
+      "on_motion": false,
+      "x": 452.0,
+      "y": 150.0
+     }
+    ],
+    "score": 0.0,
+    "score_breakdown": {
+     "additive_core": 1.0,
+     "avg_speed_pxpf": 0.0,
+     "coverage_frac": 0.025,
+     "end_frac": 0.358974358974359,
+     "end_frame": 14.0,
+     "extent_px": 0.0,
+     "inside_frac": 1.0,
+     "inside_mult": 1.0,
+     "inside_strict_frac": 1.0,
+     "jump_penalty": 0.0,
+     "motion_evidence": 0.0,
+     "motion_kin_frac": 0.0,
+     "motion_mult": 0.0,
+     "motion_overlap": 0.0,
+     "movement_quality": 0.5,
+     "near_player_court_frac": 1.0,
+     "near_player_frac": 1.0,
+     "near_player_mult": 1.0,
+     "num_obs": 1,
+     "obs_add": 1.0,
+     "peak_speed_pxpf": 0.0,
+     "span": 0,
+     "span_add": 0.0,
+     "span_frac": 0.0,
+     "start_frac": 0.358974358974359,
+     "start_frame": 14.0,
+     "total": 0.0
+    },
+    "selection": {
+     "airborne": false,
+     "established": false,
+     "reacquired": false,
+     "rolling": false
+    },
+    "span": 0,
+    "start": {
+     "reason": "gate",
+     "rival_track": 0
+    },
+    "track_id": 1
    }
   ],
   "video": {

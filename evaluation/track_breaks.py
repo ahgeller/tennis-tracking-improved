@@ -4,7 +4,8 @@
 
 For every ``<clip>_<model>.json`` that ``evaluate_archive.py --mode pipeline`` wrote, the
 labelled-visible frames with no output are bucketed by what the run had on that frame:
-``no_track`` (no selector track observed it: the detector or the association never had it),
+``no_track`` (no selector track observed it: the detector never had it, since every detection is
+in some track from schema 5 on; before that the association dropped single-detection tracks),
 ``other_track`` (only a track the timeline did not choose observed it) or ``chosen_pruned`` (a
 timeline track observed it and the selector let it go: ``trajectory_observations`` dropped it as
 an unverifiable lone detection, or the fills, the refit or the implausible-fill pruning did). The
