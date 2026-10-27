@@ -32,7 +32,7 @@ def _parser() -> argparse.ArgumentParser:
                         help=f"Default: <input stem>{TRACKING_JSON_SUFFIX} beside a folder's video, "
                              f"else {OUTPUT / 'tracking.json'}")
     parser.add_argument("--weights", default=str(GRIDTRACKNET_WEIGHTS),
-                        help="ball detector weights, .npz GridTrackNet or .pt HeatmapNet / MemoryNet")
+                        help="ball detector weights, .npz GridTrackNet or .pt HeatmapNet")
     parser.add_argument("--conf", type=float, default=0.50)
     parser.add_argument("--device", default="0")
     parser.add_argument("--no-video", action="store_true")

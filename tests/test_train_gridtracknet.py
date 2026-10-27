@@ -49,7 +49,7 @@ def test_a_fine_tune_starts_from_its_own_architectures_weights_or_is_refused_in_
     """Without --from-scratch, --weights is the starting model: a heatmap_s4 fine-tune from the
     GridTrackNet .npz (the default) is refused before any cache or run folder is written, as is a
     gridtracknet fine-tune from a .pt; a heatmap_s4 .pt starts a heatmap_s4 fine-tune, and the
-    record inside the .pt decides, so a memory_s4 file is refused for a heatmap_s4 run."""
+    record inside the .pt decides, so a .pt naming an unknown architecture is refused."""
     videos, labels = workspace(tmp_path, ["a", "b"])
     argv = ["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"),
             "--run-dir", str(tmp_path / "run"), "--arch", "heatmap_s4"]
@@ -64,11 +64,10 @@ def test_a_fine_tune_starts_from_its_own_architectures_weights_or_is_refused_in_
         training.resolve_arch(args, None)
     args = parser.parse_args(["--arch", "heatmap_s4", "--weights", str(pt_record(tmp_path / "best.pt")), "--save", str(tmp_path / "w.pt")])
     training.resolve_arch(args, None)
-    assert args.arch == "heatmap_s4" and args.weights == tmp_path / "best.pt" and args.starting_arch == "heatmap_s4"
-    assert args.chain is None
-    args = parser.parse_args(["--arch", "heatmap_s4", "--weights", str(pt_record(tmp_path / "memory.pt", "memory_s4"))])
-    with pytest.raises(ValueError, match="is a memory_s4 file, but the starting model of a heatmap_s4 fine-tune must be a "
-                                         "heatmap_s4 one \\(.pt\\)"):
+    assert args.arch == "heatmap_s4" and args.weights == tmp_path / "best.pt"
+    torch.save({"arch": "yolo", "state_dict": {}}, tmp_path / "yolo.pt")
+    args = parser.parse_args(["--arch", "heatmap_s4", "--weights", str(tmp_path / "yolo.pt")])
+    with pytest.raises(ValueError, match="names the architecture 'yolo', not one a .pt record holds \\(\\['heatmap_s4'\\]\\)"):
         training.resolve_arch(args, None)
     args = parser.parse_args(["--weights", str(tmp_path / "ball.engine")])
     with pytest.raises(ValueError, match="end in .npz"):
@@ -78,89 +77,6 @@ def test_a_fine_tune_starts_from_its_own_architectures_weights_or_is_refused_in_
         training.resolve_arch(args, None)
     with pytest.raises(SystemExit):
         parser.parse_args(["--arch", "yolo"])
-
-
-def test_a_memory_fine_tune_starts_from_its_parent_or_its_own_file_and_takes_the_chain_length(tmp_path, capsys):
-    """--arch memory_s4 --weights <heatmap_s4 .pt> without --from-scratch is the parent start
-    (starting_arch heatmap_s4); a memory_s4 .pt continues; the .npz is refused in a line that
-    names both files it could take. --chain defaults to 4 for memory_s4 and is dropped, with a
-    line, for the others."""
-    parser = training.build_parser()
-    parent, own = pt_record(tmp_path / "heat.pt"), pt_record(tmp_path / "memory.pt", "memory_s4")
-    args = parser.parse_args(["--arch", "memory_s4", "--weights", str(parent), "--save", str(tmp_path / "w.pt")])
-    training.resolve_arch(args, None)
-    assert (args.arch, args.starting_arch, args.chain) == ("memory_s4", "heatmap_s4", 4)
-    args = parser.parse_args(["--arch", "memory_s4", "--weights", str(own), "--save", str(tmp_path / "w.pt"), "--chain", "6"])
-    training.resolve_arch(args, None)
-    assert (args.arch, args.starting_arch, args.chain) == ("memory_s4", "memory_s4", 6)
-    args = parser.parse_args(["--arch", "memory_s4", "--save", str(tmp_path / "w.pt")])
-    with pytest.raises(ValueError, match="is a gridtracknet file, but the starting model of a memory_s4 fine-tune must be a "
-                                         "memory_s4 one or its parent's, a heatmap_s4 one \\(.pt\\)"):
-        training.resolve_arch(args, None)
-    args = parser.parse_args(["--arch", "memory_s4", "--from-scratch", "--save", str(tmp_path / "w.pt")])
-    training.resolve_arch(args, None)                                       # the .npz feeds the prepass alone
-    assert (args.starting_arch, args.chain) == ("gridtracknet", 4)
-    assert capsys.readouterr().out == ""
-    args = parser.parse_args(["--arch", "heatmap_s4", "--weights", str(parent), "--chain", "3", "--save", str(tmp_path / "w.pt")])
-    training.resolve_arch(args, None)
-    assert args.chain is None and "[train] --chain 3 is ignored: heatmap_s4 trains on single units" in capsys.readouterr().out
-
-
-def test_a_stride_two_fine_tune_starts_from_its_parent_or_its_own_file_on_single_units(tmp_path, capsys):
-    """--arch heatmap_s2 --weights <heatmap_s4 .pt> is the parent start (starting_arch heatmap_s4);
-    a heatmap_s2 .pt continues; a memory_s4 file is not its parent and is refused in the line that
-    names both files it could take; --chain is dropped with a line, as for heatmap_s4."""
-    parser = training.build_parser()
-    parent, own = pt_record(tmp_path / "heat.pt"), pt_record(tmp_path / "s2.pt", "heatmap_s2")
-    args = parser.parse_args(["--arch", "heatmap_s2", "--weights", str(parent), "--save", str(tmp_path / "w.pt")])
-    training.resolve_arch(args, None)
-    assert (args.arch, args.starting_arch, args.chain) == ("heatmap_s2", "heatmap_s4", None)
-    args = parser.parse_args(["--arch", "heatmap_s2", "--weights", str(own), "--save", str(tmp_path / "w.pt")])
-    training.resolve_arch(args, None)
-    assert (args.arch, args.starting_arch, args.chain) == ("heatmap_s2", "heatmap_s2", None)
-    assert capsys.readouterr().out == ""
-    args = parser.parse_args(["--arch", "heatmap_s2", "--weights", str(pt_record(tmp_path / "memory.pt", "memory_s4")),
-                              "--save", str(tmp_path / "w.pt")])
-    with pytest.raises(ValueError, match="is a memory_s4 file, but the starting model of a heatmap_s2 fine-tune must be a "
-                                         "heatmap_s2 one or its parent's, a heatmap_s4 one \\(.pt\\)"):
-        training.resolve_arch(args, None)
-    args = parser.parse_args(["--arch", "heatmap_s2", "--weights", str(parent), "--chain", "3", "--save", str(tmp_path / "w.pt")])
-    training.resolve_arch(args, None)
-    assert args.chain is None and "[train] --chain 3 is ignored: heatmap_s2 trains on single units" in capsys.readouterr().out
-    model = fresh_model(torch.device("cpu"), "heatmap_s2")
-    assert isinstance(model, model_class("heatmap_s2")) and model.training and (model.GRID_COLS, model.GRID_ROWS) == (384, 216)
-
-
-def test_train_builds_the_stride_two_network_from_its_parent_on_single_units(tmp_path, capsys):
-    """--arch heatmap_s2 --weights <heatmap .pt>: fit receives a HeatmapNetS2 whose shared layers
-    are the parent's, through the unit data path (no chains), with the parent-start line naming
-    what starts fresh and config.json recording no chain."""
-    from tennis_tracker.heatmapnet import HeatmapNet
-    from tennis_tracker.heatmapnet_s2 import HeatmapNetS2
-    videos, labels = workspace(tmp_path, ["a", "b"])
-    parent = HeatmapNet()
-    save_model(parent, tmp_path / "heat.pt")
-    received = {}
-
-    def fit(args, model, train_loader, *rest):
-        received["model"], received["loader"] = model, train_loader
-        return training.Selection(args.run_dir / "best.pt", 1, training.metrics_of(0.9, 0.0), 1, 0.1)
-    unit = {"clip": "a", "source": "custom", "points": [[1.0, 1.0]]}
-    manifest = {"train": [unit] * 3, "val": [dict(unit, clip="b")], "validation_clips": ["b"]}
-    with patch.object(training, "prepare_data", return_value=manifest), patch.object(training, "DataLoader", side_effect=lambda dataset, **kw: (dataset, kw)), \
-            patch.object(training, "build_chains") as built, patch.object(training, "fit", side_effect=fit), patch.object(training, "pick_winner"):
-        assert training.main(["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"),
-                              "--run-dir", str(tmp_path / "run"), "--arch", "heatmap_s2", "--weights", str(tmp_path / "heat.pt"),
-                              "--save", str(tmp_path / "winner.pt"), "--device", "cpu", "--epochs", "1"]) == 0
-    model = received["model"]
-    assert isinstance(model, HeatmapNetS2) and model.training and torch.equal(model.stem[0].weight, parent.stem[0].weight)
-    assert model.head.weight.shape[1] == 48 and not built.called
-    dataset, _ = received["loader"]
-    assert isinstance(dataset, UnitDataset) and dataset.arch == "heatmap_s2"
-    out = capsys.readouterr().out
-    assert f"[train] heatmap_s2 from its parent {tmp_path / 'heat.pt'}: the shared layers are copied, the stride-2 decoder " \
-           "block and the head start fresh" in out
-    assert json.loads((tmp_path / "run" / "config.json").read_text(encoding="utf-8"))["chain"] is None
 
 
 def test_a_scratch_run_reads_either_weights_for_the_prepass_but_gridtracknet_needs_its_template(tmp_path):
@@ -200,44 +116,7 @@ def test_train_fine_tunes_a_heatmap_winner_from_its_pt(tmp_path, capsys):
     out = capsys.readouterr().out
     assert f"[train] fine-tuning heatmap_s4 from {start}" in out and "winner.pt" in out
     config = json.loads((tmp_path / "run" / "config.json").read_text(encoding="utf-8"))
-    assert config["arch"] == "heatmap_s4" and config["chain"] is None
-
-
-def test_train_builds_a_memory_network_from_its_parent_on_chains(tmp_path, capsys):
-    """--arch memory_s4 --weights <heatmap .pt>: fit receives a MemoryNet whose shared layers are
-    the parent's and whose memory is fresh, the data path is the chain one (build_chains on each
-    split, ChainDataset, chain weights into the sampler, a chain counting its units toward
-    --epoch-units) and config.json records chain."""
-    from tennis_tracker.heatmapnet import HeatmapNet
-    from tennis_tracker.memorynet import MemoryNet
-    videos, labels = workspace(tmp_path, ["a", "b"])
-    parent = HeatmapNet()
-    save_model(parent, tmp_path / "heat.pt")
-    received = {}
-
-    def fit(args, model, train_loader, *rest):
-        received["model"], received["loader"] = model, train_loader
-        return training.Selection(args.run_dir / "best.pt", 1, training.metrics_of(0.9, 0.0), 1, 0.1)
-    unit = {"clip": "a", "source": "custom", "points": [[1.0, 1.0]]}
-    chains = {"a": [{"clip": "a", "source": "custom", "units": [unit] * 4}] * 3, "b": [{"clip": "b", "source": "custom", "units": [unit] * 4}]}
-    manifest = {"train": [{"clip": "a"}], "val": [{"clip": "b"}], "validation_clips": ["b"]}
-    with patch.object(training, "prepare_data", return_value=manifest), patch.object(training, "DataLoader", side_effect=lambda dataset, **kw: (dataset, kw)), \
-            patch.object(training, "build_chains", side_effect=lambda units, length: chains[units[0]["clip"]]) as built, \
-            patch.object(training, "fit", side_effect=fit), patch.object(training, "pick_winner"):
-        assert training.main(["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"),
-                              "--run-dir", str(tmp_path / "run"), "--arch", "memory_s4", "--weights", str(tmp_path / "heat.pt"),
-                              "--save", str(tmp_path / "winner.pt"), "--device", "cpu", "--epochs", "1", "--epoch-units", "10"]) == 0
-    model = received["model"]
-    assert isinstance(model, MemoryNet) and model.training and float(model.out.weight.detach().abs().sum()) == 0.0
-    assert torch.equal(model.stem[0].weight, parent.stem[0].weight)
-    assert [call.args[1] for call in built.call_args_list] == [4, 4]
-    dataset, loader_options = received["loader"]
-    assert isinstance(dataset, training.ChainDataset) and dataset.samples == chains["a"] and dataset.arch == "memory_s4"
-    assert len(loader_options["sampler"]) == 3 and list(loader_options["sampler"].weights) == [1.0, 1.0, 1.0]   # ceil(10 / 4) chains
-    out = capsys.readouterr().out
-    assert f"[train] memory_s4 from its parent {tmp_path / 'heat.pt'}: the shared layers are copied, the memory starts fresh" in out
-    assert "[data] chains of 4 units: 3 train / 1 val" in out and "chain=4" in out
-    assert json.loads((tmp_path / "run" / "config.json").read_text(encoding="utf-8"))["chain"] == 4
+    assert config["arch"] == "heatmap_s4" and "chain" not in config
 
 
 def test_resolve_arch_defaults_inherits_and_corrects_the_save_suffix(tmp_path, capsys):
@@ -287,28 +166,30 @@ def test_a_resume_without_arch_continues_the_runs_architecture(tmp_path, capsys)
     assert data.called and capsys.readouterr().err.strip() == "[error] the data step"      # the options all passed
 
 
-def test_config_json_carries_the_arch_and_the_chain_and_same_run_refuses_a_change(tmp_path):
+def test_config_json_carries_the_arch_and_same_run_refuses_a_change(tmp_path):
+    """config.json records arch, and a resume with another is refused; a config.json written
+    before the field existed trained GridTrackNet, and one written by a run of the memory
+    architecture's day, carrying ``chain`` (None for the architectures left), still resumes and
+    still serves as a selection run: the field is neither compared nor copied."""
     parser = training.build_parser()
     grid = training.run_config(parser.parse_args([]), ["a"], ["a"], {})
     heat = training.run_config(parser.parse_args(["--arch", "heatmap_s4", "--from-scratch"]), ["a"], ["a"], {})
-    assert grid["arch"] == "gridtracknet" and heat["arch"] == "heatmap_s4" and grid["chain"] is None
+    assert grid["arch"] == "gridtracknet" and heat["arch"] == "heatmap_s4" and "chain" not in grid
     training.same_run(grid, grid)
     with pytest.raises(ValueError, match="config.json has arch='gridtracknet', this run arch='heatmap_s4'"):
         training.same_run(grid, {**heat, "from_scratch": False})
     before_the_field = {key: value for key, value in grid.items() if key != "arch"}
     training.same_run(before_the_field, grid)                               # an older run trained GridTrackNet
     assert training.arch_of_config(before_the_field) == "gridtracknet"
-    args = parser.parse_args(["--arch", "memory_s4", "--weights", str(pt_record(tmp_path / "heat.pt")), "--save", str(tmp_path / "w.pt")])
-    training.resolve_arch(args, None)
-    memory = training.run_config(args, ["a"], ["a"], {})
-    assert memory["chain"] == 4 and "chain" in training.RECIPE_FIELDS
-    training.same_run(memory, memory)
-    with pytest.raises(ValueError, match="config.json has chain=4, this run chain=6"):
-        training.same_run(memory, {**memory, "chain": 6})
+    training.same_run({**heat, "chain": None}, heat)                        # an older heatmap_s4 run recorded chain
+    assert "chain" not in training.RECIPE_FIELDS
+    (tmp_path / "winner.json").write_text(json.dumps({"best_epoch": 2, "selected_by": "metric"}), encoding="utf-8")
+    (tmp_path / "config.json").write_text(json.dumps({**heat, "chain": None}), encoding="utf-8")
+    assert "chain" not in training.read_selection_run(tmp_path)["recipe"]
 
 
 def test_config_json_versions_the_heat_recipe_and_same_run_refuses_an_older_one():
-    """A HeatmapNet or MemoryNet run records heat_recipe (HEAT_RECIPE, 3: offsets at weight 1,
+    """A HeatmapNet run records heat_recipe (HEAT_RECIPE, 3: offsets at weight 1,
     normalised convolutions held at their Kaiming norm) and a GridTrackNet run None; heat1's
     config.json, written before the field existed, is refused as a resume of this recipe, as is
     heat3's recipe 2, while an old GridTrackNet config without the field still resumes."""
@@ -358,8 +239,6 @@ def test_main_reports_a_run_that_cannot_start_as_status_1(tmp_path, capsys):
     assert "[error] No *_ball.csv files" in capsys.readouterr().err
     assert training.main(["--videos", str(videos), "--labels", str(labels), "--cameras", "fixed", *folders]) == 1
     assert "[error] --cameras needs camera tags" in capsys.readouterr().err
-    assert training.main(["--videos", str(videos), "--labels", str(labels), "--arch", "memory_s4", "--chain", "0", *folders]) == 1
-    assert "[error] --chain must be at least 1" in capsys.readouterr().err
     assert not (tmp_path / "cache").exists() and not (tmp_path / "run").exists()
 
 
@@ -1281,52 +1160,3 @@ def test_metric_infers_tail():
 
 def test_false_alarms_block_promotion():
     assert not promotion_improves(training.metrics_of(.91, 0., false_alarm=1.), training.metrics_of(.90, 0., false_alarm=0.))
-
-
-def chain_on_disk(data: Path) -> list:
-    """Two units of one clip on disk, frames 0-4 with a red stripe over cache columns 40-49 and
-    frames 5-9 with it over 100-109, each labelled at its stripe's centre on the first frame and
-    towards the right edge on the last (the second unit nearer it)."""
-    (data / "frames" / "c").mkdir(parents=True, exist_ok=True)
-    units = []
-    for start, stripe, edge in ((0, (40, 50), 1700.0), (5, (100, 110), 1900.0)):
-        for index in range(start, start + 5):
-            image = np.zeros((training.HEIGHT, training.WIDTH, 3), np.uint8)
-            image[:, stripe[0]:stripe[1]] = (0, 0, 255)
-            cv2.imwrite(str(data / "frames" / "c" / f"{index:06d}.png"), image)
-        centre = (stripe[0] + 5) * 1920 / training.WIDTH
-        units.append(TrainingUnit(clip="c", source="custom", indices=list(range(start, start + 5)),
-                                  frames=[f"frames/c/{i:06d}.png" for i in range(start, start + 5)],
-                                  points=[[centre, 200.0], None, None, None, [edge, 1000.0]], size=[1920, 1080]))
-    return units
-
-
-def test_a_chain_draws_one_augmentation_for_every_unit_and_reverse_reverses_the_unit_order(tmp_path):
-    """ChainDataset stacks its units' (images, target) along a leading axis; the flip, the shift
-    and the reversal are drawn once and applied to each unit alike (the stacked example equals
-    each unit under that one Augmentation), the shift drawn within the limits every unit allows,
-    and reverse runs the chain backwards: the units in reverse order, each reversed."""
-    from finetune.training.dataset import Augmentation, ChainDataset, translate_limits
-    first, second = chain_on_disk(tmp_path)
-    chain = {"clip": "c", "source": "custom", "units": [first, second]}
-    plain = ChainDataset(tmp_path, [chain], augment=False)
-    images, target = plain[0]
-    assert images.shape == (2, 15, training.HEIGHT, training.WIDTH) and target.shape == (2, 15, training.GRID_ROWS, training.GRID_COLS)
-    reference = UnitDataset(tmp_path, [first, second], augment=False)
-    assert torch.equal(images[0], reference[0][0]) and torch.equal(images[1], reference[1][0])
-    assert torch.equal(target[1], reference[1][1])
-    dataset = ChainDataset(tmp_path, [chain], augment=True, augmentations={"translate", "reverse"})
-    ranges = []
-    scripted(dataset, tosses=[0.0, 0.0, 0.0], integers=[16, -4])      # flip; translate dx=16 dy=-4; reverse
-    randint = dataset.rng.draws.randint
-    dataset.rng.draws.randint = lambda low, high: (ranges.append((low, high)), randint(low, high))[1]
-    images, target = dataset[0]
-    drawn = Augmentation(flip=True, shift=(16, -4), reverse=True)
-    assert torch.equal(images[0], reference.apply(second, drawn)[0]) and torch.equal(target[0], reference.apply(second, drawn)[1])
-    assert torch.equal(images[1], reference.apply(first, drawn)[0]) and torch.equal(target[1], reference.apply(first, drawn)[1])
-    assert decoded_x(target[1], frame=4) == pytest.approx(1920 - 112.5 + 40)        # the first unit's stripe, mirrored and shifted
-    assert float(target[0, 12].sum()) == 1.0 and float(target[0, 3].sum()) == 0.0   # reversed: the stripe label sits on the last frame
-    mirrored = [[None if p is None else [1920 - p[0], p[1]] for p in unit["points"]] for unit in (first, second)]
-    limits = [translate_limits(points, 1920, 1080, training.WIDTH, training.HEIGHT) for points in mirrored]
-    assert ranges == [(max(l[0] for l in limits), min(l[1] for l in limits)), (max(l[2] for l in limits), min(l[3] for l in limits))]
-    assert ranges[0] == (-8, 20) and limits[0][0] == -20                 # held by the second unit (1900 mirrored to 20 px, 8 cache px)

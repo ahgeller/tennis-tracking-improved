@@ -234,14 +234,8 @@ separately). `ft.py check` flags files that break this rule.
      `--all-clips` run inherits its selection run's architecture, so a
      HeatmapNet winner is fine-tuned on every clip, and later on new clips,
      from its `best.pt` (`--weights runs/<tag>/best.pt`). A `.pt` names its
-     architecture inside, since `--arch memory_s4` (`tennis_tracker/memorynet.py`,
-     HeatmapNet with a memory carried between consecutive units of one phase)
-     shares the suffix; it is trained from a `heatmap_s4` run's `best.pt`
-     (`--arch memory_s4 --weights runs/<tag>/best.pt`, the memory starting
-     fresh) on chains of `--chain` units, see the root README's stage 3b; and
-     `--arch heatmap_s2` (`tennis_tracker/heatmapnet_s2.py`, HeatmapNet with one
-     more decoder block, answering at stride 2) starts from the same parent with
-     the new block and the head fresh, the root README's stage 3c.
+     architecture inside (`{"arch": "heatmap_s4", "state_dict"}`), and a record
+     of another is refused by name (the root README's "Keeping one network").
    - `--holdout NAME` holds out a named set of whole recordings from
      `holdouts.json` instead of `--val-clips`; `mixed_v1` is the fixed set
      the detector recipe was chosen on (prof games 4 and 7, video1 to 10,

@@ -33,8 +33,8 @@ rebuild the big zip.
 
 | setting | what it is |
 |---|---|
-| `ARCH` | `gridtracknet` (the tracker's current net, `.npz`), `heatmap_s4` (the stride-4 heat-map net, `.pt`) or `memory_s4` (the heat-map net with a memory carried along each phase, `.pt`; stage 3b) |
-| `MODE` | `scratch` trains a new network; `finetune` continues from `START_WEIGHTS` (a `memory_s4` fine-tune from a `heatmap_s4` file starts the memory fresh) |
+| `ARCH` | `gridtracknet` (the tracker's current net, `.npz`) or `heatmap_s4` (the stride-4 heat-map net, `.pt`) |
+| `MODE` | `scratch` trains a new network; `finetune` continues from `START_WEIGHTS` |
 | `START_WEIGHTS` | a file in the zip's `models/` folder or a path under `runs/` (say `heat1/best.pt`). A scratch run reads it only for the hard-negative prepass |
 | `HOLDOUT` | `mixed_v1`: 24 whole recordings never trained on, the honest test |
 | `SELECTION_RUN` | set to a finished run's `TAG` to train on every clip following that run's recipe |
@@ -125,72 +125,6 @@ To run the tracker with the new weights on any video:
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py -i <video.mp4> --weights <best.pt>
 ```
 
-## Stage 3b: the memory network
-
-`memory_s4` is the heat-map network plus a memory: a convolutional GRU at the
-bottleneck carries what the network saw in the previous five-frame unit of the
-same phase into the next, so the ball's last position is known before the five
-frames are looked at. It is not trained from nothing: it starts from the heat
-run's winner, with the memory fresh, and at that moment answers exactly as the
-heat run's `best.pt` does. Train it only once stage 3 has a heat winner.
-
-```
-ARCH = "memory_s4"
-MODE = "finetune"
-START_WEIGHTS = "<heat TAG>/best.pt"
-HOLDOUT = "mixed_v1"
-SELECTION_RUN = ""
-EPOCHS = 10
-LR = 0.3
-AUGMENT = same as the heat run
-SCORE_EVERY = 2
-TAG = "mem1"               (any new name)
-```
-
-Run all. The trainer says `[train] memory_s4 from its parent ...: the shared
-layers are copied, the memory starts fresh` and trains on chains of four
-consecutive units (`--chain`, the default), the state carried through each
-chain. Judge it exactly as stage 3 judges the heat run: the same three
-`evaluate_archive.py` commands with `--gridtracknet-weights <mem1 best.pt>`,
-compared against the heat run's `best.pt` log, and `--mode pipeline` not worse.
-The tracker runs a `memory_s4` file like any other (`--weights <best.pt>`),
-carrying the memory along each phase of the prepass. The winner of stage 3 and
-stage 3b goes on to stage 4; the loser is removed (see "Keeping one network").
-
-## Stage 3c: the stride-2 network
-
-`heatmap_s2` is the heat-map network with one more decoder block: after the
-stride-4 features it upsamples once more, joins the encoder's stride-2 skip and
-answers on a 384x216 grid (stride 2) in place of 192x108, so the 2 to 4 px ball
-sits on a finer grid before the offsets do the sub-cell work. Like the memory
-network it is not trained from nothing: it starts from the heat run's winner,
-every shared layer copied, with the new block and the head fresh (the head at
-the heat prior, so it answers a nearly empty map until the new stage trains).
-Train it only once stage 3 has a heat winner.
-
-```
-ARCH = "heatmap_s2"
-MODE = "finetune"
-START_WEIGHTS = "<heat TAG>/best.pt"
-HOLDOUT = "mixed_v1"
-SELECTION_RUN = ""
-EPOCHS = 10
-LR = 0.3
-AUGMENT = same as the heat run
-SCORE_EVERY = 2
-TAG = "s2_1"               (any new name)
-```
-
-Run all. The trainer says `[train] heatmap_s2 from its parent ...: the shared
-layers are copied, the stride-2 decoder block and the head start fresh` and
-trains on single units as the heat run does (`--chain` is ignored). Judge it
-exactly as stage 3b is judged: the same three `evaluate_archive.py` commands
-with `--gridtracknet-weights <s2_1 best.pt>`, compared against the heat run's
-`best.pt` log, and `--mode pipeline` not worse. The tracker runs a `heatmap_s2`
-file like any other (`--weights <best.pt>`); the decoder reads the finer grid
-off the output's shape. The winner among stages 3, 3b and 3c goes on to stage 4;
-the losers are removed (see "Keeping one network").
-
 ## Stage 4: the deployable weights (every clip)
 
 The winner from stage 1 never saw the 24 held-out clips. For the weights you
@@ -234,8 +168,19 @@ selection run so the stage 3 numbers remain comparable over time.
 
 ## Keeping one network
 
-Four architectures exist so that one can be chosen; the three that lose are
-deleted, not kept behind a flag. For each, the whole of it is:
+Architectures exist so that one can be chosen; the ones that lose are deleted,
+not kept behind a flag. Two were removed on 2026-10-26 after the held-out
+comparison: `memory_s4` (HeatmapNet with a convolutional GRU carrying a state
+between consecutive units of one phase) and `heatmap_s2` (HeatmapNet with one
+more decoder block, answering at stride 2). The heat control matched the memory
+network and the stride-2 curve equalled the control's, so neither earned its
+weight; the runs and their numbers are in
+`audit/records/gridtracknet_recipe_2026-10.md`, which keeps their history. A
+`.pt` still names its architecture inside, so a record of either is refused by
+name (`ball_models.arch_of`), and a `config.json` of their day may carry
+`chain`, which the trainer no longer reads or compares.
+
+Two remain, and for each the whole of it is:
 
 - `gridtracknet`: `tennis_tracker/gridtracknet.py` stays (its loader, resize and
   decoder serve every architecture); its entry in `tennis_tracker/ball_models.py`
@@ -246,43 +191,18 @@ deleted, not kept behind a flag. For each, the whole of it is:
   `dataset.make_target`, the `.npz` template handling of `--weights` in the trainer
   (`resolve_arch`), the `ARCH` option in the notebook, `ft.py promote`, and
   `tests/test_gridtracknet.py` with the GridTrackNet cases of the trainer tests.
-- `heatmap_s4`: `tennis_tracker/heatmapnet.py` (the `HeatmapNet` class; the `.pt`
-  record functions move to the surviving `.pt` architecture's module if that is
-  `memory_s4`, which subclasses it, so the class then stays as its base), its entry
-  in `ball_models` (`HEATMAP_S4` in `ARCHITECTURES`, `MODEL_CLASSES`,
-  `WEIGHTS_SUFFIX`, `_MODULES`), `HEATMAP_S4` in `loop.LOSSES` (the loss itself
-  stays if `memory_s4` or `heatmap_s2` survives), the trainer's `--arch` choice
-  and the parent start (`ball_models.PARENTS`, `PARENT_START_NOTE`,
-  `from_parent`, each child's `PARENT_ARCH` and `from_heatmap`,
-  `args.starting_arch`) if both children go too, the notebook `ARCH` option and
-  its parent-start check, and `tests/test_heatmapnet.py` with the heatmap cases
-  of the trainer tests (the `.pt` record functions and the `HeatmapNet` base
-  class move to, or stay under, the surviving child's module).
-- `memory_s4`: `tennis_tracker/memorynet.py`, `tests/test_memorynet.py`, its entry
-  in `ball_models` (`MEMORY_S4` in `ARCHITECTURES`, `MODEL_CLASSES`,
-  `WEIGHTS_SUFFIX`, `_MODULES`) and the `STATEFUL` flag of the contract, the
-  stateful branch of the prepass (`_run_stateful`, `units_per_call` and
-  `flush(update_states)` in `tennis_tracker/engines/ball_detectors.py`, with
-  `StatefulStandInModel` and its test), `MEMORY_S4` in `loop.LOSSES` with
-  `chain_loss` and the stateful branch of `batch_loss`, the chains in
-  `dataset.py` (`CHAIN`, `TrainingChain`, `build_chains`, `chain_units`,
-  `chain_weights`, `ChainDataset`; the one-draw `Augmentation` stays, it is how
-  the unit dataset draws too), the trainer's `--arch` choice, `--chain`, the
-  parent start and the chain data path in `train`, `chain` in `RECIPE_FIELDS`
-  and `config.json`, the notebook `ARCH` option and its parent-start check, and
-  the chain cases of the trainer, dataset and loop tests.
-- `heatmap_s2`: `tennis_tracker/heatmapnet_s2.py`, `tests/test_heatmapnet_s2.py`,
-  its entry in `ball_models` (`HEATMAP_S2` in `ARCHITECTURES`, `MODEL_CLASSES`,
-  `WEIGHTS_SUFFIX`, `_MODULES`, `PARENTS` and `PARENT_START_NOTE`; `from_parent`
-  itself stays while `memory_s4` does), `HEATMAP_S2` in `loop.LOSSES`,
-  `HeatmapNet.features` folds back into `decode` (it was split out for this
-  subclass), the trainer's `--arch` choice and help, the notebook `ARCH` option,
-  its staged module and its parent-start check, stage 3c of this README, and
-  the `heatmap_s2` cases of the ball-models, trainer and loop tests.
+- `heatmap_s4`: `tennis_tracker/heatmapnet.py` (the `HeatmapNet` class and the
+  `.pt` record functions), its entry in `ball_models` (`HEATMAP_S4` in
+  `ARCHITECTURES`, `MODEL_CLASSES`, `WEIGHTS_SUFFIX`, `_MODULES`, the record branch
+  of `arch_of`), `heatmap_loss` and `HEATMAP_S4` in `loop.LOSSES` with the `.pt`
+  branch of `save_weights`, the Gaussian branch of `dataset.make_target`, the
+  trainer's `--arch` choice and `HEAT_RECIPE`, the notebook `ARCH` option and its
+  parent-start check, and `tests/test_heatmapnet.py` with the heatmap cases of
+  the ball-models, trainer and loop tests.
 
-In every case `read_record` with `arch=None` and `arch_of`'s record read stay
-only while several `.pt` architectures share the suffix; with one left,
-`arch_of` can go back to the suffix alone.
+With one `.pt` architecture left, `read_record` with `arch=None` and `arch_of`'s
+record read stay only so that a stale record is refused by name; if that is not
+wanted, `arch_of` can go back to the suffix alone.
 
 The winner's weights are promoted by copying them over the default path in
 `tennis_tracker/paths.py` (`GRIDTRACKNET_WEIGHTS`, what `Config.model_path`

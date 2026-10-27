@@ -90,12 +90,11 @@ class WidthBatchNorm(nn.Module):
 class GridTrackNet(nn.Module):
     """The upstream network: a VGG-style encoder with four max-pools and no decoder, predicting
     one cell of the 48x27 grid per frame with its offsets. ``GRID_COLS``, ``GRID_ROWS``,
-    ``INPUT_CHANNELS``, ``FRAMES_PER_UNIT``, ``ARCH`` and ``STATEFUL`` are the contract it shares
-    with ``heatmapnet.HeatmapNet`` and ``memorynet.MemoryNet`` (``ball_models``), so the detector,
-    the decoder and the trainer read the model they hold instead of asking which class it is."""
+    ``INPUT_CHANNELS``, ``FRAMES_PER_UNIT`` and ``ARCH`` are the contract it shares with
+    ``heatmapnet.HeatmapNet`` (``ball_models``), so the detector, the decoder and the trainer
+    read the model they hold instead of asking which class it is."""
 
     ARCH = ARCH
-    STATEFUL = False
     GRID_COLS = GRID_COLS
     GRID_ROWS = GRID_ROWS
     INPUT_CHANNELS = INPUT_CHANNELS

@@ -1,14 +1,12 @@
 """The trainer's torch side of the frame cache: the grid targets of each architecture, the
-augmentations, the ``Dataset`` that reads cached units (and the one that reads chains of them,
-for the stateful architecture) and the sampler that weights them by source and by what they hold
-(absent-ball frames, the frames the starting weights fired on).
+augmentations, the ``Dataset`` that reads cached units and the sampler that weights them by
+source and by what they hold (absent-ball frames, the frames the starting weights fired on).
 
 The target follows the architecture (``make_target``): GridTrackNet's one-hot cell on its 48x27
-grid, exactly as the upstream trainer has it; the heat architectures' Gaussian heat map on their
-own grid (192x108 for HeatmapNet and MemoryNet, 384x216 for HeatmapNetS2; ``HEAT_SIGMA_CELLS``,
-in cells, so half as wide in pixels at stride 2), 1 at the ball's cell. All carry the offsets at the
-ball's cell only, and an absent ball is all zeros. The frames are the same five for every
-architecture, so every augmentation's 15-channel reshape serves each.
+grid, exactly as the upstream trainer has it; HeatmapNet's Gaussian heat map on its 192x108 grid
+(``HEAT_SIGMA_CELLS``, in cells), 1 at the ball's cell. Both carry the offsets at the ball's cell
+only, and an absent ball is all zeros. The frames are the same five for either architecture, so
+every augmentation's 15-channel reshape serves both.
 
 Each augmentation is behind a name in ``AUGMENTATIONS`` (``--augment``), so a run can switch one
 on and be measured against the same run without it:
@@ -24,11 +22,7 @@ on and be measured against the same run without it:
 
 The draws are made first, into one ``Augmentation`` (``UnitDataset.draw``), and then applied to
 the frames (``UnitDataset.apply``); the draws for the newer augmentations are made after the
-older ones, so a run that does not ask for them draws exactly what it always did. A chain
-(``ChainDataset``, the stateful architecture's example: ``CHAIN`` consecutive non-overlapping
-units of one clip and phase, ``build_chains``) draws once and applies the same ``Augmentation``
-to every unit, the shift held within every unit's limits and ``reverse`` reversing the unit order
-too; only the sensor noise of ``strong`` is sampled per unit, at the one drawn level.
+older ones, so a run that does not ask for them draws exactly what it always did.
 """
 
 from __future__ import annotations
@@ -37,7 +31,7 @@ import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Collection, Dict, List, Optional, Sequence, Set, Tuple, TypedDict
+from typing import Collection, Dict, List, Optional, Sequence, Set, Tuple
 
 import cv2
 import numpy as np
@@ -58,7 +52,6 @@ COMPRESS_P = 0.3
 COMPRESS_QUALITY = (35, 85)    # the JPEG quality is drawn between these
 BLUR_P = 0.2                   # ... and softened at this rate, as photometric_augment does
 BLUR_SIGMA = (0.4, 1.0)
-CHAIN = 4                      # the units of a chain, the stateful architecture's example (--chain)
 
 
 def gaussian_heat(target: np.ndarray, row: int, col: int, sigma: float = HEAT_SIGMA_CELLS,
@@ -78,9 +71,9 @@ def gaussian_heat(target: np.ndarray, row: int, col: int, sigma: float = HEAT_SI
 
 def make_target(points, width: int, height: int, arch: str = GRIDTRACKNET) -> torch.Tensor:
     """The (15, rows, cols) target of a unit's five labels on `arch`'s grid: per frame the heat
-    grid (GridTrackNet: 1 at the ball's cell; the heat architectures: ``gaussian_heat`` around
-    it, 1 at the cell) and the x and y offsets, the ball's fractional position in [0, 1) within
-    its cell, written at that cell only. A frame without a ball (None) is all zeros."""
+    grid (GridTrackNet: 1 at the ball's cell; HeatmapNet: ``gaussian_heat`` around it, 1 at the
+    cell) and the x and y offsets, the ball's fractional position in [0, 1) within its cell,
+    written at that cell only. A frame without a ball (None) is all zeros."""
     grid_cols, grid_rows = model_class(arch).GRID_COLS, model_class(arch).GRID_ROWS
     target = np.zeros((FRAMES_PER_UNIT * 3, grid_rows, grid_cols), dtype=np.float32)
     for index, point in enumerate(points):
@@ -277,12 +270,11 @@ class UnitDataset(Dataset):
             frames.append(np.moveaxis(image, -1, 0))
         return np.concatenate(frames).astype(np.float32) / 255.0
 
-    def draw(self, units: Sequence[TrainingUnit]) -> Augmentation:
-        """The draws for one example made of `units` (one unit, or a chain's): nothing when the
-        dataset does not augment. The draws are made in this order on purpose: it is the sequence
-        every run has made, the newer augmentations drawing after the older ones. The shift is
-        drawn within the limits that keep every label of every unit on the image (the cache's
-        frames are the model's 768x432)."""
+    def draw(self, unit: TrainingUnit) -> Augmentation:
+        """The draws for one example, `unit`: nothing when the dataset does not augment. The draws
+        are made in this order on purpose: it is the sequence every run has made, the newer
+        augmentations drawing after the older ones. The shift is drawn within the limits that
+        keep every label of the unit on the image (the cache's frames are the model's 768x432)."""
         rng = self.augmenter()
         on = self.augmentations
         flip = self.augment and rng.draws.random() < 0.5
@@ -293,10 +285,9 @@ class UnitDataset(Dataset):
             photometric = draw_photometric(rng.draws)
         shift = None
         if "translate" in on and rng.draws.random() < TRANSLATE_P:
-            limits = [translate_limits(flipped(unit["points"], unit["size"][0]) if flip else unit["points"],
-                                       unit["size"][0], unit["size"][1], WIDTH, HEIGHT) for unit in units]
-            dx_min, dx_max = max(limit[0] for limit in limits), min(limit[1] for limit in limits)
-            dy_min, dy_max = max(limit[2] for limit in limits), min(limit[3] for limit in limits)
+            dx_min, dx_max, dy_min, dy_max = translate_limits(
+                flipped(unit["points"], unit["size"][0]) if flip else unit["points"],
+                unit["size"][0], unit["size"][1], WIDTH, HEIGHT)
             shift = (rng.draws.randint(dx_min, dx_max), rng.draws.randint(dy_min, dy_max))
         reversed_time = "reverse" in on and rng.draws.random() < REVERSE_P
         quality = softness = None
@@ -327,88 +318,7 @@ class UnitDataset(Dataset):
 
     def __getitem__(self, index: int):
         sample = self.samples[index]
-        return self.apply(sample, self.draw([sample]) if self.augment else NONE)
-
-
-# --------------------------------------------------------------------------- chains
-
-class TrainingChain(TypedDict):
-    """The stateful architecture's example: consecutive non-overlapping units of one clip and
-    phase, in temporal order, each starting five frames (at model cadence) after the last."""
-    clip: str
-    source: str
-    units: List[TrainingUnit]
-
-
-def build_chains(samples: Sequence[TrainingUnit], length: int) -> List[TrainingChain]:
-    """Every chain of `length` consecutive units over the frames `samples` cover, per clip:
-    the units are the prepass's own (``GridTrackNetBallDetector._prepass`` cuts phase ``p`` into
-    units starting at ``p``, ``p + 5 * stride``, ... from the clip's first frame, the stride the
-    clip's cadence, which the units' indices show), from the first such start the labels cover; a
-    unit whose five frames are not all covered by `samples` (a label gap, the end of a stretch)
-    breaks the chains there. The frames and labels come from the units that cover them, so no
-    frame is read that the cache does not hold."""
-    if length < 1:
-        raise ValueError(f"a chain holds at least one unit, not {length}")
-    by_clip: Dict[str, Dict[int, Tuple[str, Target]]] = {}
-    meta: Dict[str, Tuple[str, List[int], int]] = {}
-    for sample in samples:
-        covered = by_clip.setdefault(sample["clip"], {})
-        for index, frame, point in zip(sample["indices"], sample["frames"], sample["points"]):
-            covered[index] = (frame, point)
-        if sample["clip"] not in meta:
-            meta[sample["clip"]] = (sample["source"], sample["size"], sample["indices"][1] - sample["indices"][0])
-    chains: List[TrainingChain] = []
-    for clip, covered in by_clip.items():
-        source, size, stride = meta[clip]
-        first = min(covered)
-        step = FRAMES_PER_UNIT * stride
-        first = first + (first % stride - first) % step          # the prepass's first unit start at or after it
-        units: List[Optional[TrainingUnit]] = []
-        for start in range(first, max(covered) + 1, step):
-            window = [start + offset * stride for offset in range(FRAMES_PER_UNIT)]
-            if all(index in covered for index in window):
-                units.append(TrainingUnit(clip=clip, source=source, indices=window,
-                                          frames=[covered[index][0] for index in window],
-                                          points=[covered[index][1] for index in window], size=list(size)))
-            else:
-                units.append(None)
-        for position in range(len(units) - length + 1):
-            run = units[position:position + length]
-            if all(unit is not None for unit in run):
-                chains.append(TrainingChain(clip=clip, source=source, units=run))
-    return chains
-
-
-def chain_units(chains: Sequence[TrainingChain]) -> List[TrainingUnit]:
-    """The chains' units as one flat list, chain by chain (what ``unit_weights`` and the
-    hard-negative prepass take; ``chain_weights`` folds their weights back)."""
-    return [unit for chain in chains for unit in chain["units"]]
-
-
-def chain_weights(chains: Sequence[TrainingChain], weights: Sequence[float]) -> List[float]:
-    """One sampling weight per chain, the mean of its units' (`weights`, over ``chain_units``)."""
-    folded, position = [], 0
-    for chain in chains:
-        count = len(chain["units"])
-        folded.append(sum(weights[position:position + count]) / count)
-        position += count
-    if position != len(weights):
-        raise ValueError(f"{len(weights)} unit weights for {position} chain units")
-    return folded
-
-
-class ChainDataset(UnitDataset):
-    """The chains as (images, target) pairs stacked along a leading unit axis: (K, 15, H, W) and
-    (K, 15, rows, cols) for a chain of K units, in temporal order, one ``Augmentation`` drawn for
-    the chain and applied to every unit (``reverse`` reverses the unit order too)."""
-
-    def __getitem__(self, index: int):
-        chain = self.samples[index]
-        units = chain["units"]
-        augmentation = self.draw(units) if self.augment else NONE
-        pairs = [self.apply(unit, augmentation) for unit in (units[::-1] if augmentation.reverse else units)]
-        return torch.stack([images for images, _ in pairs]), torch.stack([target for _, target in pairs])
+        return self.apply(sample, self.draw(sample) if self.augment else NONE)
 
 
 # --------------------------------------------------------------------------- the sampler

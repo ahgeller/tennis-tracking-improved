@@ -101,8 +101,8 @@ def validate_io_paths(cfg: Config) -> Path:
 
 
 def _build_ball_detector(cfg: Config) -> BallDetectorBackend:
-    """The five-frame prepass detector for ``.npz`` (GridTrackNet) or ``.pt`` (HeatmapNet or
-    MemoryNet) weights, else the TensorRT engine next to ``model_path``."""
+    """The five-frame prepass detector for ``.npz`` (GridTrackNet) or ``.pt`` (HeatmapNet)
+    weights, else the TensorRT engine next to ``model_path``."""
     model_path = Path(cfg.model_path).expanduser().resolve()
     if model_path.suffix.lower() in PREPASS_WEIGHTS:
         if not model_path.is_file():

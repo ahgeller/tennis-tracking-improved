@@ -189,32 +189,16 @@ def metric_probe(count: int, labels: Dict[int, Optional[List[float]]]) -> Detect
 
 class StandInModel:
     """A callable standing in for the ball model, carrying the contract the detector reads off a
-    real one (``ball_models``: GridTrackNet's ``ARCH``, grid and channel count, stateless)."""
+    real one (``ball_models``: GridTrackNet's ``ARCH``, grid and channel count)."""
 
     ARCH, GRID_COLS, GRID_ROWS = GridTrackNet.ARCH, GridTrackNet.GRID_COLS, GridTrackNet.GRID_ROWS
     INPUT_CHANNELS, FRAMES_PER_UNIT = GridTrackNet.INPUT_CHANNELS, GridTrackNet.FRAMES_PER_UNIT
-    STATEFUL = False
 
     def __init__(self, forward):
         self.forward = forward
 
-    def __call__(self, batch, state=None):
-        return self.forward(batch) if state is None else self.forward(batch, state)
-
-
-class StatefulStandInModel(StandInModel):
-    """A ``STATEFUL`` stand-in (MemoryNet's contract): ``forward(batch, state)`` returns
-    ``(output, new_state)``, and every call is recorded as ``(batch, state)`` in ``calls``."""
-
-    ARCH, STATEFUL = "memory_s4", True
-
-    def __init__(self, forward):
-        super().__init__(forward)
-        self.calls = []
-
-    def __call__(self, batch, state=None):
-        self.calls.append((batch, state))
-        return self.forward(batch, state)
+    def __call__(self, batch):
+        return self.forward(batch)
 
 
 class CpuGridTrackNet(GridTrackNetBallDetector):
