@@ -195,7 +195,7 @@ def track_to_json(track: Optional[Track]) -> Optional[TrackJson]:
 
 
 # ---------------------------------------------------------------------------
-# Court events (computed with --court; evaluation.court_events_score reads them)
+# Court events (computed with --court; train's finetune.scoring.court_events_score reads them)
 # ---------------------------------------------------------------------------
 
 def _ball_point_to_json(point: Optional[BallPoint]) -> Optional[BallPointJson]:

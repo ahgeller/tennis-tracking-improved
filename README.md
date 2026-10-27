@@ -182,7 +182,7 @@ keeps the GridTrackNet files, among them the fine-tuned checkpoint that produced
 the demo, and the old YOLO `ball.engine`. The labelling and training workspace
 (the label tool, the trainer, the Colab notebook, the hand-corrected labels and
 the detector scorers over those labels) lives on the `train` branch, which
-carries this tracker as well.
+carries this tracker as its `system/` folder.
 
 ## Validation
 

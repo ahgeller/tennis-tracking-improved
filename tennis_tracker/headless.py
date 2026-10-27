@@ -1,10 +1,11 @@
 """Running the tracker from another program with nothing drawn: one ``Config`` for every caller
-that scores or drafts from the pipeline's answer (``evaluation.archive``, ``finetune.training.pretrack``),
+that scores or drafts from the pipeline's answer (on ``train``: ``finetune.scoring.archive``, ``finetune.training.pretrack``),
 and the shape the tracking JSON gives that answer, built from the ``RunResult`` instead of
 re-read from disk.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -22,7 +23,7 @@ def headless_config(video: Path, *, model_path: Path, conf: float, device: str, 
     the video the run would have written (its debug outputs are derived from it); ``court_events``
     also computes and exports the court events, with the bundled bounce model; ``window_step`` is
     ``Config.gridtracknet_window_step``, the prepass's frames between unit starts (None, its default)."""
-    return Config(
+    config = Config(
         input_video=str(video),
         output_video=str(output_video or tracking_json.with_suffix(".mp4")),
         tracking_json=str(tracking_json),
@@ -35,8 +36,8 @@ def headless_config(video: Path, *, model_path: Path, conf: float, device: str, 
         save_tracking_video=False,
         court_events=court_events,
         print_selector_tracks=False,
-        **({} if window_step is None else {"gridtracknet_window_step": window_step}),
     )
+    return config if window_step is None else replace(config, gridtracknet_window_step=window_step)
 
 
 def run_headless(video: Path, *, model_path: Path, conf: float, device: str, tracking_json: Path,
