@@ -10,7 +10,8 @@ models/legacy/gridtracknet_upstream.npz
 finetune/videos/
 finetune/cache/
 finetune/runs/
-finetune/models/
+finetune/models/*
+!/models/README.md
 finetune/labels/*.draft
 finetune/labels/*.review.json
 finetune/labels/label_tool.settings.json
@@ -37,7 +38,8 @@ scorecard.png
 .claude/skills/desloppify/
 
 # model weights are proprietary: kept locally, never committed
-/models/
+/models/*
+!/models/README.md
 *.pt
 *.pth
 *.npz
