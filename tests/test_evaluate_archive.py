@@ -65,9 +65,9 @@ def test_pipeline_mode_forwards_the_court_flag_the_weights_and_the_window_step_t
         tmp_path, monkeypatch, capsys):
     """``--court`` reaches ``run_headless`` as ``court_events`` (off without it),
     ``--gridtracknet-weights`` as ``model_path`` (the bundled weights without it) and
-    ``--window-step`` as ``window_step`` (5 without it), so a new detector and the dense prepass
-    are judged through the pipeline too; the tracker itself is replaced by a run that finds
-    nothing."""
+    ``--window-step`` as ``window_step`` (None without it: the Config default), so a new detector
+    and either prepass are judged through the pipeline too; the tracker itself is replaced by a
+    run that finds nothing."""
     from evaluation import archive
     from tennis_tracker import headless
     from tennis_tracker.export import RunResult
@@ -89,14 +89,15 @@ def test_pipeline_mode_forwards_the_court_flag_the_weights_and_the_window_step_t
     common = ["--mode", "pipeline", "--archive", str(tmp_path), "--out-dir", str(tmp_path / "out")]
     assert archive.main([*common, "--court"]) == 0
     assert archive.main(common) == 0
-    assert archive.main([*common, "--gridtracknet-weights", str(tmp_path / "best.pt"), "--window-step", "1"]) == 0
+    assert archive.main([*common, "--gridtracknet-weights", str(tmp_path / "best.pt"), "--window-step", "5"]) == 0
     (with_court, without, other_weights) = seen
     assert with_court[0] == video and with_court[1]["court_events"] is True
     assert with_court[1]["tracking_json"] == tmp_path / "out" / "video1_gridtracknet.json"
     assert without[1]["court_events"] is False
     assert with_court[1]["model_path"] == without[1]["model_path"] == archive.MODELS["gridtracknet"]
     assert other_weights[1]["model_path"] == tmp_path / "best.pt"
-    assert with_court[1]["window_step"] == without[1]["window_step"] == 5 and other_weights[1]["window_step"] == 1
+    assert with_court[1]["window_step"] is None and without[1]["window_step"] is None
+    assert other_weights[1]["window_step"] == 5
     assert "=== pipeline [gridtracknet] per clip ===" in capsys.readouterr().out
 
 

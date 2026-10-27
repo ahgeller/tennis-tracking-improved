@@ -45,7 +45,11 @@ rendering (`--weights` points it at other ball-detector weights, `.npz` or `.pt`
 - `tennis_tracker/engines/`: `ball_detectors.py`, the progressive GridTrackNet
   prepass and the single-frame TensorRT ball engine. At about 60 FPS, even and
   odd phases each run at about 30 FPS. Preserve source-frame indices and
-  temporal order. `engine_session.py`: the TensorRT session the ball, player
+  temporal order. `Config.gridtracknet_window_step` (1, the default since
+  2026-10-26) is the frames of a phase between unit starts: below 5 a frame's
+  overlapping units are averaged before one decode (`_UnitStream`,
+  `_HeatAverage`); 5 is the old prepass, one unit per frame, which a stateful
+  model takes whatever is set; `evaluate_archive.py --window-step` scores either. `engine_session.py`: the TensorRT session the ball, player
   and court engines share; `engine_files.py`: locating engine files, their
   Ultralytics metadata and I/O tensor table (no CUDA); `engine_boxes.py`:
   decoding detection-engine outputs into boxes for the ball and player

@@ -42,6 +42,7 @@ weights (`models/gridtracknet_weights_torch.npz`), training on the 40 clips outs
 | heat1 | d6dc880 | `--arch heatmap_s4 --from-scratch --holdout mixed_v1 --epochs 40 --lr 1.0 --augment basic translate --score-every 2` (Colab A100, 4.4 min/epoch) | 7 | 12 (of 20 scored) | 0.866 / 0.005 / 0.075 (39/518) at 0.50; 0.920 / 0.011 / 0.168 at 0.30 | 0.869 | 0.904 / 0.873 / 0.768 | 3.4 | epoch 10 was 0.897 recall at 0.112 false alarm; from epoch 18 recall fell to 0.11 and from 24 to 0.000 while the training loss kept falling: the decoder's BatchNorm running variance (`up2.1`, `up2.4`) had overflowed float16 to infinity (25104 at epoch 12, 9088 running mean at 24), which silences the eval-mode network only. Fixed in recipe 2 below; the 3.4 px median (bundled 2.1) is the offset head untrained at weight 0.001 |
 | heat2 | 747d1ed | `--arch heatmap_s4 --weights heat1/best.pt --holdout mixed_v1 --epochs 16 --lr 0.3 --augment basic translate --score-every 2` (recipe 2 fine-tune of heat1's epoch 12; Colab) | 7 | 4 (of 8 scored) | 0.901 / 0.005 / 0.102 at 0.50 (epochs 2 to 8: 0.889, 0.901, 0.902, 0.891 recall, 0.10 to 0.12 false alarm) | - | - | 1.0 | the offset fix proven: 3.4 px median to 1.0 at once; the `up2.1` running variance fell under weight decay at 0.3 (10110, 8657, 6730, then under the warning line); recall held at heat1's level, the false-alarm rate did not fall. Scored on the PC per source: pending |
 | heat3 | 747d1ed | `--arch heatmap_s4 --from-scratch --holdout mixed_v1 --epochs 40 --lr 1.0 --augment basic translate --score-every 2` (recipe 2 from scratch; Colab A100, 4.3 min/epoch) | 7 | 16 (of 8 scored, in progress) | 0.831 / 0.006 / 0.054 at epoch 16; 0.883 / 0.014 / 0.104 at epoch 10 | - | - | 1.0 | the same climb as heat1 on the same schedule: `up2.4` running variance 9348 at epoch 11, 19625, 24039, 44242, 26936, 60577 at 16 (heat1's `best.pt`, epoch 12, held 25104), with the scored recall swinging 0.883, 0.775, 0.451, 0.831 while the training loss fell 0.44 to 0.41: weight decay 1e-4 holds the scale at 0.3 and loses to the step at 1.0. Fixed in recipe 3 below; the run was left going at 1.0 at the user's request |
+| heat4 | a928f77 | `--arch heatmap_s4 --from-scratch --holdout mixed_v1 --epochs 40 --lr 1.0 --augment basic translate --score-every 2`, LR 0.1 from epoch 21 (recipe 3 from scratch; Colab A100, 4.4 min/epoch) | 7 | 26 (of 20 scored) | 0.894 / 0.007 / 0.083 (Colab, at 0.50); epoch 38 was 0.915 / 0.008 / 0.114, epoch 34 0.911 / 0.009 / 0.102 | - | - | 0.8 | no warning line in 40 epochs: the hold works at 1.0. At 1.0 the scored rows sat at 0.85 to 0.88 (epochs 8 to 20, bouncing 0.82 to 0.88); the drop to 0.1 at 21 lifted them to 0.89 to 0.92 at once and they stayed there. The winner rule prefers epoch 26's lower false alarm to 38's recall. PC scoring per source and with dense windows: pending (next steps.txt, steps 1 and 2) |
 | R1 to R5 | - | see `audit/gridtracknet_recipe_experiments.md` | - | - | - | - | - | - | not run: the chain was cancelled on 2026-10-21 at the user's request (ten more hours); the protocol and commands are in the doc |
 
 ## E0: the current weights, INTER_LINEAR against INTER_AREA
@@ -161,5 +162,12 @@ Full tables, the cell histogram and the per-source reading are in
   five times the units is 1.5x the time). Also tried and removed: every unit mirrored and the
   two answers averaged (x offsets mirrored back as one minus themselves): alone 0.866 / 0.069,
   on top of dense windows 0.873 / 0.042, within noise for 1.5x more time. Logs in
-  `output/dense_windows/`. The tracker still defaults to a step of 5: the pipeline-mode check
-  (`--mode pipeline` not worse) has not been run, and the default moves with it.
+  `output/dense_windows/`.
+- 2026-10-26, dense windows made the default (heat4's `best.pt`, mixed_v1, the PC; logs in
+  `output/dense_windows/heat4/`). Raw at 0.50: recall 0.894 to 0.900, false alarm 0.085 (44) to
+  0.073 (38), wrong 0.008 to 0.005; at 0.30: 0.925 / 0.212 to 0.940 / 0.158; prof 0.930 to 0.943,
+  custom 0.933 to 0.935, grid 0.732 to 0.729; median 0.8 to 0.7 px. Through the pipeline
+  (`--mode pipeline`, the selector included): recall 0.898 to 0.906, false alarm 0.178 (92) to
+  0.164 (85), the bad outputs landing on players 52 to 38. The prepass took 192 s against 133 s
+  over the 24 clips. Both checks better, so `Config.gridtracknet_window_step` is 1; a stateful
+  model takes 5 on its own. Reverting is that one field back to 5, the prepass as it was.

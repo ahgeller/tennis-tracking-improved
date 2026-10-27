@@ -58,11 +58,18 @@ class RaisingCapture(Capture):
         return super().read()
 
 
+# The stand-in models below answer no grid (their output is whatever shape the test likes and
+# an injected decoder reads it), so they run the prepass at one unit per frame, where the
+# model's answer goes straight to the decoder; the averaging path (a window step below 5, the
+# default) reshapes a real 15-channel grid and is exercised with GridStandIn further down.
+ONE_UNIT_PER_FRAME = 5
+
+
 def _bare_detector(cfg=None) -> GridTrackNetBallDetector:
     """A GridTrackNet backend without its constructor: the model, decoder and
     frame encoder are stand-ins that find a ball at (10, 20) on every frame."""
     detector = GridTrackNetBallDetector.__new__(GridTrackNetBallDetector)
-    detector.cfg = cfg or Config(device="0")
+    detector.cfg = cfg or Config(device="0", gridtracknet_window_step=ONE_UNIT_PER_FRAME)
     detector.device = torch.device("cpu")
     detector.model = StandInModel(lambda batch: batch)
     detector._frame_tensor = lambda frame, device: torch.zeros((1, 3))
@@ -108,7 +115,8 @@ def test_foreground_prepass_failure_raises_instead_of_returning_empty_frames(mon
 
 
 def test_background_prepass_failure_reaches_the_consumer(monkeypatch, fake_cuda):
-    detector = _bare_detector(Config(device="0", gridtracknet_prepass_background=True))
+    detector = _bare_detector(Config(device="0", gridtracknet_prepass_background=True,
+                                     gridtracknet_window_step=ONE_UNIT_PER_FRAME))
     monkeypatch.setattr(ball_detectors.cv2, "VideoCapture", lambda path: RaisingCapture(7, fail_at=2))
     detector.prepare_video(Path("clip.mp4"), 30.0, 1920, 1080, total=7)
     with pytest.raises(RuntimeError, match="prepass failed"):
@@ -141,7 +149,7 @@ def test_finalized_misses_are_immutable(stride, count):
             assert detector.precomputed[:len(previous)] == previous
         publications.append([list(row) for row in detector.precomputed[:upto]])
     detector = CpuGridTrackNet(
-        Config(device="0"), model=lambda batch: batch, decode=decode,
+        Config(device="0", gridtracknet_window_step=ONE_UNIT_PER_FRAME), model=lambda batch: batch, decode=decode,
         frame_tensor=lambda frame, device: torch.tensor([float(frame[0, 0, 0])]),
         on_publish=publish,
     )
@@ -161,7 +169,7 @@ def _index_detector(model, publications):
     frame; every published prefix is appended to `publications`."""
     def decode(output, width, height, threshold):
         return [((float(value), 20.0), 0.9) for unit in output for value in unit]
-    return CpuGridTrackNet(Config(device="0"), model=model, decode=decode,
+    return CpuGridTrackNet(Config(device="0", gridtracknet_window_step=ONE_UNIT_PER_FRAME), model=model, decode=decode,
                            frame_tensor=lambda frame, device: torch.tensor([float(frame[0, 0, 0])]),
                            on_publish=publications.append)
 
@@ -278,14 +286,19 @@ def test_a_window_step_of_one_averages_the_five_units_covering_a_frame(stride, c
     assert all(single[i][0][1] == pytest.approx(0.2 * ((i // stride) % 5 + 1)) for i in interior)
 
 
-def test_overlapping_units_are_refused_for_a_stateful_model():
+def test_a_stateful_model_takes_a_step_of_five_whatever_is_set_and_says_so(capsys):
     """A STATEFUL model carries one chain of states per phase, which overlapping units would
-    break: the detector refuses a window step below 5 at construction, and a window step outside
+    break: whatever gridtracknet_window_step says (the default is 1), its prepass cuts a unit every
+    five frames, and the construction line says the setting is not taken; a window step outside
     1 to 5 is refused for any model."""
     model = StatefulStandInModel(lambda batch, state: (batch, batch[:, :1]))
-    with pytest.raises(RuntimeError, match="STATEFUL"):
-        CpuGridTrackNet(Config(device="0", gridtracknet_window_step=1), model=model, decode=lambda *a: [],
-                        frame_tensor=lambda f, d: torch.zeros((3, 1, 1)))
+    detector = CpuGridTrackNet(Config(device="0", gridtracknet_window_step=1), model=model, decode=lambda *a: [],
+                               frame_tensor=lambda f, d: torch.zeros((3, 1, 1)))
+    assert detector.window_step() == 5
+    assert "one chain of states per phase (the window step set is not taken)" in capsys.readouterr().out
+    plain = CpuGridTrackNet(Config(device="0", gridtracknet_window_step=5), model=model, decode=lambda *a: [],
+                            frame_tensor=lambda f, d: torch.zeros((3, 1, 1)))
+    assert plain.window_step() == 5 and "not taken" not in capsys.readouterr().out
     with pytest.raises(ValueError, match="window_step"):
         CpuGridTrackNet(Config(device="0", gridtracknet_window_step=0), model=lambda b: b, decode=lambda *a: [],
                         frame_tensor=lambda f, d: torch.zeros((3, 1, 1)))

@@ -106,12 +106,13 @@ class GridTrackNetBallDetector(BallDetectorBackend):
     to a call. Which frames are answered, in which order, and when they are
     published is the same either way.
 
-    ``Config.gridtracknet_window_step`` below 5 starts a unit every that many
-    frames of a phase instead of every 5, so a frame is answered by up to five
-    overlapping units, and the answers a frame gets are averaged grid by grid
-    before it is decoded once (``_HeatAverage``). A ``STATEFUL`` model carries
-    one chain of states per phase, which overlapping units would break, so it
-    takes the step of 5 only.
+    ``Config.gridtracknet_window_step`` below 5 (the default is 1) starts a
+    unit every that many frames of a phase instead of every 5, so a frame is
+    answered by up to five overlapping units, and the answers a frame gets are
+    averaged grid by grid before it is decoded once (``_HeatAverage``). A
+    ``STATEFUL`` model carries one chain of states per phase, which overlapping
+    units would break, so it takes a step of 5 whatever is set
+    (``window_step``, which says so once at construction).
 
     ``prepare_video`` decodes the whole clip once (by default on a worker
     thread, see ``Config.gridtracknet_prepass_background``) and caches one
@@ -136,12 +137,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         self._decode = decode_predictions
         self._frame_tensor = frame_tensor
         self.model = load_ball_model(Path(weights_path), self.device)
-        window_step = int(cfg.gridtracknet_window_step)
-        if not 1 <= window_step <= 5:
-            raise ValueError(f"gridtracknet_window_step must be 1 to 5, not {window_step}")
-        if self.model.STATEFUL and window_step != 5:
-            raise RuntimeError("a STATEFUL model answers each phase along one chain of states; overlapping "
-                               "units would need a chain each, so it takes window step 5")
+        window_step = self.window_step()
         # One entry per decoded source frame, appended by the prepass.
         self.precomputed: Optional[List[List[RawDetection]]] = None
         # Progressive prepass state: frames < ready_upto are final; ``_done``
@@ -154,9 +150,22 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         with torch.inference_mode():
             self.model(torch.zeros((1, self.model.INPUT_CHANNELS, HEIGHT, WIDTH), device=self.device, dtype=torch.float16))
         torch.cuda.synchronize(self.device)
-        windows = "" if window_step == 5 else f", a unit every {window_step} frame(s)"
+        if window_step == 5:
+            windows = (", one chain of states per phase (the window step set is not taken)"
+                       if self.model.STATEFUL and int(cfg.gridtracknet_window_step) != 5 else "")
+        else:
+            windows = f", a unit every {window_step} frame(s)"
         print(f"[detector] {self.model.ARCH} FP16, {self.model.GRID_COLS}x{self.model.GRID_ROWS} grid "
               f"(confidence={cfg.conf:.2f}, device={self.device}{windows})")
+
+    def window_step(self) -> int:
+        """The frames of a phase between the prepass's unit starts: ``Config.gridtracknet_window_step``,
+        which must be 1 to 5 (a ValueError otherwise), or 5 for a ``STATEFUL`` model, whose one
+        chain of states per phase overlapping units would break."""
+        window_step = int(self.cfg.gridtracknet_window_step)
+        if not 1 <= window_step <= 5:
+            raise ValueError(f"gridtracknet_window_step must be 1 to 5, not {window_step}")
+        return 5 if self.model.STATEFUL else window_step
 
     def source_stride_for(self, fps: float) -> int:
         override = self.cfg.gridtracknet_source_stride
@@ -224,7 +233,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         # spacing, so at 60 FPS the odd frames form a second, equally valid unit stream;
         # running only phase 0 leaves every odd frame unobserved. ``_UnitStream`` cuts a
         # phase's units every ``window_step`` of its frames from the last five it saw.
-        window_step = int(self.cfg.gridtracknet_window_step)
+        window_step = self.window_step()
         streams = [_UnitStream(window_step) for _ in range(source_stride)]
         batches: List[_PrepassUnit] = []
         # A stateful model carries one memory per phase and sees one unit per phase per
