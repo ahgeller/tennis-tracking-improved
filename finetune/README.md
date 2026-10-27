@@ -311,7 +311,7 @@ separately). `ft.py check` flags files that break this rule.
    `models/gridtracknet_weights_torch.npz` (the old file is kept as
    `*.npz.before_promote_<timestamp>`) — only worth doing when `runs/<tag>/winner.json`
    says the new weights won. Then `.\finetune.ps1 eval` and
-   `python check_parity.py`. Go back to step 1 with `--weights` pointing at
+   `python -m evaluation.parity`. Go back to step 1 with `--weights` pointing at
    the new model. `.\finetune.ps1 status` at any point shows what is
    labelled, what is still a draft, and which model the tracker is using.
 

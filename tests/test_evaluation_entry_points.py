@@ -1,5 +1,7 @@
-"""The evaluation package and the root scripts that front it: the documented commands keep
-working, and the package's two scorers are the ones they name."""
+"""The evaluation package and the root scripts that front the workspace scorers: the documented
+commands keep working, `validate` and `parity` run as ``python -m``, and the gate scores with
+the tracking scorer."""
+import inspect
 import subprocess
 import sys
 from pathlib import Path
@@ -10,26 +12,21 @@ from tennis_tracker.paths import ROOT
 
 
 def test_root_scripts_front_the_package_modules():
-    import check_parity
     import evaluate_archive
     import score_court_events
     import track_breaks
-    import validate_tracking
     from evaluation import archive, court_events_score, parity, validate
     from evaluation import track_breaks as track_breaks_module
 
-    assert validate_tracking.main is validate.main
     assert track_breaks.main is track_breaks_module.main
-    assert check_parity.main is parity.main
     assert evaluate_archive.main is archive.main
     assert score_court_events.main is court_events_score.main
-    assert parity.validate is validate.validate              # check_parity gates on the tracking scorer
+    assert parity.validate is validate.validate              # the parity gate scores with the tracking scorer
 
 
-def test_every_script_main_takes_argv_and_returns_a_status():
+def test_every_module_main_takes_argv_and_returns_a_status():
     """main(argv=None) -> int everywhere, invoked as raise SystemExit(main()): a test can drive a
-    script without patching sys.argv, and the exit status is the return value, never implicit."""
-    import inspect
+    module without patching sys.argv, and the exit status is the return value, never implicit."""
     from evaluation import archive, court_events_score, parity, track_breaks, validate
     from finetune.data import import_data, realign
     from finetune.training import pretrack, train_gridtracknet
@@ -48,12 +45,19 @@ def test_every_script_main_takes_argv_and_returns_a_status():
 
 
 def test_the_documented_commands_still_answer_help():
-    for script in ("evaluate_archive.py", "validate_tracking.py", "check_parity.py", "score_court_events.py"):
+    for script in ("evaluate_archive.py", "score_court_events.py"):
         done = subprocess.run([sys.executable, str(ROOT / script), "--help"], cwd=ROOT, capture_output=True, text=True)
         assert done.returncode == 0, done.stderr
         assert "usage:" in done.stdout
     done = subprocess.run([sys.executable, "-m", "evaluation.archive", "--help"], cwd=ROOT, capture_output=True, text=True)
     assert done.returncode == 0 and "--archive" in done.stdout
+
+
+@pytest.mark.parametrize("module", ["evaluation.validate", "evaluation.parity"])
+def test_the_documented_commands_answer_help(module):
+    done = subprocess.run([sys.executable, "-m", module, "--help"], cwd=ROOT, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert "usage:" in done.stdout
 
 
 def test_archive_scorer_uses_the_workspace_and_the_shared_model_paths():

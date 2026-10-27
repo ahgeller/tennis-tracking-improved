@@ -130,13 +130,13 @@ def iter_engine_io(engine: Any, trt: Any) -> Iterator[EngineIO]:
     """Walk an engine's I/O tensors with the TensorRT 10 tensor API.
 
     An engine that only exposes the TensorRT 8 binding API raises: the
-    requirements pin TensorRT 10, and ``build_trt_engines.py`` rebuilds the
+    requirements pin TensorRT 10, and ``build_engines.py`` rebuilds the
     engines for it.
     """
     if not hasattr(engine, "num_io_tensors"):
         raise RuntimeError(
             "TensorRT engine exposes only the TensorRT 8 binding API; this tracker requires "
-            "TensorRT 10 (requirements.txt) and engines rebuilt for it with build_trt_engines.py"
+            "TensorRT 10 (requirements.txt) and engines rebuilt for it with tennis_tracker.engines.build_engines"
         )
     for index in range(engine.num_io_tensors):
         name = engine.get_tensor_name(index)

@@ -473,7 +473,7 @@ class TensorRTBallPending:
 class TensorRTRuntimeBallDetector(BallDetectorBackend):
     """Single-frame ball detector for an Ultralytics-exported TensorRT engine.
 
-    Selected when ``Config.model_path`` ends in ``.engine`` (``build_trt_engines.py``
+    Selected when ``Config.model_path`` ends in ``.engine`` (``build_engines.py``
     builds one from ``models/ball.pt``); GridTrackNet is the default backend.
     Each frame is one inference, launched on the session's stream with
     ``cfg.trt_async_slots`` output buffers when ``cfg.trt_async_execute`` is

@@ -248,7 +248,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
     copy_atomic(source, layout.repo_weights)
     print(f"[promote] {source} -> {layout.repo_weights}")
     print("next: python finetune/ft.py eval      (the reviewed clips)\n"
-          "      python check_parity.py          (the Pomona gate; a new model may legitimately move its numbers)")
+          "      python -m evaluation.parity     (the Pomona gate; a new model may legitimately move its numbers)")
     return 0
 
 

@@ -41,7 +41,9 @@ rendering (`--weights` points it at other ball-detector weights, `.npz` or `.pt`
   and court engines share; `engine_files.py`: locating engine files, their
   Ultralytics metadata and I/O tensor table (no CUDA); `engine_boxes.py`:
   decoding detection-engine outputs into boxes for the ball and player
-  backends. `player_detector.py`: TensorRT players with ByteTrack association.
+  backends. `build_engines.py`: YOLO checkpoint to ONNX to TensorRT engine, run
+  as `python -m tennis_tracker.engines.build_engines`. `player_detector.py`:
+  TensorRT players with ByteTrack association.
   `court_detector.py`: court keypoints every N frames, last good result cached.
   `tennis_tracker/paths.py`: the model asset paths every consumer (Config
   defaults, scripts, the workspace) spells once. `headless.py`: the one Config
@@ -148,7 +150,7 @@ rendering (`--weights` points it at other ball-detector weights, `.npz` or `.pt`
   with `--oversample-absent` and `--oversample-false-alarms`) and `pretrack.py` (drafts).
   `audit/records/gridtracknet_recipe_2026-10.md` is the ledger of the recipe runs.
 - `evaluation/`: `validate.py` scores a tracking JSON against annotations in native
-  pixels (`check_parity` freezes its numbers), `archive.py` scores the detector or
+  pixels (the parity gate freezes its numbers), `archive.py` scores the detector or
   the pipeline on workspace clips with `finetune/data/detector_metrics.py` (`pipeline_score.py`
   scores one pipeline run's clip; raw mode also prints a `macro` per-clip-mean line, one
   `source=<name>` line per source, the count beside each false-alarm rate and, with
@@ -157,8 +159,9 @@ rendering (`--weights` points it at other ball-detector weights, `.npz` or `.pt`
   match, `--compare`, and `--recompute` to rerun the event stages on a run's frames without
   the GPU), `parity.py` is the Pomona gate, `compare_eval_logs.py` sets two evaluator logs
   side by side and `track_breaks.py` buckets a pipeline run's misses by cause.
-  `validate_tracking.py`, `evaluate_archive.py`, `score_court_events.py`, `track_breaks.py`
-  and `check_parity.py` at the root are thin entry points to them.
+  `validate.py` and `parity.py` run as modules from the root (`python -m evaluation.validate`,
+  `python -m evaluation.parity`); `evaluate_archive.py`, `score_court_events.py` and
+  `track_breaks.py` at the root are thin entry points to the workspace scorers.
 
 ## Environment and commands
 
@@ -184,6 +187,7 @@ locked installation manifest. TensorRT engines may be GPU/version specific.
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --no-video --tracking-json output/new_review_tracking.json
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py --court --no-video --tracking-json output/new_review_court_events.json
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode raw --clips video13
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.parity
 ```
 
 `python -m pytest -q` (pytest required) runs every test: all suites live in
@@ -200,7 +204,7 @@ reproduction script, kept as text: it no longer runs.
 
 Always specify `--archive finetune` for workspace evaluation: the evaluator can
 otherwise prefer a separate Desktop archive. Use distinct output paths for new
-runs. `check_parity.py` verifies a frozen Pomona benchmark; the September 7, 2026
+runs. `python -m evaluation.parity` verifies a frozen Pomona benchmark; the September 7, 2026
 worktree fails several of its gates. Do not silently refresh that baseline to
 make a change pass.
 
