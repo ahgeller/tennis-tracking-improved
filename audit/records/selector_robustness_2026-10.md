@@ -92,6 +92,28 @@ tracks lose 46 hits to the chain's pruning and chooser), while the chain's fills
 occlusions. The chooser's one clear win stays `grid`: 29 wrong frames at 0.40 and 30 at 0.30 that
 the chain turns into 0.
 
+The reading above that the chain's pruning and chooser discard the `prof` frames has the cause
+wrong. Taking every track without choosing loses the same hits, and per frame none of the 52 raw
+`prof` hits the selector misses at 0.40 is absent from the output: all are output more than 10 px
+from the label, about two thirds still `det` and a third relabelled `interp`. The refit moves
+them; it, not the chooser, is the next thing to measure.
+
+### A minimal selector, built and rejected (2026-10-27)
+
+Because the labels mark only the ball in play and the chooser bought little on them, a minimal
+selector was built in place of the score and the timeline chain: every track kept unless fewer than
+40% of its observations are on or near the court (the court term of the chain's score; every ball
+track on the three runs is at 0.56 or above, the dead-time junk at 0.20 or below) or it has fewer
+than 6 observations. Replayed on the selector-robust 0.40 run it tied the chain: 8005 hits / 45
+wrong / 81 false alarms (74+7) against 8002 / 45 / 81, and it cost no time. On
+`sample/VolyAvw-cut-merged-1771797159395.mp4`, which no label covers, it failed where two balls
+are on screen at once: at about 10.5 s it kept a ball near the camera between points beside the
+server's, and the trail crossed the court from one to the other; at about 18.5 s it kept the
+server's ball and a loose ball by the fence and the fills swung between them. Choosing one of two
+simultaneous tracks is what the score and the chain do, and the labelled clips hold no such
+moment, so the replay could not see it. The chain stays the only selector. A labelled clip with a
+second ball in dead time would let the metric catch this.
+
 ## For the owner's GPU run
 
 The replay measures everything above except what needs a detector run: proposal 2 at the 0.40
@@ -104,8 +126,27 @@ main checkout, on the `selector-robust` branch:
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode pipeline --holdout mixed_v1 --gridtracknet-conf 0.40 --out-dir output/selector_robust_eval
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' track_breaks.py output/selector_robust_eval --compare output/ctrl_eval/track_breaks.log
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.compare_eval_logs output/ctrl_eval/pipeline.log output/selector_robust_eval/pipeline.log
-& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.replay_selector output/selector_robust_eval --archive finetune --variant control chain union raw minimal
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.replay_selector output/selector_robust_eval --archive finetune --variant control chain union raw
 ```
+
+Results (held-out `mixed_v1`, 24 clips, detector floor 0.40, `evaluate_archive.py --mode pipeline`):
+
+| run | recall | wrong | false alarms (bridged + false) |
+|---|---|---|---|
+| unchanged selector (`train`, `output/selector_baseline/conf_0.40`, rescored with the bridged split: `output/selector_robust_eval/baseline040_rescored.log`) | 0.942 | 0.006 | 90 (81+9) |
+| `selector-robust` at 402fe2e (`output/selector_robust_eval/pipeline.log`) | 0.945 | 0.006 | 95 (86+9) |
+
+`track_breaks` against the unchanged 0.40 run: hits +26, no_track -19, other_track -7,
+chosen_pruned +0. The replay on the new run's JSONs (`output/selector_robust_eval/replay.log`):
+control 8048 hits / 50 wrong / 95 false alarms (86+9), chain 8002 / 45 / 81 (74+7), union 7996 /
+93 / 93 (71+22), raw 8035 / 49 / 55 (37+18); the control is 46 hits over its own chain replay, which
+cannot make the motion rows without masks. Each run's detector-alone row set beside it: the old
+selector had 25 hits fewer than its run's detector alone (8025 against 8050), this one 13 more
+(8048 against 8035), both cutting the false alarms outright from about 20 to 9. On
+`sample/VolyAvw-cut-merged-1771797159395.mp4` it outputs 26 more frames than the old selector (38
+short gap fills of 1 to 4 frames, 12 single frames dropped, none moved more than 15 px) and the
+selector takes 1.08 s of a 58.8 s run against the old one's 1.10 s. Merged to `train` and `main` on
+2026-10-27 as the tracker's selector.
 
 The control was made at 0.50; `output/selector_baseline/conf_0.40/pipeline.log` is the 0.40 run
 of the unchanged selector (ALL recall 0.942, 90 false alarms) and the fairer `compare_eval_logs`
