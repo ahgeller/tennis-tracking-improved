@@ -15,3 +15,13 @@ models/*.before_promote_*
 scorecard.png
 .claude/worktrees/
 .claude/skills/desloppify/
+
+# model weights are proprietary: kept locally, never committed
+/models/
+*.pt
+*.pth
+*.npz
+*.engine
+*.onnx
+*.cbm
+
