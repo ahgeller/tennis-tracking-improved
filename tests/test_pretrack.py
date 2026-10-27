@@ -4,7 +4,8 @@ exercised in test_label_workflow (raw_rows) and the script's workspace handling 
 from pathlib import Path
 
 from finetune.data.labels import read_label_rows, read_labels
-from finetune.training.pretrack import write_draft
+from finetune.training.pretrack import PIPELINE_CONF, RAW_DRAFT_CONF, write_draft
+from tennis_tracker.config import Config
 
 
 def test_write_draft_covers_every_label_frame_in_the_label_format(tmp_path, capsys):
@@ -26,3 +27,10 @@ def test_write_draft_says_when_a_guess_sits_in_the_no_ball_corner(tmp_path, caps
     assert "1 guess(es) sit in the top-right corner" in capsys.readouterr().out
     assert read_labels(draft, 640, 360) == {0: None}                           # what every reader makes of it
     assert isinstance(draft, Path)
+
+
+def test_pipeline_drafts_use_the_tracker_default_threshold():
+    """The pipeline source drafts what the tracker would show, so its threshold is the tracker's
+    own default and moves with it (it was a copy, left at 0.50 when the default became 0.40)."""
+    assert PIPELINE_CONF == Config().conf
+    assert RAW_DRAFT_CONF < PIPELINE_CONF                                      # raw drafts keep unsure guesses too

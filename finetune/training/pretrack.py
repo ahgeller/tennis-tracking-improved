@@ -7,7 +7,7 @@ model trains on (every 2nd frame of a 60 FPS clip, every frame at 30 FPS).
 Two draft sources:
 
   raw       (default) the detector's own best guess on *every* label frame,
-            with its confidence — the tool shows the point even when it is
+            with its confidence - the tool shows the point even when it is
             unsure so you accept or fix, never hunt.
   pipeline  the full tracker output (selector + fills); fewer wrong points,
             but frames the selector rejected come up empty.
@@ -35,10 +35,11 @@ from finetune.data import workspace as ws
 from finetune.data.labels import DraftRow, write_draft as write_draft_rows
 from finetune.data.workspace import VideoMeta, draft_csv, label_csv, video_meta, videos_in
 from finetune.data.detect import ball_detector, detect_points
+from tennis_tracker.config import Config
 from tennis_tracker.frame_rate import require_phase_stride
 
 RAW_DRAFT_CONF = 0.25          # raw drafts keep guesses down to this confidence, so nearly every frame has one
-PIPELINE_CONF = 0.50           # the tracker's own default threshold
+PIPELINE_CONF = Config.conf    # the tracker's own default threshold, so a pipeline draft is what the tracker shows
 
 Guess = Tuple[float, float, str, float]     # x, y, where it came from, confidence
 NO_GUESS = DraftRow(None, "none", 0.0)      # the draft row of a frame the detector had nothing for
