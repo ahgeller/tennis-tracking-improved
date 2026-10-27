@@ -17,7 +17,7 @@ from ball_in_play_selector import FrameResult, Track
 
 from ..court.court_geometry import court_axis_spans
 from .rendering import (
-    COLOR_DISPLAY_PATH, COLOR_DISPLAY_PATH_INTERP, COLOR_INTERP, COLOR_OUTLINE, Canvas, Color, Point, paint_blended,
+    COLOR_DISPLAY_PATH, COLOR_DISPLAY_PATH_INTERP, COLOR_INTERP, COLOR_OUTLINE, Canvas, Color, Point,
 )
 
 # Trail colour per FrameResult.source, before the age fade.
@@ -39,7 +39,6 @@ _DEBUG_TRAIL_MIN_THICKNESS = 1
 # The tracking video's comet: the trail tapers and fades toward the frame from head to tail.
 COMET_HEAD_THICKNESS, COMET_TAIL_THICKNESS = 4, 1
 COMET_HEAD_ALPHA, COMET_TAIL_ALPHA = 1.0, 0.25
-FADE_BANDS = 4      # a fading trail is blended in this many age bands, not per segment
 _TRAIL_HARD_MIN_X_PX, _TRAIL_HARD_MIN_Y_PX = 34.0, 26.0
 _TRAIL_BRIDGE_FRAC, _TRAIL_BRIDGE_MIN_PX = 0.035, 18.0
 _TRAIL_TRANSITION_FRAC, _TRAIL_TRANSITION_MIN_PX = 0.020, 14.0
@@ -127,58 +126,58 @@ class Stroke(NamedTuple):
     newness: float      # 1.0 at the trail's head, 0.0 at the oldest point it may hold
 
 
-def _joint_patch(older: Stroke, newer: Stroke) -> Stroke:
-    """The end of ``older`` that the outline cap of ``newer`` (which starts where ``older`` ends)
-    reaches over: as long as that cap, or the whole of ``older`` when it is shorter."""
-    dx, dy = older.p1[0] - older.p0[0], older.p1[1] - older.p0[1]
-    length = math.hypot(dx, dy)
-    reach = newer.thickness + 2
-    if length <= reach:
-        return older
-    scale = reach / length
-    start = (int(round(older.p1[0] - dx * scale)), int(round(older.p1[1] - dy * scale)))
-    return older._replace(p0=start)
+def _paint_strokes(img: np.ndarray, offset: Point, strokes: Sequence[Stroke], outline: bool) -> None:
+    """Draw the strokes on ``img`` (frame coordinates less ``offset``), in order, so a newer stroke
+    lies on top where the trail crosses itself.  With ``outline`` every stroke sits on a dark line
+    one pixel wider, all the outlines under all of the colour, so the outline cap of a stroke does
+    not darken the end of the one it meets."""
+    ox, oy = offset
+    if outline:
+        for stroke in strokes:
+            cv2.line(img, (stroke.p0[0] - ox, stroke.p0[1] - oy), (stroke.p1[0] - ox, stroke.p1[1] - oy),
+                     COLOR_OUTLINE, stroke.thickness + 1, cv2.LINE_AA)
+    for stroke in strokes:
+        cv2.line(img, (stroke.p0[0] - ox, stroke.p0[1] - oy), (stroke.p1[0] - ox, stroke.p1[1] - oy),
+                 stroke.color, stroke.thickness, cv2.LINE_AA)
 
 
 def draw_fading_strokes(target: np.ndarray, strokes: Sequence[Stroke], head_alpha: float, tail_alpha: float,
                         outline: bool) -> None:
-    """Paint the strokes blended toward the frame by age.
+    """Paint the strokes blended toward the frame by age: a stroke's opacity runs from
+    ``tail_alpha`` at newness 0 to ``head_alpha`` at newness 1.
 
-    The strokes, in trail order, fall into ``FADE_BANDS`` bands by newness, the oldest band at
-    ``tail_alpha`` and the newest at ``head_alpha``; each band is drawn around itself and blended
-    back with one ``paint_blended`` (per band, not per stroke, to keep pass 2 fast), oldest first
-    so newer strokes lie on top where the trail crosses itself.  With ``outline`` every stroke of
-    a band sits on a dark line one pixel wider, the outlines under all of the band's colour; the
-    end of the older stroke that meets the band's first one is coloured again with the band
-    (``_joint_patch``), so the newer outline's cap does not darken it.
+    At full opacity throughout, the strokes draw straight onto the frame (``_paint_strokes``).
+    Otherwise they are all drawn once on a copy of the frame region they cover, each writes its
+    opacity into a float mask over its whole width (the outline and the anti-aliased fringe
+    included), newer over older, and the copy is blended back through the mask in one step.
+    Every pixel is thus mixed with the frame exactly once, at the opacity of the newest stroke
+    over it; blending the trail in bands, each over the result of the last, left a bright bead
+    where a band's first stroke was blended over the end of the band before and a dark spot where
+    its outline cap reached that end.
     """
-    bands: List[List[Stroke]] = [[] for _ in range(FADE_BANDS)]
+    if not strokes:
+        return
+    if head_alpha >= 1.0 and tail_alpha >= 1.0:
+        _paint_strokes(target, (0, 0), strokes, outline)
+        return
+    h, w = target.shape[:2]
+    pad = max(stroke.thickness for stroke in strokes) + 2
+    xs = [x for stroke in strokes for x in (stroke.p0[0], stroke.p1[0])]
+    ys = [y for stroke in strokes for y in (stroke.p0[1], stroke.p1[1])]
+    x0, y0 = max(0, min(xs) - pad), max(0, min(ys) - pad)
+    x1, y1 = min(w, max(xs) + pad + 1), min(h, max(ys) + pad + 1)
+    if x0 >= x1 or y0 >= y1:
+        return
+    frame = target[y0:y1, x0:x1]
+    painted = frame.copy()
+    _paint_strokes(painted, (x0, y0), strokes, outline)
+    alpha = np.zeros(frame.shape[:2], np.float32)
+    extra = 3 if outline else 2     # the outline's pixel and the fringe anti-aliasing adds on either side
     for stroke in strokes:
-        bands[min(int(stroke.newness * FADE_BANDS), FADE_BANDS - 1)].append(stroke)
-    previous: Optional[Stroke] = None
-    for k, band in enumerate(bands):
-        if not band:
-            continue
-        alpha = tail_alpha + (head_alpha - tail_alpha) * k / (FADE_BANDS - 1)
-        meets = outline and previous is not None and previous.p1 == band[0].p0
-        joint = [_joint_patch(previous, band[0])] if meets else []
-        pad = max(stroke.thickness for stroke in band) + 2
-        xs = [x for stroke in joint + band for x in (stroke.p0[0], stroke.p1[0])]
-        ys = [y for stroke in joint + band for y in (stroke.p0[1], stroke.p1[1])]
-        box = (min(xs) - pad, min(ys) - pad, max(xs) + pad + 1, max(ys) + pad + 1)
-
-        def paint(img: np.ndarray, offset: Point, band: List[Stroke] = band, joint: List[Stroke] = joint) -> None:
-            ox, oy = offset
-            if outline:
-                for stroke in band:
-                    cv2.line(img, (stroke.p0[0] - ox, stroke.p0[1] - oy), (stroke.p1[0] - ox, stroke.p1[1] - oy),
-                             COLOR_OUTLINE, stroke.thickness + 1, cv2.LINE_AA)
-            for stroke in joint + band:
-                cv2.line(img, (stroke.p0[0] - ox, stroke.p0[1] - oy), (stroke.p1[0] - ox, stroke.p1[1] - oy),
-                         stroke.color, stroke.thickness, cv2.LINE_AA)
-
-        paint_blended(target, box, alpha, paint)
-        previous = band[-1]
+        opacity = tail_alpha + (head_alpha - tail_alpha) * stroke.newness
+        cv2.line(alpha, (stroke.p0[0] - x0, stroke.p0[1] - y0), (stroke.p1[0] - x0, stroke.p1[1] - y0),
+                 opacity, stroke.thickness + extra, cv2.LINE_8)
+    cv2.blendLinear(painted, frame, alpha, 1.0 - alpha, dst=frame)
 
 
 class _SegmentLimits(NamedTuple):
