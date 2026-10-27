@@ -1,7 +1,8 @@
 # Triton Ball Tennis
 
-A GPU tennis-video tracker built around GridTrackNet temporal ball detection,
-TensorRT player and court detection, and conservative motion/physics recovery.
+A GPU tennis-video tracker built around five-frame temporal ball detection
+(HeatmapNet, with GridTrackNet still runnable), TensorRT player and court
+detection, and conservative motion/physics recovery.
 It produces an annotated MP4 and per-frame tracking JSON.
 
 ## Demo
@@ -10,7 +11,7 @@ It produces an annotated MP4 and per-frame tracking JSON.
 
 The overlay distinguishes where each selected point came from:
 
-- **Green (`DET`):** a position supported by a GridTrackNet detection (may be smoothed)
+- **Green (`DET`):** a position supported by a ball detection (may be smoothed)
 - **Orange (`MOT`):** motion-supported recovery
 - **Cyan (`PHY`):** short bounded interpolation or physics recovery
 
@@ -21,11 +22,11 @@ unresolved detector gap remains a gap instead of becoming a long predicted path.
 
 ## Pipeline
 
-- GridTrackNet runs on raw RGB frames in five-frame temporal units at its native
-  30 FPS cadence (30 or 60 FPS input is supported).
+- The ball detector runs on raw RGB frames in five-frame temporal units at its
+  native 30 FPS cadence (30 or 60 FPS input is supported).
 - Player and court models run through TensorRT.
 - Motion masks support selection and short recovery but are not used to alter
-  GridTrackNet's input.
+  the ball detector's input.
 - The ball-in-play selector rejects static objects and implausible track switches,
   closes safe one-frame holes, and exports the selected source for every frame.
 - The renderer draws a short anti-aliased trail without inventing points across
@@ -54,8 +55,9 @@ pip install -r requirements.txt
 
 FilterPy is not needed: the selector's Kalman filter is plain NumPy.
 
-The repository includes the GridTrackNet weight export, the CatBoost bounce
-model and the TensorRT engines used by the default pipeline. TensorRT engines
+The repository includes the ball-detector weights (`models/ball_detector.pt`, and
+the GridTrackNet export in `models/legacy/`), the CatBoost bounce model and the
+TensorRT engines used by the default pipeline. TensorRT engines
 are platform-specific and may need to be rebuilt for a different GPU or
 TensorRT version.
 
@@ -85,97 +87,90 @@ Use another CUDA device or detector threshold:
 python clean_tracker.py --device 1 --conf 0.55
 ```
 
-## Ball detector weights: two networks, for now
+## Ball detector weights: two networks
 
-The tracker runs any of four ball-detector networks and picks by the weights
+The tracker runs either of two ball-detector networks and picks by the weights
 file. Nothing else changes: same video, same JSON, same selector.
 
 | weights file | network | status |
 |---|---|---|
-| `.npz` (default: `models/gridtracknet_weights_torch.npz`) | GridTrackNet, 48x27 grid | the bundled detector |
-| `.pt` naming `heatmap_s4` | HeatmapNet, 192x108 heat map (`tennis_tracker/heatmapnet.py`) | candidate, trained on the `train` branch |
-| `.pt` naming `memory_s4` | MemoryNet, HeatmapNet plus a memory carried between units (`tennis_tracker/memorynet.py`) | candidate, fine-tuned from a HeatmapNet winner |
-| `.pt` naming `heatmap_s2` | HeatmapNetS2, HeatmapNet with one more decoder block, 384x216 heat map (`tennis_tracker/heatmapnet_s2.py`) | candidate, fine-tuned from a HeatmapNet winner |
+| `.pt` naming `heatmap_s4` (default: `models/ball_detector.pt`) | HeatmapNet, 192x108 heat map (`tennis_tracker/heatmapnet.py`) | the bundled detector |
+| `.npz` (`models/legacy/gridtracknet_finetuned.npz`) | GridTrackNet, 48x27 grid (`tennis_tracker/gridtracknet.py`) | the previous default, run with `--weights` |
 
 ```powershell
-python clean_tracker.py --input path	o\match.mp4                        bundled GridTrackNet
-python clean_tracker.py --input path	o\match.mp4 --weights best.pt      the heat-map network
+python clean_tracker.py --input path\to\match.mp4                                                    bundled HeatmapNet
+python clean_tracker.py --input path\to\match.mp4 --weights models\legacy\gridtracknet_finetuned.npz  GridTrackNet
 ```
 
 The tracker picks by the suffix and, for a `.pt`, by the `arch` the file names
-inside. All four are kept only until the held-out comparison picks one; the
-losers are then removed and the winner becomes the default.
+inside; a `.pt` naming an architecture that no longer exists is refused by name.
 
 The prepass starts a five-frame unit at every frame of a phase and averages the
 answers each frame gets before decoding it once (`Config.gridtracknet_window_step`,
 1; the default since 2026-10-26, when it measured fewer false alarms at higher
 recall on held-out clips, raw and through the selector, for 1.5x the prepass
-time). Setting it to 5 is the prepass as it was, one unit per frame; a stateful
-model takes 5 whatever is set. The training
+time). Setting it to 5 is the prepass as it was, one unit per frame. The training
 playbook with that comparison is the README of the `train` branch; the section
-below says what to delete for each loser (the trainer items live on `train`).
+below says what to delete should one of the two lose (the trainer items live on
+`train`).
 
 ## Keeping one network
 
-Four architectures exist so that one can be chosen; the ones that lose are
-deleted, not kept behind a flag. For each, the whole of it is:
+Architectures exist so that one can be chosen; the ones that lose are deleted,
+not kept behind a flag. Two were removed on 2026-10-26 after the held-out
+comparison: `memory_s4` (HeatmapNet with a convolutional GRU carrying a state
+between consecutive units of one phase) and `heatmap_s2` (HeatmapNet with one
+more decoder block, answering at stride 2). The heat control matched the memory
+network and the stride-2 curve equalled the control's, so neither earned its
+weight; the runs and their numbers are in the `train` branch's ledger,
+`audit/records/gridtracknet_recipe_2026-10.md`, which keeps their history. A
+`.pt` still names its architecture inside, so a record of either is refused by
+name (`ball_models.arch_of`).
+
+Two remain, and for each the whole of it is (the trainer's share lives on `train`):
 
 - `gridtracknet`: `tennis_tracker/gridtracknet.py` stays (its loader, resize and
   decoder serve every architecture); its entry in `tennis_tracker/ball_models.py`
   (`GRIDTRACKNET` in `ARCHITECTURES`, `MODEL_CLASSES`, `WEIGHTS_SUFFIX`, `_MODULES`,
   the `.npz` branch of `arch_of`), the `GridTrackNet` class and its NPZ `load_model`,
-  `gridtracknet_loss` in `finetune/training/loop.py` with the `.npz` branch of
-  `save_weights` and the Kaiming branch of `fresh_model`, the one-hot branch of
-  `dataset.make_target`, the `.npz` template handling of `--weights` in the trainer
-  (`resolve_arch`), the `ARCH` option in the notebook, `ft.py promote`, and
-  `tests/test_gridtracknet.py` with the GridTrackNet cases of the trainer tests.
-- `heatmap_s4`: `tennis_tracker/heatmapnet.py` (the `HeatmapNet` class; the `.pt`
-  record functions move to the surviving `.pt` architecture's module if that is
-  `memory_s4`, which subclasses it, so the class then stays as its base), its entry
-  in `ball_models` (`HEATMAP_S4` in `ARCHITECTURES`, `MODEL_CLASSES`,
-  `WEIGHTS_SUFFIX`, `_MODULES`), `HEATMAP_S4` in `loop.LOSSES` (the loss itself
-  stays if `memory_s4` or `heatmap_s2` survives), the trainer's `--arch` choice and
-  the parent start (`ball_models.PARENTS`, `from_parent`, `PARENT_START_NOTE`,
-  each child's `from_heatmap`, `args.starting_arch`) if both children go too, the
-  notebook `ARCH` option and its parent-start check, and `tests/test_heatmapnet.py`
-  with the heatmap cases of the trainer tests.
-- `memory_s4`: `tennis_tracker/memorynet.py`, `tests/test_memorynet.py`, its entry
-  in `ball_models` (`MEMORY_S4` in `ARCHITECTURES`, `MODEL_CLASSES`,
-  `WEIGHTS_SUFFIX`, `_MODULES`) and the `STATEFUL` flag of the contract, the
-  stateful branch of the prepass (`_run_stateful`, `units_per_call` and
-  `flush(update_states)` in `tennis_tracker/engines/ball_detectors.py`, with
-  `StatefulStandInModel` and its test), `MEMORY_S4` in `loop.LOSSES` with
-  `chain_loss` and the stateful branch of `batch_loss`, the chains in
-  `dataset.py` (`CHAIN`, `TrainingChain`, `build_chains`, `chain_units`,
-  `chain_weights`, `ChainDataset`; the one-draw `Augmentation` stays, it is how
-  the unit dataset draws too), the trainer's `--arch` choice, `--chain`, the
-  parent start and the chain data path in `train`, `chain` in `RECIPE_FIELDS`
-  and `config.json`, the notebook `ARCH` option and its parent-start check, and
-  the chain cases of the trainer, dataset and loop tests.
-- `heatmap_s2`: `tennis_tracker/heatmapnet_s2.py`, `tests/test_heatmapnet_s2.py`,
-  its entry in `ball_models` (`HEATMAP_S2` in `ARCHITECTURES`, `MODEL_CLASSES`,
-  `WEIGHTS_SUFFIX`, `_MODULES`, `PARENTS` and `PARENT_START_NOTE`; `from_parent`
-  itself stays while `memory_s4` does), `HEATMAP_S2` in `loop.LOSSES`,
-  `HeatmapNet.features` folds back into `decode` (it was split out for this
-  subclass), the trainer's `--arch` choice and help, the notebook `ARCH` option,
-  its staged module and its parent-start check, stage 3c of the `train` README,
-  and the `heatmap_s2` cases of the ball-models, trainer and loop tests.
+  `models/legacy/`, and `tests/test_gridtracknet.py` with the GridTrackNet cases of
+  the ball-models and detector tests. On `train`: `gridtracknet_loss` with the
+  `.npz` branch of `save_weights`, the one-hot target, the `.npz` template handling
+  of `--weights`, the notebook's `ARCH` option and the GridTrackNet cases of the
+  trainer tests.
+- `heatmap_s4`: `tennis_tracker/heatmapnet.py` (the `HeatmapNet` class and the
+  `.pt` record functions), its entry in `ball_models` (`HEATMAP_S4` in
+  `ARCHITECTURES`, `MODEL_CLASSES`, `WEIGHTS_SUFFIX`, `_MODULES`, the record branch
+  of `arch_of`), `models/ball_detector.pt`, and `tests/test_heatmapnet.py` with the
+  heatmap cases of the ball-models and detector tests. On `train`: `heatmap_loss`
+  with the `.pt` branch of `save_weights`, the Gaussian target, the trainer's
+  `--arch` choice and `HEAT_RECIPE`, the notebook's `ARCH` option and the heatmap
+  cases of the trainer and loop tests.
 
-In every case `read_record` with `arch=None` and `arch_of`'s record read stay
-only while two `.pt` architectures share the suffix; with one left, `arch_of`
-can go back to the suffix alone.
+With one `.pt` architecture left, `read_record` with `arch=None` and `arch_of`'s
+record read stay only so that a stale record is refused by name; if that is not
+wanted, `arch_of` can go back to the suffix alone.
 
 The winner's weights are promoted by copying them over the default path in
-`tennis_tracker/paths.py` (`GRIDTRACKNET_WEIGHTS`, what `Config.model_path`
-defaults to); for a `.pt` winner that default's suffix changes to `.pt` (and the
-file's name with it, say `models/ball_detector.pt`), the bundled `.npz` is
-retired, and `ft.py promote` learns the new file. Record the promotion in
-`audit/records/gridtracknet_recipe_2026-10.md` with the stage 3 numbers.
+`tennis_tracker/paths.py` (`BALL_WEIGHTS`, `models/ball_detector.pt`, what
+`Config.model_path` defaults to), which `ft.py promote` on `train` does with a
+backup. On 2026-10-26 that file became the heat-map control run's winner (ctrl1,
+the ledger has the numbers); the GridTrackNet `.npz` files moved to
+`models/legacy/` (`gridtracknet_finetuned.npz`, the previous default, and
+`gridtracknet_upstream.npz`, the export it was fine-tuned from, untracked) beside
+the old YOLO `ball.engine`, and `clean_tracker.py --weights` still runs any of
+them. Record every promotion in the ledger with its held-out numbers.
 
-## Fine-tuning GridTrackNet
+## The bundled weights and the training workspace
 
-The bundled GridTrackNet weights contain the latest fine-tuned checkpoint used
-to produce the demo. The labelling and training workspace that produced them
+The bundled weights, `models/ball_detector.pt`, are the heat-map network's
+control run of 2026-10-26 (ctrl1: ten epochs of fine-tuning on the from-scratch
+run heat4), trained on the `train` branch with the `mixed_v1` recordings held
+out (held out, dense prepass: recall 0.929 at false alarm 0.083 at threshold
+0.50; the ledger there, `audit/records/gridtracknet_recipe_2026-10.md`, has the
+rest). `models/legacy/`
+keeps the GridTrackNet files, among them the fine-tuned checkpoint that produced
+the demo, and the old YOLO `ball.engine`. The labelling and training workspace
 (the label tool, the trainer, the Colab notebook, the hand-corrected labels and
 the detector scorers over those labels) lives on the `train` branch, which
 carries this tracker as well.
@@ -195,8 +190,10 @@ Evaluate against annotations:
 python clean_tracker.py --no-video --annotations sample\pomona_annotations.json
 ```
 
-`python -m evaluation.parity` is a strict gate against the frozen Pomona benchmark,
-and `python -m evaluation.validate` scores an exported tracking JSON against hand
+`python -m evaluation.parity` is a strict gate against the frozen Pomona benchmark
+(frozen on the GridTrackNet `.npz`, so with the default `.pt` it reports the new
+detector's numbers as differences; it is not refreshed), and
+`python -m evaluation.validate` scores an exported tracking JSON against hand
 labels.
 Scoring the detector or the pipeline on the workspace's hand-labelled clips
 (`evaluate_archive.py`) is on the `train` branch.
@@ -219,12 +216,14 @@ tennis_tracker/tracking_schema.py        The tracking JSON's shape, shared by th
 tennis_tracker/motion.py                 CUDA background model and motion masks
 tennis_tracker/roi_tracking.py           ROI tracking for motion search
 tennis_tracker/headless.py               Running the tracker from another program, nothing drawn
-tennis_tracker/gridtracknet.py           GridTrackNet model and decoder
+tennis_tracker/ball_models.py            The ball-detector architectures: which a weights file names, building it
+tennis_tracker/heatmapnet.py             HeatmapNet model and its .pt record (the default detector)
+tennis_tracker/gridtracknet.py           GridTrackNet model, NPZ loader, and the decoder both share
 tennis_tracker/video_io.py               Frame reader, video writer, CUDA uploads
 tennis_tracker/config.py                 The run's Config; paths.py: model asset paths, spelled once
 tennis_tracker/frame_rate.py             Frame-rate rules; utils.py: host-side helpers (FFmpeg, device)
 tennis_tracker/engines/                  The TensorRT engines and the detector backends:
-  ball_detectors.py                        GridTrackNet prepass and the TensorRT ball engine
+  ball_detectors.py                        Five-frame prepass (HeatmapNet or GridTrackNet) and the TensorRT ball engine
   player_detector.py                       TensorRT player detection with ByteTrack association
   court_detector.py                        Court keypoint engine, run every N frames
   engine_session.py                        TensorRT session shared by the engine backends
@@ -248,7 +247,8 @@ tennis_tracker/render/                   Drawing for pass 2:
   motion_trails.py                         Motion-debug video's raw-motion trails
   summaries.py                             Console summaries printed at the end of a run
 ball_in_play_selector/                   Track construction, scoring, and recovery
-models/gridtracknet_weights_torch.npz    GridTrackNet inference weights
+models/ball_detector.pt                  The ball detector the tracker runs (heatmap_s4)
+models/legacy/                           GridTrackNet .npz files and the old YOLO ball.engine (--weights)
 models/ctb_regr_bounce.cbm               CatBoost bounce model (--court)
 models/                                  Player and court TensorRT engines
 sample/                                  Sample video and validation annotations
@@ -260,6 +260,6 @@ output/                                  Generated videos, JSON, and reports (ig
 
 ## Current limitation
 
-GridTrackNet can still miss a blurred ball or select a player/background feature.
+The ball detector can still miss a blurred ball or select a player/background feature.
 The conservative selector prevents many false continuations, but correcting raw
 green detector errors requires fine-tuning the model on additional labeled clips.

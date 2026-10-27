@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 from tennis_tracker.config import Config
-from tennis_tracker.paths import BOUNCE_MODEL, COURT_ENGINE, GRIDTRACKNET_WEIGHTS, PLAYER_ENGINE, ROOT
+from tennis_tracker.paths import BOUNCE_MODEL, COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE, ROOT
 from tennis_tracker.pipeline import run
 from evaluation.validate import main as validate_tracking
 
@@ -31,8 +31,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracking-json",
                         help=f"Default: <input stem>{TRACKING_JSON_SUFFIX} beside a folder's video, "
                              f"else {OUTPUT / 'tracking.json'}")
-    parser.add_argument("--weights", default=str(GRIDTRACKNET_WEIGHTS),
-                        help="ball detector weights, .npz GridTrackNet or .pt HeatmapNet / MemoryNet")
+    parser.add_argument("--weights", default=str(BALL_WEIGHTS),
+                        help="ball detector weights, .pt HeatmapNet (the default) or .npz GridTrackNet")
     parser.add_argument("--conf", type=float, default=0.50)
     parser.add_argument("--device", default="0")
     parser.add_argument("--no-video", action="store_true")

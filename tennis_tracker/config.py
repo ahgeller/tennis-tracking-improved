@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from tennis_tracker.paths import COURT_ENGINE, GRIDTRACKNET_WEIGHTS, PLAYER_ENGINE
+from tennis_tracker.paths import COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE
 
 
 @dataclass
@@ -9,8 +9,8 @@ class Config:
     # paths
     input_video: str = r"input_videos/TMP.mp4"
     output_video: str = "output_videos/prof_test.mp4"
-    # The ball detector: .npz GridTrackNet, .pt HeatmapNet or MemoryNet by its record (``ball_models``), .engine TensorRT.
-    model_path: str = str(GRIDTRACKNET_WEIGHTS)
+    # The ball detector: .pt HeatmapNet (the default; ``ball_models`` reads its record), .npz GridTrackNet, .engine TensorRT.
+    model_path: str = str(BALL_WEIGHTS)
 
     # Ball detector
     ball_class_name: Optional[str] = None
@@ -27,7 +27,7 @@ class Config:
     # frame and averages the up-to-five answers each frame gets (the default since 2026-10-26: on
     # heat4's weights, held out, false alarm 0.085 to 0.073 at recall 0.894 to 0.900, and through the
     # pipeline 0.178 to 0.164 at 0.898 to 0.906, for 1.5x the prepass time); 5 answers every frame
-    # from one unit, the prepass as it was before, which a stateful model takes whatever is set here.
+    # from one unit, the prepass as it was before.
     gridtracknet_window_step: int = 1
 
     # TensorRT

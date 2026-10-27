@@ -4,7 +4,7 @@ output/
 AiFolder/
 .venv/
 models/*finetuned*.npz
-models/*legacy*.npz
+models/legacy/gridtracknet_upstream.npz
 
 models/*_prev_*.npz
 models/*.before_promote_*
