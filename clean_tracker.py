@@ -40,6 +40,9 @@ def _parser() -> argparse.ArgumentParser:
                         help="Compute the court events (landings, contacts, rally legs), export them "
                              "in the tracking JSON and draw the top-right 2D court minimap")
     parser.add_argument("--info", action="store_true")
+    parser.add_argument("--showtracks", action="store_true",
+                        help="Draw every selector track on the tracking video, chosen or not, each in "
+                             "its own colour under the chosen track's trail and marker")
     parser.add_argument("--motion-diagnostics", action="store_true",
                         help="Add per-frame motion diagnostics to the tracking JSON "
                              "(costs ~1.7 ms/frame)")
@@ -121,6 +124,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         print_selector_tracks=False,
         info_timing=bool(args.info),
         motion_diagnostics=bool(args.motion_diagnostics),
+        show_all_tracks=bool(args.showtracks),
     )
     run(cfg)
     if not args.annotations:

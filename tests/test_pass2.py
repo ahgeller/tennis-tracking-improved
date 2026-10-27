@@ -1,7 +1,121 @@
-"""tennis_tracker/pass2.py: the renderer's per-frame court model, on the golden clip with the
-golden harness's fakes."""
+"""tennis_tracker/pass2.py: where the renderer's frames come from (the RAM cache pass 1 filled and the
+second decode past it) and its per-frame court model, with the golden harness's fakes."""
+from types import SimpleNamespace
+
+import cv2
+import numpy as np
+import pytest
+
+from ball_in_play_selector import Detection, FrameResult
 from tennis_tracker import pass2
-from tests.test_pipeline_run import FULL_OVERRIDES, FakeCourtDetector, clip, run_pipeline  # noqa: F401
+from tennis_tracker.config import Config
+from tennis_tracker.pass1 import Pass1Result
+from tennis_tracker.render.trails import track_color
+from tennis_tracker.run_context import CourtEvents, Selection
+from tests._helpers import Capture
+from tests.test_pipeline_run import (  # noqa: F401
+    FRAMES, FULL_OVERRIDES, FakeCourtDetector, assert_json_close, clip, load_golden, run_pipeline,
+)
+
+
+class SeekableCapture(Capture):
+    """``Capture`` that seeks with ``CAP_PROP_POS_FRAMES``; with ``seeks=False`` a set is ignored,
+    as by a container that cannot seek exactly."""
+
+    opened = []
+
+    def __init__(self, count: int, seeks: bool = True):
+        super().__init__(count)
+        self.seeks = seeks
+        self.opened.append(self)
+
+    def set(self, prop, value) -> bool:
+        assert prop == cv2.CAP_PROP_POS_FRAMES
+        if self.seeks:
+            self.index = int(value)
+        return self.seeks
+
+    def get(self, prop) -> float:
+        assert prop == cv2.CAP_PROP_POS_FRAMES
+        return float(self.index)
+
+    def grab(self) -> bool:
+        ok, _ = self.read()
+        return ok
+
+
+@pytest.fixture
+def captures(monkeypatch):
+    """Route pass 2's reopen to a 10-frame ``SeekableCapture``; the list of captures opened."""
+    SeekableCapture.opened = []
+    monkeypatch.setattr(pass2, "cv2", SimpleNamespace(VideoCapture=lambda path: SeekableCapture(10),
+                                                      CAP_PROP_POS_FRAMES=cv2.CAP_PROP_POS_FRAMES))
+    return SeekableCapture.opened
+
+
+def _ctx() -> SimpleNamespace:
+    return SimpleNamespace(cfg=Config(), video=SimpleNamespace(path="clip.mp4"))
+
+
+def _cached(count: int):
+    """What pass 1 would have cached of ``Capture``'s clip: its first ``count`` frames."""
+    return [np.full((2, 2, 3), value, np.uint8) for value in range(count)]
+
+
+def _frames(source: pass2._FrameSource, count: int):
+    """``(frame value, owned)`` for frames ``0`` to ``count - 1``, ``source`` released afterwards."""
+    try:
+        out = []
+        for fi in range(count):
+            frame, owned = source.read(fi)
+            out.append((None if frame is None else int(frame[0, 0, 0]), owned))
+        return out
+    finally:
+        source.release()
+
+
+# --------------------------------------------------------------------------- _FrameSource
+
+def test_frame_source_serves_the_cached_prefix_and_decodes_the_rest_from_a_seek(captures, capsys):
+    source = pass2._FrameSource(_ctx(), _cached(4), 10)
+    assert "[pass 2] Using RAM frame cache (4 of 10 frames), decoding the rest" in capsys.readouterr().out
+    assert _frames(source, 10) == [(value, value >= 4) for value in range(10)]   # cached frames are not the renderer's
+    assert len(captures) == 1                                                      # one open, seeked to frame 4
+
+
+def test_frame_source_decodes_from_the_start_when_the_seek_does_not_land(monkeypatch, captures, capsys):
+    monkeypatch.setattr(pass2.cv2, "VideoCapture", lambda path: SeekableCapture(10, seeks=False))
+    source = pass2._FrameSource(_ctx(), _cached(4), 10)
+    assert ("[pass 2] The container did not seek to frame 4 (landed on 0); decoding from the start and "
+            "skipping the 4 cached frames") in capsys.readouterr().out
+    assert _frames(source, 10) == [(value, value >= 4) for value in range(10)]
+    assert len(captures) == 2                                                      # the failed seek's capture was released
+
+
+def test_frame_source_uses_the_cache_alone_when_it_holds_the_clip(captures, capsys):
+    source = pass2._FrameSource(_ctx(), _cached(10), 10)
+    assert "[pass 2] Using RAM frame cache (10 frames)" in capsys.readouterr().out
+    assert _frames(source, 10) == [(value, False) for value in range(10)]
+    assert captures == []
+
+
+def test_frame_source_decodes_everything_without_a_cache(captures, capsys):
+    source = pass2._FrameSource(_ctx(), None, 10)
+    assert "RAM frame cache" not in capsys.readouterr().out
+    assert _frames(source, 11) == [(value, True) for value in range(10)] + [(None, True)]
+    assert len(captures) == 1
+
+
+def test_a_partial_cache_renders_the_same_run(tmp_path, monkeypatch, fake_cuda, capsys, clip):
+    """With a budget for 15 of the clip's 40 frames the run says so in both passes, renders every
+    frame and leaves the tracking JSON as the golden has it."""
+    result = run_pipeline(tmp_path, monkeypatch, clip, **dict(FULL_OVERRIDES, pass2_cache_max_mb=10))
+    out = capsys.readouterr().out
+    assert "[pass 1] RAM frame cache: 15 of 40 frames fit the 10 MiB budget" in out
+    assert "[pass 2] Using RAM frame cache (15 of 40 frames), decoding the rest" in out
+    assert result["json"]["summary"]["pass2_frames_rendered"] == FRAMES
+    assert all(len(hashes) == FRAMES for hashes in result["streams"].values())
+    assert_json_close(result["json"], load_golden()["json"], "a partial cache changed the tracking JSON")
 
 
 def test_frames_before_the_first_court_detection_are_drawn_without_a_court_model(
@@ -20,3 +134,77 @@ def test_frames_before_the_first_court_detection_are_drawn_without_a_court_model
     result = run_pipeline(tmp_path, monkeypatch, clip, **FULL_OVERRIDES)
     assert len(has_model) == result["raw_json"]["video"]["total_frames"]
     assert has_model[:5] == [False] * 5 and all(has_model[5:])
+
+
+# --------------------------------------------------------------------------- show_all_tracks
+
+WIDTH, HEIGHT = 640, 360
+
+
+def _track(track_id, score, *points):
+    return SimpleNamespace(track_id=track_id, score=score,
+                           observations=[Detection(f, x, y, x - 4, y - 4, x + 4, y + 4, 0.9, 64.0, False)
+                                         for f, x, y in points])
+
+
+def _renderer(cfg: Config, frame_count: int, tracks, chosen):
+    """A ``_FrameRenderer`` over ``frame_count`` blank frames with no court, players, detections or
+    ROIs, the chosen track's observations as the selected results and no track-debug writer."""
+    ctx = SimpleNamespace(cfg=cfg, video=SimpleNamespace(fps=30.0, width=WIDTH, height=HEIGHT),
+                          timing=SimpleNamespace(enabled=False))
+    pass1 = Pass1Result(detections=[[] for _ in range(frame_count)], rois=[None] * frame_count,
+                        player_boxes=[{} for _ in range(frame_count)], court_keypoints=[None] * frame_count)
+    chosen_at = {o.frame: o for o in chosen.observations}
+    per_frame = [FrameResult(cx=o.cx, cy=o.cy, conf=0.9, source="det") if (o := chosen_at.get(fi)) else None
+                 for fi in range(frame_count)]
+    selection = Selection(per_frame=per_frame, chosen_track=chosen, all_tracks=list(tracks), court_polygon=None,
+                          last_court_keypoints=None, display_path={})
+    writers = SimpleNamespace(main=object(), motion_debug=None, track_debug=None)
+    return pass2._FrameRenderer(ctx, pass1, selection, CourtEvents(), writers)
+
+
+def _main_frames(show_all_tracks: bool, with_rejected: bool = True):
+    """The tracking frames of a three-frame clip with a chosen track and, unless ``with_rejected``
+    is off, a rejected one."""
+    chosen = _track(1, 30.0, (0, 100.0, 100.0), (1, 110.0, 100.0), (2, 120.0, 100.0))
+    rejected = _track(2, 5.0, (0, 400.0, 250.0), (1, 400.0, 260.0), (2, 400.0, 270.0))
+    tracks = [chosen, rejected] if with_rejected else [chosen]
+    renderer = _renderer(Config(show_all_tracks=show_all_tracks), 3, tracks, chosen)
+    frames = []
+    for fi in range(3):
+        canvas = renderer._draw(fi, np.zeros((HEIGHT, WIDTH, 3), np.uint8), renderer.selection.per_frame[fi],
+                                None, draw_in_place=True)
+        assert canvas.debug is None                        # no track-debug video was asked for
+        frames.append(canvas.main)
+    return frames
+
+
+def _holds(frame, color) -> bool:
+    return bool((frame == np.array(color, np.uint8)).all(axis=2).any())
+
+
+def _tinted(frame, color):
+    """Pixels of ``frame`` in ``color`` at half strength or more: the colour itself, and the
+    anti-aliased 1 px trail, which lands at about nine tenths of it."""
+    color = np.array(color, np.uint8)
+    return (frame >= color // 2).all(axis=2) & (frame <= color).all(axis=2) & frame.any(axis=2)
+
+
+def test_show_all_tracks_puts_the_rejected_track_on_the_tracking_frame_without_the_debug_video():
+    off, on = _main_frames(False)[-1], _main_frames(True)[-1]
+    assert not _holds(off, track_color(2))
+    assert _holds(on, track_color(2))
+    # Its ring sits where the selector saw it this frame and its trail runs up from there.
+    assert (on[268, 400] == np.array(track_color(2), np.uint8)).all()
+    assert _tinted(on, track_color(2))[250:266, 400].all()
+    # The chosen track's marker still sits on top of its own candidate colour at the ball.
+    assert not (on[100, 120] == np.array(track_color(1), np.uint8)).all()
+    assert np.array_equal(on[100, 120], off[100, 120])
+
+
+def test_without_show_all_tracks_the_rejected_track_leaves_no_trace_on_the_tracking_frame():
+    frames = _main_frames(False)
+    alone = _main_frames(False, with_rejected=False)
+    assert all(np.array_equal(a, b) for a, b in zip(frames, alone))
+    assert not any(_holds(frame, track_color(2)) for frame in frames)
+    assert all(frame.any() for frame in frames)                      # the chosen marker is still drawn

@@ -14,6 +14,7 @@ from tennis_tracker.render.rendering import (
     COLOR_DET,
     COLOR_INTERP,
     COLOR_MOTION,
+    COLOR_OUTLINE,
     COLOR_RAW,
     COLOR_SEARCH,
     COLOR_WHITE,
@@ -63,14 +64,22 @@ def recorder(monkeypatch):
 def test_marker_sizer_follows_detector_boxes_within_its_limits():
     cfg = Config(ball_marker_min_radius=3, ball_marker_max_radius=12, ball_marker_box_scale=0.5)
     sizer = MarkerSizer(cfg)
-    assert sizer.radius == 4.0 and sizer.estimate_radius == 4
+    assert sizer.radius == 3.0 and sizer.estimate_radius == 3
     assert sizer.observe_box(10.0, 10.0) == 5                     # round(10 * 0.5), inside the limits
-    assert sizer.radius == pytest.approx(0.8 * 4.0 + 0.2 * 5.0)   # the EMA of the box radius
+    assert sizer.radius == pytest.approx(0.8 * 3.0 + 0.2 * 5.0)   # the EMA of the box radius
     assert sizer.observe_box(2.0, 2.0) == 3                       # clipped to the minimum
     assert sizer.observe_box(100.0, 100.0) == 12                  # ... and the maximum
     for _ in range(100):
         sizer.observe_box(400.0, 400.0)
-    assert sizer.radius == 36.0 and sizer.estimate_radius == 12   # radius capped at 3x max, estimate at 12
+    assert sizer.radius == 36.0 and sizer.estimate_radius == 12   # radius capped at 3x max, estimate at max
+
+
+def test_estimated_marker_shrinks_with_the_configured_maximum():
+    sizer = MarkerSizer(Config(ball_marker_min_radius=3, ball_marker_max_radius=6))
+    assert sizer.radius == 3.0 and sizer.estimate_radius == 3
+    for _ in range(100):
+        sizer.observe_box(400.0, 400.0)
+    assert sizer.estimate_radius == 6                             # the motion marker follows the same ceiling
 
 
 # --------------------------------------------------------------------------- SearchCentreSmoother
@@ -94,8 +103,12 @@ def test_detection_marker_and_box_land_on_both_frames():
     draw_selected_result(canvas, res, 5, MarkerSizer(Config()), SearchCentreSmoother(), draw_search_regions=False)
     for frame in (main, debug):
         assert tuple(frame[80, 100]) == COLOR_DET                  # the filled marker at the centre
-        assert tuple(frame[73, 94]) == COLOR_DET                   # the box's top-left corner
-        assert tuple(frame[87, 100]) == COLOR_WHITE                # the emphasised bottom edge
+        assert tuple(frame[80, 103]) == COLOR_DET                  # ... out to its 3 px radius
+        assert tuple(frame[80, 104]) == COLOR_OUTLINE              # the one-pixel halo ring around it
+        assert tuple(frame[74, 94]) == COLOR_DET                   # the box's top-left corner, one pixel wide
+        assert tuple(frame[73, 94]) == COLOR_OUTLINE               # inside the box's halo
+        assert tuple(frame[86, 100]) == COLOR_WHITE                # the emphasised bottom edge
+        assert tuple(frame[88, 100]) == (0, 0, 0)                  # ... and nothing below the halo
         assert not frame[150:, :].any()                            # nothing far from the ball
 
 

@@ -145,13 +145,16 @@ class Config:
     selector_track_limit: int = 0  # 0 = print all
     draw_search_regions: bool = False
     draw_ball_trail: bool = True
+    # Every selector track on the tracking video too, each in its track colour, under the
+    # chosen track's trail and marker (``--showtracks``; the track-debug video always has them).
+    show_all_tracks: bool = False
 
     # trail rendering / switch guards
     trail_hard_switch_x_frac: float = 0.30
     trail_hard_switch_y_frac: float = 0.30
     ball_marker_box_scale: float = 0.22
     ball_marker_min_radius: int = 3
-    ball_marker_max_radius: int = 12
+    ball_marker_max_radius: int = 6
 
     # output encoding
     use_nvenc: bool = True
@@ -161,8 +164,10 @@ class Config:
     async_queue: int = 16
     cache_input_frames_pass2: bool = True  # keep decoded frames in RAM to avoid second decode
     # 0 sizes the pass-2 frame cache from the RAM free at start-up (half of
-    # it, capped by pass2_cache_ceiling_mb). A 1080p clip needs 12-22 GiB, so
-    # a small fixed budget never engages the cache at all.
+    # it, capped by pass2_cache_ceiling_mb). The cache is a prefix of the clip:
+    # pass 1 keeps frames while they fit the budget and pass 2 decodes only the
+    # rest, so a budget smaller than the clip (a 1080p clip needs 12-22 GiB)
+    # still saves that share of the second decode.
     pass2_cache_max_mb: int = 0
     pass2_cache_ceiling_mb: int = 4096
     progress_every: int = 200

@@ -87,6 +87,15 @@ Use another CUDA device or detector threshold:
 python clean_tracker.py --device 1 --conf 0.55
 ```
 
+See what the selector chose from:
+
+```powershell
+python clean_tracker.py --input path	o\match.mp4 --showtracks
+```
+
+`--showtracks` draws every selector track on the tracking video in its own colour, chosen
+or not, under the chosen track's green trail and marker.
+
 ## Ball detector weights: two networks
 
 The tracker runs either of two ball-detector networks and picks by the weights

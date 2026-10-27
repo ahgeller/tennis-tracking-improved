@@ -56,7 +56,7 @@ class Pass1Result:
     ghost_rois: List[List[Box]] = field(default_factory=list)              # ROIs of tracks that timed out
     player_boxes: List[PlayerBoxes] = field(default_factory=list)          # tracked player id -> box
     court_keypoints: List[Optional[List[float]]] = field(default_factory=list)
-    cached_frames: Optional[List[np.ndarray]] = None   # decoded frames kept for pass 2, if they fit
+    cached_frames: Optional[List[np.ndarray]] = None   # the clip's first frames, as many as fit the RAM budget
     roi_frames: int = 0            # frames whose motion was computed inside ROIs (counted per ROI)
     fullframe_frames: int = 0
     skipped_detect_frames: int = 0
@@ -123,20 +123,57 @@ def pass2_cache_budget_mb(cfg) -> float:
     return min(0.5 * free_mb, ceiling)
 
 
-def _new_frame_cache(ctx: RunContext) -> Optional[List[np.ndarray]]:
-    """An empty frame cache when the whole clip fits the budget, else None (with a note)."""
+def cache_frame_capacity(budget_mb: float, width: int, height: int) -> int:
+    """How many decoded ``width`` x ``height`` frames a cache budget of ``budget_mb`` holds."""
+    return int(budget_mb * _MIB // (width * height * _BYTES_PER_PIXEL))
+
+
+class FrameCache:
+    """The decoded frames kept for pass 2: the clip's first ``capacity`` frames, the share of the
+    clip the RAM budget holds.  Pass 2 serves these from memory and decodes only the rest, so a
+    budget smaller than the clip still saves that share of the second decode.  ``frames`` is the
+    list ``Pass1Result.cached_frames`` hands to pass 2; ``add`` fills it in source order and
+    stops at the capacity, or earlier when the machine runs out of memory."""
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self.frames: List[np.ndarray] = []
+
+    @property
+    def full(self) -> bool:
+        return len(self.frames) >= self.capacity
+
+    def add(self, frame: np.ndarray) -> None:
+        """Keep ``frame`` while the cache lasts; the first frame it cannot keep ends the prefix."""
+        if self.full:
+            return
+        try:
+            self.frames.append(frame)
+        except MemoryError:
+            self.capacity = len(self.frames)
+            print(f"[pass 1] RAM frame cache stopped at {self.capacity} frames (MemoryError)")
+
+
+def _new_frame_cache(ctx: RunContext) -> Optional[FrameCache]:
+    """A frame cache sized to the RAM budget, else None (with a note).  The cache holds as many of
+    the clip's frames as the budget allows, the whole clip when it fits."""
     cfg, video = ctx.cfg, ctx.video
     if not (ctx.needs_pass2_outputs and cfg.cache_input_frames_pass2 and video.frame_count_hint > 0):
         return None
     est_mb = float(video.frame_count_hint) * video.width * video.height * _BYTES_PER_PIXEL / _MIB
     budget_mb = pass2_cache_budget_mb(cfg)
+    capacity = cache_frame_capacity(budget_mb, video.width, video.height)
     if est_mb <= budget_mb:
         print(f"[pass 1] RAM frame cache enabled ({est_mb:.0f} MiB est, {budget_mb:.0f} MiB budget)")
-        return []
+        return FrameCache(capacity)
+    if capacity > 0:
+        print(f"[pass 1] RAM frame cache: {capacity} of {video.frame_count_hint} frames fit the "
+              f"{budget_mb:.0f} MiB budget")
+        return FrameCache(capacity)
     if psutil is None and cfg.pass2_cache_max_mb <= 0:
         print("[pass 1] RAM frame cache disabled (psutil not installed; set pass2_cache_max_mb to enable it)")
     else:
-        print(f"[pass 1] RAM frame cache disabled ({est_mb:.0f} MiB needed > {budget_mb:.0f} MiB budget)")
+        print(f"[pass 1] RAM frame cache disabled ({budget_mb:.0f} MiB budget holds no frame of {est_mb:.0f} MiB)")
     return None
 
 
@@ -180,7 +217,8 @@ class _Pass1Collector:
         self.can_overlap_ball_inference = bool(self.detector.use_async and int(self.detector.async_slots) >= 2)
         if self.use_cuda_detector_input:
             print("[pass 1] CUDA zero-copy preprocess->detector path enabled")
-        self.result = Pass1Result(cached_frames=_new_frame_cache(ctx))
+        self._frame_cache = _new_frame_cache(ctx)
+        self.result = Pass1Result(cached_frames=self._frame_cache.frames if self._frame_cache is not None else None)
         self._progress_frame, self._progress_elapsed = 0, 0.0   # where the last progress line was
 
     # -- per-frame steps -------------------------------------------------------
@@ -311,16 +349,6 @@ class _Pass1Collector:
 
     # -- the loop ---------------------------------------------------------------
 
-    def _cache_frame(self, frame: np.ndarray) -> None:
-        """Keep the decoded frame for pass 2 while the RAM cache lasts."""
-        if self.result.cached_frames is None:
-            return
-        try:
-            self.result.cached_frames.append(frame)
-        except MemoryError:
-            self.result.cached_frames = None
-            print("[pass 1] RAM frame cache disabled (MemoryError)")
-
     def _preprocess_frame(self, frame_index: int, frame: np.ndarray, court_kps: Optional[List[float]],
                           detect_this_frame: bool, prev_pending: Optional[PendingDetection]
                           ) -> Tuple[_Preprocessed, Optional[PendingDetection]]:
@@ -378,7 +406,8 @@ class _Pass1Collector:
             # Finish the previous frame's inference after this frame's
             # preprocessing, so the two overlap.
             prev_pending, pending = pending, None
-            self._cache_frame(frame)
+            if self._frame_cache is not None:
+                self._frame_cache.add(frame)
             if cfg.enable_preprocess:
                 self.background.update(window.curr_gpu.v, window.curr_gpu.s)
             detect_this_frame = self._should_detect(frame_index)

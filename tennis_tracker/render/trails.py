@@ -1,7 +1,8 @@
 """The trails of the tracking video and its track-debug twin: the chosen ball's recent path
 (``BallTrail``), the chosen track's display path (``DisplayPathTrail``) and every selector
-track's dots and short trails (``CandidateTrackTrails``).  Each one advances once per frame in
-pass 2 and draws onto the ``rendering.Canvas``.
+track's dots and short trails (``CandidateTrackTrails``, at the debug video's full weight or
+the lighter ``LIGHT_TRACK_STYLE`` the tracking video takes with ``Config.show_all_tracks``).
+Each one advances once per frame in pass 2 and draws onto the ``rendering.Canvas``.
 """
 from __future__ import annotations
 
@@ -31,8 +32,8 @@ TRAIL_MIN_LEN = 10
 DISPLAY_PATH_TRAIL_MIN_LEN = 40
 DISPLAY_PATH_TRAIL_EXTRA = 20
 _TRAIL_FADE_BASE, _TRAIL_FADE_RANGE = 0.55, 0.45    # alpha = base + range * age fraction
-_TRAIL_THICKNESS = 3
-_TRAIL_MIN_THICKNESS = 2
+_TRAIL_THICKNESS = 2
+_TRAIL_MIN_THICKNESS = 1
 _TRAIL_HARD_MIN_X_PX, _TRAIL_HARD_MIN_Y_PX = 34.0, 26.0
 _TRAIL_BRIDGE_FRAC, _TRAIL_BRIDGE_MIN_PX = 0.035, 18.0
 _TRAIL_TRANSITION_FRAC, _TRAIL_TRANSITION_MIN_PX = 0.020, 14.0
@@ -60,6 +61,20 @@ class TrailSettings(Protocol):
 
 def _trail_base_color(src: str) -> Color:
     return _SOURCE_BASE_COLOR.get(src, _UNKNOWN_SOURCE_COLOR)
+
+
+def _segment_source(points: Sequence[Optional["TrailPoint"]], i: int) -> str:
+    """The source that colours the segment ending on ``points[i]``: the point's own, except that a
+    single motion point between two detections is a one-frame fill of the detector's track and
+    takes the detector's colour; a run of two or more motion points keeps its own."""
+    src = points[i][2]
+    if src != "motion":
+        return src
+    prev = points[i - 1]
+    nxt = points[i + 1] if i + 1 < len(points) else None
+    if prev is not None and nxt is not None and prev[2] == "det" and nxt[2] == "det":
+        return "det"
+    return src
 
 
 def _trail_jump_fracs(src: Optional[str], cfg: TrailSettings) -> Tuple[float, float]:
@@ -204,15 +219,15 @@ class BallTrail:
             self.points.pop(0)
 
     def draw(self, canvas: Canvas, draw_main: bool) -> None:
-        """Paint the segments: the debug frame always, the main frame when ``draw_main``."""
+        """Paint the segments: the debug frame always, the main frame when ``draw_main``.  Each
+        segment takes its end point's source colour (``_segment_source``) and fades with age."""
         n = len(self.points)
         for i in range(1, n):
             a, b = self.points[i - 1], self.points[i]
             if a is None or b is None:
                 continue
-            src = b[2]
             p0, p1 = (a[0], a[1]), (b[0], b[1])
-            base = _trail_base_color(src)
+            base = _trail_base_color(_segment_source(self.points, i))
             alpha = _TRAIL_FADE_BASE + _TRAIL_FADE_RANGE * (i / n)
             color = (int(base[0] * alpha), int(base[1] * alpha), int(base[2] * alpha))
             if canvas.debug is not None:
@@ -303,8 +318,30 @@ def _draw_trail_segments(debug: np.ndarray, trail: Sequence[Optional[Tuple[float
             segment.append(p)
 
 
+class TrackStyle(NamedTuple):
+    """The weight ``CandidateTrackTrails`` draws a frame at.  The trail segments are 1 px in
+    every style; the dot, its dark halo and the label are what differ."""
+    label: bool             # the track's id and score beside its dot
+    dot_radius: int         # the ring's radius
+    ring_thickness: int     # ... and its line width
+    fill_chosen: bool       # the chosen track's dot is filled and 2 px wider, else every track draws alike
+    halo_filled: bool       # a dark disc under the dot, else a dark 1 px ring around it
+
+
+# The track-debug video: ids and scores, a filled dot on the chosen track, dark discs under the dots.
+DEBUG_TRACK_STYLE = TrackStyle(label=True, dot_radius=3, ring_thickness=2, fill_chosen=True, halo_filled=True)
+# The tracking video with ``Config.show_all_tracks``: a 2 px ring per track, no label, under the
+# chosen track's own trail and marker, which keep the chosen one recognisable.
+LIGHT_TRACK_STYLE = TrackStyle(label=False, dot_radius=2, ring_thickness=1, fill_chosen=False, halo_filled=False)
+
+
 class CandidateTrackTrails:
-    """Every selector track in the track-debug video: coloured dots, ids, scores and short trails."""
+    """Every selector track: coloured dots and short trails, with ids and scores in the
+    track-debug video's ``DEBUG_TRACK_STYLE``.
+
+    ``advance`` moves the trails to a frame once; ``draw`` paints them on any number of targets
+    at a ``TrackStyle`` each; ``advance_and_draw`` does both for a single target.
+    """
 
     def __init__(self, tracks: Sequence[Track], chosen_track: Optional[Track]) -> None:
         self.tracks = sorted(tracks, key=lambda t: float(t.score), reverse=True)
@@ -315,20 +352,28 @@ class CandidateTrackTrails:
         self.scores = {int(t.track_id): float(t.score) for t in self.tracks}
         self.trails: Dict[int, List[Optional[Tuple[float, float]]]] = {int(t.track_id): [] for t in self.tracks}
 
-    def _draw_dot(self, debug: np.ndarray, tid: int, pt: Tuple[float, float], color: Color) -> None:
-        """The track's position this frame: a dot (filled when chosen) with its id and score."""
+    def _draw_dot(self, target: np.ndarray, tid: int, pt: Tuple[float, float], color: Color,
+                  style: TrackStyle) -> None:
+        """The track's position this frame: a dot over a dark halo and, when the style has it,
+        the id and score."""
         cx, cy = int(pt[0]), int(pt[1])
-        is_chosen = tid == self.chosen_id
-        dot_r = 5 if is_chosen else 3
-        dot_th = -1 if is_chosen else 2
-        cv2.circle(debug, (cx, cy), dot_r + 2, COLOR_OUTLINE, -1)   # dark outline for legibility
-        cv2.circle(debug, (cx, cy), dot_r, color, dot_th)
+        is_chosen = style.fill_chosen and tid == self.chosen_id
+        dot_r = style.dot_radius + 2 if is_chosen else style.dot_radius
+        dot_th = -1 if is_chosen else style.ring_thickness
+        if style.halo_filled:
+            cv2.circle(target, (cx, cy), dot_r + 2, COLOR_OUTLINE, -1)   # dark outline for legibility
+        else:
+            cv2.circle(target, (cx, cy), dot_r + 1, COLOR_OUTLINE, 1)
+        cv2.circle(target, (cx, cy), dot_r, color, dot_th)
+        if not style.label:
+            return
         label = f"{tid}({self.scores[tid]:.0f})"
         origin = (cx + _CANDIDATE_LABEL_OFFSET[0], cy + _CANDIDATE_LABEL_OFFSET[1])
-        cv2.putText(debug, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.38, COLOR_OUTLINE, 2)
-        cv2.putText(debug, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1)
+        cv2.putText(target, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.38, COLOR_OUTLINE, 2)
+        cv2.putText(target, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1)
 
-    def advance_and_draw(self, debug: np.ndarray, frame_index: int) -> None:
+    def advance(self, frame_index: int) -> None:
+        """Append every track's position on ``frame_index`` to its trail (a break where it has none)."""
         for trk in self.tracks:
             tid = int(trk.track_id)
             pt = self.positions[tid].get(frame_index)
@@ -340,8 +385,18 @@ class CandidateTrackTrails:
             while len(trail) > CANDIDATE_TRAIL_LEN:
                 trail.pop(0)
 
+    def draw(self, target: np.ndarray, frame_index: int, style: TrackStyle) -> None:
+        """Paint the trails as ``advance`` left them, and a dot on every track seen on ``frame_index``."""
+        for trk in self.tracks:
+            tid = int(trk.track_id)
+            pt = self.positions[tid].get(frame_index)
+            trail = self.trails[tid]
             color = track_color(tid)
             if len(trail) > 1:
-                _draw_trail_segments(debug, trail, color)
+                _draw_trail_segments(target, trail, color)
             if pt is not None:
-                self._draw_dot(debug, tid, pt, color)
+                self._draw_dot(target, tid, pt, color, style)
+
+    def advance_and_draw(self, target: np.ndarray, frame_index: int, style: TrackStyle = DEBUG_TRACK_STYLE) -> None:
+        self.advance(frame_index)
+        self.draw(target, frame_index, style)
