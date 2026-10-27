@@ -4,7 +4,7 @@ Drop videos in, let the detector pre-label them, fix the few frames it got
 wrong, train, keep the best model.
 
 **New here? Double-click `finetune.bat`** (or run `finetune` in cmd,
-`.\finetune.ps1` in PowerShell, with no arguments) — an interactive menu shows
+`.\finetune.ps1` in PowerShell, with no arguments) - an interactive menu shows
 what is labelled and walks through add / label / check / eval / train / promote.
 
 The same actions exist as commands for scripts and power use:
@@ -54,25 +54,25 @@ finetune/
 
 Own labels (`video1`–`video12`) are tracked in git; imported public labels
 (`tnv2_*`, `grid_*`, and the prof set's `video13`–`video53`) and all videos are
-not — `ft.py import all` recreates them.
+not - `ft.py import all` recreates them.
 
 ## Data (after `ft.py import all`)
 
 | source (`clips.csv`) | clips | label frames | visible | what it is |
 |---|---:|---:|---:|---|
 | `custom` | 13 | 6,243 | 5,666 | your own camera: the archive clips video1–10 and 12 (fixed camera, 1080p; video12 is 720p), `video11` (768×432 PNGs from the TrackNetV5 prep) and the Pomona clip (added to the manifest by hand on 2026-10-25, not by the importer). `ft.py import all` tags video11 `custom-uncorrected` (machine labels, hold-out only); its labels were reviewed by hand and the row retagged `custom` on 2026-10-25, so re-import it only with that in mind |
-| `prof` | 41 | 9,292 | 9,068 | the public **TrackNet tennis** set (NYCU, `DATASETS.md` #3) from `Desktop\prof\Dataset`: broadcast rallies from an elevated camera behind the baseline, 1280×720 @ 30 FPS, one JPEG per frame. Imported as **`video13`–`video53`** so it sits under `video12` in the clip lists — the source tag, not the name, is what says it is not your camera. A partial copy: games 2, 4, 5, 6, 7 and 10 of 10 (**game10 is the published test split** — hold it out if you ever compare against published numbers) |
-| `grid` | 32 | 17,479 | 16,187 | a partial copy of GridTrackNet's public set (amateur phone + TV clips, 1080p); the full 100-match set is downloadable (`DATASETS.md` #1). 21 local matches ship labels without media. Four matches were mis-timed and are now fixed (2026-09-03): match49 and match50 are two later rallies of **match47's** video — the set ships all three as `gravel amature.mp4` — and match26 and match55 have frames missing from our copy, so their labels are re-timed in segments. `ft.py check --audit` is what finds this |
-| `tracknetv2-badminton` | 201 | 91,214 | 78,952 | **not imported by `all`** (removed 2026-08-31 as unneeded — `ft.py import tracknetv2` brings it back): the TrackNetV2 **badminton** set (V5Test's README called it tennis — it is not), broadcast shuttlecock rallies, 1280×720 @ 30 FPS. Cross-sport "tiny fast object" pre-training only |
+| `prof` | 41 | 9,292 | 9,068 | the public **TrackNet tennis** set (NYCU, `DATASETS.md` #3) from `Desktop\prof\Dataset`: broadcast rallies from an elevated camera behind the baseline, 1280×720 @ 30 FPS, one JPEG per frame. Imported as **`video13`–`video53`** so it sits under `video12` in the clip lists - the source tag, not the name, is what says it is not your camera. A partial copy: games 2, 4, 5, 6, 7 and 10 of 10 (**game10 is the published test split** - hold it out if you ever compare against published numbers) |
+| `grid` | 32 | 17,479 | 16,187 | a partial copy of GridTrackNet's public set (amateur phone + TV clips, 1080p); the full 100-match set is downloadable (`DATASETS.md` #1). 21 local matches ship labels without media. Four matches were mis-timed and are now fixed (2026-09-03): match49 and match50 are two later rallies of **match47's** video - the set ships all three as `gravel amature.mp4` - and match26 and match55 have frames missing from our copy, so their labels are re-timed in segments. `ft.py check --audit` is what finds this |
+| `tracknetv2-badminton` | 201 | 91,214 | 78,952 | **not imported by `all`** (removed 2026-08-31 as unneeded - `ft.py import tracknetv2` brings it back): the TrackNetV2 **badminton** set (V5Test's README called it tennis - it is not), broadcast shuttlecock rallies, 1280×720 @ 30 FPS. Cross-sport "tiny fast object" pre-training only |
 
 Sources are read from `V5Test/`, `gridtracknet_finetuning/archive` and
-`Desktop\prof\Dataset` (paths in `import_data.py`). They are only needed to import a clip in the first place —
+`Desktop\prof\Dataset` (paths in `import_data.py`). They are only needed to import a clip in the first place -
 once a clip is in `finetune/videos` + `finetune/labels` the workspace no longer
 touches them, and `ft.py import` just skips any source folder that is gone. The
 importer converts TrackNet-style `Frame,Visibility,X,Y` labels, scales
 GridTrackNet's 1280×720 labels to the 1080p videos, and maps its
 60 FPS matches to frames 1, 3, 5, … (that is how its `FrameGenerator.py` sampled
-them — verified against the shipped PNGs). Visibility 3 (occluded, estimated
+them - verified against the shipped PNGs). Visibility 3 (occluded, estimated
 position) becomes "not visible" unless `--keep-occluded`.
 
 `ft.py check --audit` runs the detector over every tennis clip and reports how
@@ -81,7 +81,7 @@ simply offset is shifted with `--fix`; one that cannot be shifted into place is
 written to `exclude.txt`, which `train_gridtracknet.py` honours by default
 (`--include-excluded` overrides).
 
-When a clip will not shift into place, `realign.py` is the next thing to try —
+When a clip will not shift into place, `realign.py` is the next thing to try -
 `--fix` only ever tests one constant offset against the clip's *own* video, and
 that is not always what is wrong:
 
@@ -96,8 +96,8 @@ a **different video** in the set and copies that video in, and videos that have
 clips excluded on 2026-08-31 were recovered this way on 2026-09-03. It is a no-op
 on a clip that is already right, and it backs up whatever it replaces.
 
-Labelling a `BAD*` clip makes it better: every frame you settle in the click tool
-— clicking the ball, or pressing SPACE to say the label is already right — pins
+Labelling a `BAD*` clip makes it better: every frame you settle in the click tool -
+clicking the ball, or pressing SPACE to say the label is already right - pins
 that row, which tells `realign.py` which side of a cut it falls on, so the frames
 you have not reached can be re-timed to agree with you. `ft.py label` offers this
 when you close the tool, and your own frames never move. Fix a couple either side
@@ -105,7 +105,7 @@ of each join rather than grinding through all of them.
 
 `--mark` writes `labels/<clip>_ball.suspect.json`, splitting doubtful frames into
 two kinds. **unplaceable** frames sit inside a cut whose exact position cannot be
-recovered — the clip picker tags those clips **`BAD*`**. **check** frames are ones
+recovered - the clip picker tags those clips **`BAD*`**. **check** frames are ones
 the detector disputes; spot-checking those against the video showed the label was
 usually right and the detector had simply lost the ball at the racket, so they are
 a prompt, not a defect. The click tool draws both in magenta, counts them in the
@@ -122,11 +122,11 @@ Any downloaded dataset in a TrackNet layout (`Label.csv` beside frames, or
 
 ## Frame by frame or every other?
 
-The network looks at **5 frames spaced at 30 FPS** — it needs that much
+The network looks at **5 frames spaced at 30 FPS** - it needs that much
 displacement between frames to see the ball as a moving thing. So:
 
 - 60 FPS video → labels on **every second frame** (`frame_000, frame_002, …`,
-  or `001, 003, …` — either phase works).
+  or `001, 003, …` - either phase works).
 - 30 FPS video → labels on **every frame**.
 
 `pretrack.py` and `label_tool.py` only ever show you those frames. The *tracker
@@ -145,40 +145,40 @@ separately). `ft.py check` flags files that break this rule.
    detector runs over the whole clip (~1–2 min per minute of video) and writes
    `labels/<clip>_ball.csv.draft` with a guess + confidence for every label
    frame. Low-confidence guesses are kept on purpose so you accept or move a
-   point, never hunt. The video must be **30 or 60 FPS** (any resolution) —
+   point, never hunt. The video must be **30 or 60 FPS** (any resolution) -
    if it is not, the command prints the exact `ffmpeg -vf fps=30` line to
    re-encode first. One rally per clip works best (that is what the archive
    is), but longer videos are fine. You can also just drop files into
    `videos/` and run `.\finetune.ps1 prelabel`.
 
-   Pre-label with your **newest** model — the better the model, the less you
+   Pre-label with your **newest** model - the better the model, the less you
    click: `.\finetune.ps1 prelabel --clips night1 --weights
    finetune\models\ball_best.pt` (`--source pipeline` uses the full
    tracker instead of the raw detector).
 
-2. **Correct** — `.\finetune.ps1 label night1`. Each label frame comes up
+2. **Correct** - `.\finetune.ps1 label night1`. Each label frame comes up
    zoomed on the guess with the mouse cursor already on it (every key and
    what the marks mean: `LABEL_TOOL.md`).
    - guess is right → **SPACE** (next frame)
    - guess is wrong → **click** on the ball (saves and goes to next frame)
-   - ball hidden or out of frame → **v** (next frame) — do label these, the
+   - ball hidden or out of frame → **v** (next frame) - do label these, the
      "no ball here" frames are what stop the network firing on feet and vans
    - `f` / `b` jump to the next / previous unreviewed *uncertain* frame
      (no guess or confidence < 0.7) if you only want to check the doubtful ones
-   - `r` accepts the whole run of confident guesses up to the next doubtful one
-     — `f` skips them but leaves them unreviewed, so the counter never moves
+   - `r` accepts the whole run of confident guesses up to the next doubtful one -
+     `f` skips them but leaves them unreviewed, so the counter never moves
    - **mouse wheel** zooms smoothly about the mouse and the zoom stays; every
      new frame comes up centred on the guess with the pointer on it;
      right-click re-centres; the mouse's side buttons step a frame (forward = next,
      back = previous, like the arrow keys)
-   - the window is resizable — drag it, maximise it, or press **m** for full
+   - the window is resizable - drag it, maximise it, or press **m** for full
      screen; the picture is redrawn at whatever size you give it
    - `i j k l` nudge one pixel, `u` undo, `n`/`p` step, `s` save, `q` save + quit
    - to get through a lot of clips, give a range: `.\finetune.ps1 label video22..video53`
      runs them as one session. Add `--uncertain` (or type `video22..video53 u` at the
-     menu's clip prompt) to stop only on the frames that still want a decision — on the
+     menu's clip prompt) to stop only on the frames that still want a decision - on the
      prof clips that is about 6% of them
-   You can quit any time (even by closing the window or Ctrl+C) — everything is
+   You can quit any time (even by closing the window or Ctrl+C) - everything is
    autosaved every few seconds. A frame you already handled shows a green
    REVIEWED (space) or orange EDITED (click / v / nudge) badge in the top-right
    corner when you come back to it, and the top-left corner counts down how
@@ -195,7 +195,7 @@ separately). `ft.py check` flags files that break this rule.
    .\finetune.ps1 eval --clips night1      # how the current detector scores on it (--weights for a candidate)
    ```
 
-4. **Train** — `ft.py train`. Defaults: fine-tune the tracker's current
+4. **Train** - `ft.py train`. Defaults: fine-tune the tracker's current
    weights on every clip in the workspace, hold out `video10`, 10 epochs.
    Useful recipes:
 
@@ -322,7 +322,7 @@ separately). `ft.py check` flags files that break this rule.
   frame (`v`). Those "no ball here" frames are what stop the network firing on
   players' feet, court lines and vans.
 - Keep whole recordings held out (`--holdout mixed_v1`, or `--val-clips`) and
-  never train on them — that is the only honest number you get. The bundled
+  never train on them - that is the only honest number you get. The bundled
   model has seen every archive clip but video10, so its own numbers on the
   own-camera clips are not held out; the prof games and grid matches of
   `mixed_v1` are.

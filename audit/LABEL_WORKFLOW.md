@@ -1,4 +1,4 @@
-# Precision label review — September 8, 2026
+# Precision label review - September 8, 2026
 
 The user's main task is correcting slightly misplaced centers across many
 existing CSV labels, with variable footage quality. This pass adds human review
