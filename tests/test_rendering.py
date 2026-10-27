@@ -85,6 +85,18 @@ def test_estimated_marker_shrinks_with_the_configured_maximum():
     assert sizer.estimate_radius == 6                             # the motion marker follows the same ceiling
 
 
+def test_a_minimum_radius_above_the_maximum_raises_the_maximum_to_it():
+    """``ball_marker_min_radius`` 8 was within the maximum of 12 the markers once had; over the
+    maximum of 6 ``np.clip`` answered 6 for every size, below the minimum asked for."""
+    sizer = MarkerSizer(Config(ball_marker_min_radius=8, ball_marker_max_radius=6))
+    assert (sizer.min_radius, sizer.max_radius) == (8, 8)
+    assert sizer.radius == 8.0 and sizer.estimate_radius == 8
+    assert sizer.observe_box(2.0, 2.0) == 8 and sizer.observe_box(400.0, 400.0) == 8
+    for _ in range(100):
+        sizer.observe_box(400.0, 400.0)
+    assert sizer.radius == 24.0 and sizer.estimate_radius == 8                 # the cap follows the raised maximum
+
+
 # --------------------------------------------------------------------------- SearchCentreSmoother
 
 def test_search_centre_smoother_caps_a_jump_only_between_consecutive_frames():

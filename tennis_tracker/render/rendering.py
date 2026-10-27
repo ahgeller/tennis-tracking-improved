@@ -184,29 +184,33 @@ def draw_motion_rois(targets: Iterable[np.ndarray], rois: Optional[Sequence[Sequ
 # ---------------------------------------------------------------------------
 
 class MarkerSizer:
-    """Running estimate of the ball's radius from detector boxes, for marker sizes."""
+    """Running estimate of the ball's radius from detector boxes, for marker sizes.
+
+    The markers stay within ``ball_marker_min_radius`` and ``ball_marker_max_radius``; a minimum
+    set above the maximum (one tuned under an earlier, larger maximum) raises the maximum to it
+    rather than ``np.clip`` quietly answering the maximum for every size.
+    """
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.radius = float(max(cfg.ball_marker_min_radius, 2))
-        self._cap = float(max(cfg.ball_marker_max_radius * _ANCHOR_RADIUS_CAP_SCALE, cfg.ball_marker_min_radius))
+        self.min_radius = int(cfg.ball_marker_min_radius)
+        self.max_radius = max(int(cfg.ball_marker_max_radius), self.min_radius)
+        self.radius = float(max(self.min_radius, 2))
+        self._cap = float(max(self.max_radius * _ANCHOR_RADIUS_CAP_SCALE, self.min_radius))
 
     def observe_box(self, box_w: float, box_h: float) -> int:
         """Fold a detector box in; returns the marker radius for that detection."""
-        cfg = self.cfg
         det_radius = 0.5 * max(box_w, box_h)
         self.radius = float(np.clip(
-            _ANCHOR_RADIUS_EMA_KEEP * self.radius + _ANCHOR_RADIUS_EMA_NEW * det_radius,
-            cfg.ball_marker_min_radius, self._cap))
+            _ANCHOR_RADIUS_EMA_KEEP * self.radius + _ANCHOR_RADIUS_EMA_NEW * det_radius, self.min_radius, self._cap))
         ball_px = max(int(round(box_w)), int(round(box_h)), 1)
-        return int(np.clip(round(ball_px * cfg.ball_marker_box_scale),
-                           cfg.ball_marker_min_radius, cfg.ball_marker_max_radius))
+        return int(np.clip(round(ball_px * self.cfg.ball_marker_box_scale), self.min_radius, self.max_radius))
 
     @property
     def estimate_radius(self) -> int:
         """Marker radius for a position without a detector box (motion/interp), within the same
         limits as a detection's marker so the two shrink together."""
-        return int(np.clip(round(self.radius), self.cfg.ball_marker_min_radius, self.cfg.ball_marker_max_radius))
+        return int(np.clip(round(self.radius), self.min_radius, self.max_radius))
 
 
 class SearchCentreSmoother:
