@@ -250,3 +250,15 @@ def test_decode_predictions_applies_threshold():
 
 def test_self_test_passes():
     gridtracknet.self_test()
+
+
+def test_decode_grid_is_what_decode_predictions_applies_per_frame():
+    """decode_grid places one frame's (confidence, x offset, y offset) grids as decode_predictions
+    places every frame of a unit, and answers None below the threshold with the confidence kept."""
+    from tennis_tracker.gridtracknet import decode_grid
+    output = torch.zeros((1, 15, 4, 6))
+    output[0, 3, 1, 2], output[0, 4, 1, 2], output[0, 5, 1, 2] = 0.8, 0.5, 0.25
+    grids = output[0, 3:6].numpy()
+    assert decode_grid(grids, 1920, 1080, 0.5) == decode_predictions(output, 1920, 1080, 0.5)[1]
+    assert decode_grid(grids, 1920, 1080, 0.5) == ((pytest.approx(2.5 * 320), pytest.approx(1.25 * 270)), pytest.approx(0.8))
+    assert decode_grid(grids, 1920, 1080, 0.9) == (None, pytest.approx(0.8))

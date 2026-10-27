@@ -23,6 +23,12 @@ class Config:
     gridtracknet_y_offset_px: float = 0.0
     gridtracknet_source_stride: Optional[int] = None  # None = 2 at 60 FPS / 1 at 30 FPS (the training cadence)
     gridtracknet_prepass_background: bool = True  # run the GridTrackNet prepass on a worker thread, overlapped with pass 1
+    # Frames of a phase between one five-frame unit's start and the next: 1 starts a unit at every
+    # frame and averages the up-to-five answers each frame gets (the default since 2026-10-26: on
+    # heat4's weights, held out, false alarm 0.085 to 0.073 at recall 0.894 to 0.900, and through the
+    # pipeline 0.178 to 0.164 at 0.898 to 0.906, for 1.5x the prepass time); 5 answers every frame
+    # from one unit, the prepass as it was before, which a stateful model takes whatever is set here.
+    gridtracknet_window_step: int = 1
 
     # TensorRT
     trt_async_execute: bool = True

@@ -26,9 +26,15 @@ tracker alone; do not add workspace code here.
   convolutional GRU at the bottleneck carries a state between consecutive units of one
   phase; `forward(value, state=None) -> (output, new_state)`; `out` starts at zero so a
   network built `from_heatmap` answers as its parent until the memory trains.
+  `tennis_tracker/heatmapnet_s2.py`: the fourth, `HeatmapNetS2(HeatmapNet)`, arch
+  `heatmap_s2`: one more decoder block over the encoder's stride-2 skip, answering on
+  a 384x216 grid (stride 2); its `from_heatmap` copies a `heatmap_s4` record's shared
+  layers and leaves the new block and the head fresh (`NEW_MODULES`).
   `tennis_tracker/ball_models.py` is the one front door: `arch_of` reads the
   architecture off `Config.model_path` (`.npz` GridTrackNet; a `.pt` names
-  `heatmap_s4` or `memory_s4` inside), `load_ball_model` builds it, and all three
+  `heatmap_s4`, `memory_s4` or `heatmap_s2` inside), `load_ball_model` builds it,
+  `PARENTS` names the architecture each child may start from and `from_parent`
+  builds it so (`PARENT_START_NOTE` is the trainer's line for it), and all four
   classes carry `ARCH`, `STATEFUL`, `GRID_COLS`, `GRID_ROWS`, `INPUT_CHANNELS` and
   `FRAMES_PER_UNIT`, so the detector, `decode_predictions` (which reads the grid off the
   output's shape) and the trainer never ask which class they hold; the prepass and the
@@ -36,12 +42,18 @@ tracker alone; do not add workspace code here.
   chains of `--chain` units, `dataset.ChainDataset`, `loop.chain_loss`). The trainer's
   `--arch heatmap_s4` (Gaussian target, CenterNet focal loss) trains it from scratch or
   fine-tunes it from a `.pt`; `--arch memory_s4 --weights <heatmap_s4 .pt>` starts the
-  memory network from its parent. No run of either has been made yet; `README.md`
-  ("Keeping one network") says what to delete when an architecture loses.
+  memory network from its parent, `--arch heatmap_s2 --weights <heatmap_s4 .pt>` the
+  stride-2 network. The runs are on the `train` branch (its ledger,
+  `audit/records/gridtracknet_recipe_2026-10.md`); `README.md` ("Keeping one
+  network") says what to delete when an architecture loses.
 - `tennis_tracker/engines/`: `ball_detectors.py`, the progressive GridTrackNet
   prepass and the single-frame TensorRT ball engine. At about 60 FPS, even and
   odd phases each run at about 30 FPS. Preserve source-frame indices and
-  temporal order. `engine_session.py`: the TensorRT session the ball, player
+  temporal order. `Config.gridtracknet_window_step` (1, the default since
+  2026-10-26) is the frames of a phase between unit starts: below 5 a frame's
+  overlapping units are averaged before one decode (`_UnitStream`,
+  `_HeatAverage`); 5 is the old prepass, one unit per frame, which a stateful
+  model takes whatever is set. `engine_session.py`: the TensorRT session the ball, player
   and court engines share; `engine_files.py`: locating engine files, their
   Ultralytics metadata and I/O tensor table (no CUDA); `engine_boxes.py`:
   decoding detection-engine outputs into boxes for the ball and player

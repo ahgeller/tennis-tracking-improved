@@ -42,7 +42,7 @@ def test_a_fresh_head_predicts_the_heat_prior_and_the_contract_matches_gridtrack
     for frame in range(FRAMES_PER_UNIT):
         assert float(output[0, frame * 3].mean()) == pytest.approx(HEAT_PRIOR, abs=1e-4)
         assert float(output[0, frame * 3 + 1].mean()) == pytest.approx(0.5, abs=1e-4)
-    assert float(model.head.bias[0]) == pytest.approx(-math.log((1 - HEAT_PRIOR) / HEAT_PRIOR))
+    assert float(model.head.bias.detach()[0]) == pytest.approx(-math.log((1 - HEAT_PRIOR) / HEAT_PRIOR))
     for name in ("ARCH", "GRID_COLS", "GRID_ROWS", "INPUT_CHANNELS", "FRAMES_PER_UNIT"):
         assert hasattr(HeatmapNet, name) and hasattr(gridtracknet.GridTrackNet, name)
     assert (HeatmapNet.ARCH, gridtracknet.GridTrackNet.ARCH) == ("heatmap_s4", "gridtracknet")

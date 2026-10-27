@@ -58,11 +58,18 @@ class RaisingCapture(Capture):
         return super().read()
 
 
+# The stand-in models below answer no grid (their output is whatever shape the test likes and
+# an injected decoder reads it), so they run the prepass at one unit per frame, where the
+# model's answer goes straight to the decoder; the averaging path (a window step below 5, the
+# default) reshapes a real 15-channel grid and is exercised with GridStandIn further down.
+ONE_UNIT_PER_FRAME = 5
+
+
 def _bare_detector(cfg=None) -> GridTrackNetBallDetector:
     """A GridTrackNet backend without its constructor: the model, decoder and
     frame encoder are stand-ins that find a ball at (10, 20) on every frame."""
     detector = GridTrackNetBallDetector.__new__(GridTrackNetBallDetector)
-    detector.cfg = cfg or Config(device="0")
+    detector.cfg = cfg or Config(device="0", gridtracknet_window_step=ONE_UNIT_PER_FRAME)
     detector.device = torch.device("cpu")
     detector.model = StandInModel(lambda batch: batch)
     detector._frame_tensor = lambda frame, device: torch.zeros((1, 3))
@@ -108,7 +115,8 @@ def test_foreground_prepass_failure_raises_instead_of_returning_empty_frames(mon
 
 
 def test_background_prepass_failure_reaches_the_consumer(monkeypatch, fake_cuda):
-    detector = _bare_detector(Config(device="0", gridtracknet_prepass_background=True))
+    detector = _bare_detector(Config(device="0", gridtracknet_prepass_background=True,
+                                     gridtracknet_window_step=ONE_UNIT_PER_FRAME))
     monkeypatch.setattr(ball_detectors.cv2, "VideoCapture", lambda path: RaisingCapture(7, fail_at=2))
     detector.prepare_video(Path("clip.mp4"), 30.0, 1920, 1080, total=7)
     with pytest.raises(RuntimeError, match="prepass failed"):
@@ -141,7 +149,7 @@ def test_finalized_misses_are_immutable(stride, count):
             assert detector.precomputed[:len(previous)] == previous
         publications.append([list(row) for row in detector.precomputed[:upto]])
     detector = CpuGridTrackNet(
-        Config(device="0"), model=lambda batch: batch, decode=decode,
+        Config(device="0", gridtracknet_window_step=ONE_UNIT_PER_FRAME), model=lambda batch: batch, decode=decode,
         frame_tensor=lambda frame, device: torch.tensor([float(frame[0, 0, 0])]),
         on_publish=publish,
     )
@@ -161,7 +169,7 @@ def _index_detector(model, publications):
     frame; every published prefix is appended to `publications`."""
     def decode(output, width, height, threshold):
         return [((float(value), 20.0), 0.9) for unit in output for value in unit]
-    return CpuGridTrackNet(Config(device="0"), model=model, decode=decode,
+    return CpuGridTrackNet(Config(device="0", gridtracknet_window_step=ONE_UNIT_PER_FRAME), model=model, decode=decode,
                            frame_tensor=lambda frame, device: torch.tensor([float(frame[0, 0, 0])]),
                            on_publish=publications.append)
 
@@ -206,3 +214,113 @@ def test_a_stateful_model_sees_each_phases_units_in_order_with_its_own_state_and
         assert regular == [phase + 5 * stride * k for k in range(len(regular))]        # consecutive units, from the clip's start
         assert trailing == count - 1 - 4 * stride - ((count - 1 - phase) % stride)      # the phase's last five frames
     assert model.calls[0][1] is None and len(model.calls) == len(units_per_phase[0])
+
+
+# --- overlapping units, averaged ----------------------------------------------
+
+class GridStandIn(StandInModel):
+    """A stateless stand-in answering on a 1x2 grid: for the frame at position k of a unit,
+    confidence 0.2 * (k + 1) in column (frame index) % 2 (the index is the frame tensor's value),
+    x offset 0.25 and y offset 0.5 everywhere."""
+
+    GRID_COLS, GRID_ROWS = 2, 1
+
+    def __init__(self):
+        super().__init__(self.answer)
+        self.batches = []
+
+    def answer(self, batch):
+        self.batches.append(batch)
+        output = torch.zeros((batch.shape[0], 15, 1, 2))
+        for row in range(batch.shape[0]):
+            for k in range(5):
+                col = int(batch[row, 3 * k, 0, 0]) % 2
+                output[row, 3 * k, 0, col] = 0.2 * (k + 1)
+                output[row, 3 * k + 1] = 0.25
+                output[row, 3 * k + 2] = 0.5
+        return output
+
+
+def _grid_detector(model, window_step, publications):
+    """A CPU prepass on `model` with the real decoder; a frame's tensor is (3, 1, 1) holding the
+    frame's index."""
+    def frame_tensor(frame, device):
+        return torch.full((3, 1, 1), float(frame[0, 0, 0]))
+    cfg = Config(device="0", conf=0.25, gridtracknet_window_step=window_step)
+    return CpuGridTrackNet(cfg, model=model, decode=ball_detectors.decode_predictions, frame_tensor=frame_tensor,
+                           on_publish=publications.append)
+
+
+def _centres(results):
+    """Each frame's detection as its box centre (x, y), None where there is none."""
+    return [((d[0][0][0] + d[0][0][2]) / 2, (d[0][0][1] + d[0][0][3]) / 2) if d else None for d in results]
+
+
+@pytest.mark.parametrize("stride, count", [(1, 12), (2, 25)])
+def test_a_window_step_of_one_averages_the_five_units_covering_a_frame(stride, count):
+    """With gridtracknet_window_step 1 a unit starts at every frame of a phase, so an interior
+    frame is answered by five units (at positions 0 to 4 in them) and its confidence is their
+    mean, 0.6; the clip's first frame is in one unit (0.2, below the 0.25 threshold: absent) and
+    its second in two (0.3). Every published prefix stays as it was, and the step-5 prepass on the
+    same model answers each frame from the one unit holding it."""
+    published, plain_published = [], []
+    with patch.object(cv2, "VideoCapture", side_effect=lambda _: Capture(count)), patch.object(torch.cuda, "synchronize"):
+        dense = _grid_detector(GridStandIn(), 1, published)
+        results = dense.detect_clip(Path("s.mp4"), _FPS_FOR_STRIDE[stride], 1920, 1080, count)
+        plain = _grid_detector(GridStandIn(), 5, plain_published)
+        single = plain.detect_clip(Path("s.mp4"), _FPS_FOR_STRIDE[stride], 1920, 1080, count)
+    assert len(results) == count
+    confidences = [d[0][1] if d else None for d in results]
+    for index in range(count):
+        position = index // stride                                   # the frame's count within its phase
+        per_phase = len(range(index % stride, count, stride))        # frames in that phase
+        positions = [k for k in range(5) if 0 <= position - k and position - k + 4 <= per_phase - 1]
+        expected = sum(0.2 * (k + 1) for k in positions) / len(positions)
+        if expected < 0.25:
+            assert confidences[index] is None, index
+        else:
+            assert confidences[index] == pytest.approx(expected, abs=1e-6), index
+            assert _centres(results)[index] == pytest.approx(((0.25 + index % 2) * 960, 0.5 * 1080))
+    assert published == sorted(published) and published[-1] == count
+    interior = [i for i in range(count) if (i // stride) % 5 != 0 and i // stride < 5 * (len(range(i % stride, count, stride)) // 5)]
+    assert all(single[i][0][1] == pytest.approx(0.2 * ((i // stride) % 5 + 1)) for i in interior)
+
+
+def test_a_stateful_model_takes_a_step_of_five_whatever_is_set_and_says_so(capsys):
+    """A STATEFUL model carries one chain of states per phase, which overlapping units would
+    break: whatever gridtracknet_window_step says (the default is 1), its prepass cuts a unit every
+    five frames, and the construction line says the setting is not taken; a window step outside
+    1 to 5 is refused for any model."""
+    model = StatefulStandInModel(lambda batch, state: (batch, batch[:, :1]))
+    detector = CpuGridTrackNet(Config(device="0", gridtracknet_window_step=1), model=model, decode=lambda *a: [],
+                               frame_tensor=lambda f, d: torch.zeros((3, 1, 1)))
+    assert detector.window_step() == 5
+    assert "one chain of states per phase (the window step set is not taken)" in capsys.readouterr().out
+    plain = CpuGridTrackNet(Config(device="0", gridtracknet_window_step=5), model=model, decode=lambda *a: [],
+                            frame_tensor=lambda f, d: torch.zeros((3, 1, 1)))
+    assert plain.window_step() == 5 and "not taken" not in capsys.readouterr().out
+    with pytest.raises(ValueError, match="window_step"):
+        CpuGridTrackNet(Config(device="0", gridtracknet_window_step=0), model=lambda b: b, decode=lambda *a: [],
+                        frame_tensor=lambda f, d: torch.zeros((3, 1, 1)))
+
+
+@pytest.mark.parametrize("step", [1, 2, 3, 4, 5])
+def test_unit_streams_cut_a_unit_every_step_frames_and_cover_the_tail(step):
+    """_UnitStream cuts units starting every `step` frames, reports the next unit's first frame
+    while it is known, and its trailing window is the last five frames exactly when the last cut
+    did not end on the last frame."""
+    stream = ball_detectors._UnitStream(step)
+    starts = []
+    for index in range(17):
+        unit = stream.push((torch.full((3,), float(index)), index))
+        if unit is not None:
+            assert unit[1] == list(range(index - 4, index + 1))
+            starts.append(index - 4)
+        if stream.pending_start is not None:
+            assert stream.pending_start == (starts[-1] + step if starts else 0)
+    assert starts == list(range(0, 13, step))
+    trailing = stream.trailing_window()
+    if starts[-1] + 4 == 16:
+        assert trailing is None
+    else:
+        assert trailing is not None and trailing[1] == list(range(12, 17))

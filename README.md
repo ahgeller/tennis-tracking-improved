@@ -87,14 +87,15 @@ python clean_tracker.py --device 1 --conf 0.55
 
 ## Ball detector weights: two networks, for now
 
-The tracker runs either of two ball-detector networks and picks by the suffix of
-the weights file. Nothing else changes: same video, same JSON, same selector.
+The tracker runs any of four ball-detector networks and picks by the weights
+file. Nothing else changes: same video, same JSON, same selector.
 
 | weights file | network | status |
 |---|---|---|
 | `.npz` (default: `models/gridtracknet_weights_torch.npz`) | GridTrackNet, 48x27 grid | the bundled detector |
 | `.pt` naming `heatmap_s4` | HeatmapNet, 192x108 heat map (`tennis_tracker/heatmapnet.py`) | candidate, trained on the `train` branch |
 | `.pt` naming `memory_s4` | MemoryNet, HeatmapNet plus a memory carried between units (`tennis_tracker/memorynet.py`) | candidate, fine-tuned from a HeatmapNet winner |
+| `.pt` naming `heatmap_s2` | HeatmapNetS2, HeatmapNet with one more decoder block, 384x216 heat map (`tennis_tracker/heatmapnet_s2.py`) | candidate, fine-tuned from a HeatmapNet winner |
 
 ```powershell
 python clean_tracker.py --input path	o\match.mp4                        bundled GridTrackNet
@@ -102,14 +103,21 @@ python clean_tracker.py --input path	o\match.mp4 --weights best.pt      the heat
 ```
 
 The tracker picks by the suffix and, for a `.pt`, by the `arch` the file names
-inside. All three are kept only until the held-out comparison picks one; the
-losers are then removed and the winner becomes the default. The training
+inside. All four are kept only until the held-out comparison picks one; the
+losers are then removed and the winner becomes the default.
+
+The prepass starts a five-frame unit at every frame of a phase and averages the
+answers each frame gets before decoding it once (`Config.gridtracknet_window_step`,
+1; the default since 2026-10-26, when it measured fewer false alarms at higher
+recall on held-out clips, raw and through the selector, for 1.5x the prepass
+time). Setting it to 5 is the prepass as it was, one unit per frame; a stateful
+model takes 5 whatever is set. The training
 playbook with that comparison is the README of the `train` branch; the section
 below says what to delete for each loser (the trainer items live on `train`).
 
 ## Keeping one network
 
-Three architectures exist so that one can be chosen; the two that lose are
+Four architectures exist so that one can be chosen; the ones that lose are
 deleted, not kept behind a flag. For each, the whole of it is:
 
 - `gridtracknet`: `tennis_tracker/gridtracknet.py` stays (its loader, resize and
@@ -126,10 +134,11 @@ deleted, not kept behind a flag. For each, the whole of it is:
   `memory_s4`, which subclasses it, so the class then stays as its base), its entry
   in `ball_models` (`HEATMAP_S4` in `ARCHITECTURES`, `MODEL_CLASSES`,
   `WEIGHTS_SUFFIX`, `_MODULES`), `HEATMAP_S4` in `loop.LOSSES` (the loss itself
-  stays if `memory_s4` survives), the trainer's `--arch` choice and the parent
-  start (`memorynet.PARENT_ARCH`, `from_heatmap`, `args.starting_arch`) if
-  `memory_s4` goes too, the notebook `ARCH` option and its parent-start check,
-  and `tests/test_heatmapnet.py` with the heatmap cases of the trainer tests.
+  stays if `memory_s4` or `heatmap_s2` survives), the trainer's `--arch` choice and
+  the parent start (`ball_models.PARENTS`, `from_parent`, `PARENT_START_NOTE`,
+  each child's `from_heatmap`, `args.starting_arch`) if both children go too, the
+  notebook `ARCH` option and its parent-start check, and `tests/test_heatmapnet.py`
+  with the heatmap cases of the trainer tests.
 - `memory_s4`: `tennis_tracker/memorynet.py`, `tests/test_memorynet.py`, its entry
   in `ball_models` (`MEMORY_S4` in `ARCHITECTURES`, `MODEL_CLASSES`,
   `WEIGHTS_SUFFIX`, `_MODULES`) and the `STATEFUL` flag of the contract, the
@@ -143,6 +152,14 @@ deleted, not kept behind a flag. For each, the whole of it is:
   parent start and the chain data path in `train`, `chain` in `RECIPE_FIELDS`
   and `config.json`, the notebook `ARCH` option and its parent-start check, and
   the chain cases of the trainer, dataset and loop tests.
+- `heatmap_s2`: `tennis_tracker/heatmapnet_s2.py`, `tests/test_heatmapnet_s2.py`,
+  its entry in `ball_models` (`HEATMAP_S2` in `ARCHITECTURES`, `MODEL_CLASSES`,
+  `WEIGHTS_SUFFIX`, `_MODULES`, `PARENTS` and `PARENT_START_NOTE`; `from_parent`
+  itself stays while `memory_s4` does), `HEATMAP_S2` in `loop.LOSSES`,
+  `HeatmapNet.features` folds back into `decode` (it was split out for this
+  subclass), the trainer's `--arch` choice and help, the notebook `ARCH` option,
+  its staged module and its parent-start check, stage 3c of the `train` README,
+  and the `heatmap_s2` cases of the ball-models, trainer and loop tests.
 
 In every case `read_record` with `arch=None` and `arch_of`'s record read stay
 only while two `.pt` architectures share the suffix; with one left, `arch_of`
