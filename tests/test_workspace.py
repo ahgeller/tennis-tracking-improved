@@ -110,7 +110,7 @@ def test_tennis_workspace_relocates_the_workspace_without_touching_the_code_path
     out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, check=True)
     lines = out.stdout.splitlines()
     assert lines[:3] == [str(tmp_path.resolve()), str(tmp_path.resolve() / "labels"), str(tmp_path.resolve() / "clips.csv")]
-    assert lines[3] == str(ROOT / "models" / "gridtracknet_weights_torch.npz")
+    assert lines[3] == str(ROOT / "models" / "ball_detector.pt")
     env.pop("TENNIS_WORKSPACE")
     out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, check=True)
     assert out.stdout.splitlines()[0] == str(ROOT / "finetune")
@@ -149,7 +149,7 @@ def test_the_layout_is_one_object_and_nothing_else_holds_a_workspace_path(tmp_pa
     monkeypatch.undo()
     monkeypatch.setenv(workspace.WORKSPACE_VARIABLE, str(tmp_path / "elsewhere"))
     assert workspace.current().root == (tmp_path / "elsewhere").resolve()
-    assert workspace.current().repo_weights == ROOT / "models" / "gridtracknet_weights_torch.npz"
+    assert workspace.current().repo_weights == ROOT / "models" / "ball_detector.pt"
     monkeypatch.delenv(workspace.WORKSPACE_VARIABLE)
     assert workspace.current().root == ROOT / "finetune"
 

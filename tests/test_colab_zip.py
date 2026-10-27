@@ -38,7 +38,7 @@ def test_the_zip_holds_every_section_the_notebook_unpacks(workspace_dir, tmp_pat
         names = set(archive.namelist())
         assert all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist())
         assert archive.read(f"{TOP}/videos/rally.mp4") == b"not really mp4"
-        assert archive.read(f"{TOP}/models/gridtracknet_weights_torch.npz") == b"weights"
+        assert archive.read(f"{TOP}/models/ball_detector.pt") == b"weights"
     assert {n for n in names if n.startswith(f"{TOP}/videos/")} == {f"{TOP}/videos/rally.mp4", f"{TOP}/videos/serve.avi"}
     assert {n for n in names if n.startswith(f"{TOP}/labels/")} == {
         f"{TOP}/labels/{name}" for name in ("rally_ball.csv", "rally_ball.review.json", "rally_ball.suspect.json",

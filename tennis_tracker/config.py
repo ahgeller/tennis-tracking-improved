@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from tennis_tracker.paths import COURT_ENGINE, GRIDTRACKNET_WEIGHTS, PLAYER_ENGINE
+from tennis_tracker.paths import COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE
 
 
 @dataclass
@@ -9,8 +9,8 @@ class Config:
     # paths
     input_video: str = r"input_videos/TMP.mp4"
     output_video: str = "output_videos/prof_test.mp4"
-    # The ball detector: .npz GridTrackNet, .pt HeatmapNet or MemoryNet by its record (``ball_models``), .engine TensorRT.
-    model_path: str = str(GRIDTRACKNET_WEIGHTS)
+    # The ball detector: .pt HeatmapNet (the default; ``ball_models`` reads its record), .npz GridTrackNet, .engine TensorRT.
+    model_path: str = str(BALL_WEIGHTS)
 
     # Ball detector
     ball_class_name: Optional[str] = None

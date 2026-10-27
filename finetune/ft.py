@@ -302,7 +302,7 @@ def run_cli(argv: List[str]) -> int:
     p = subparsers.add_parser("hints", help="hints.py: train | list | use <version> | sheet <clip> (its arguments pass through)")
     p.set_defaults(func=cmd_hints, forwards=True)
     p = subparsers.add_parser("promote", help="copy the winning weights over the tracker's model (with backup)")
-    p.add_argument("--weights", help="which .npz to promote (default: finetune/models/gridtracknet_best.npz)")
+    p.add_argument("--weights", help="which weights to promote (default: finetune/models/ball_best.pt); the suffix must be the tracker's")
     p.set_defaults(func=cmd_promote)
     p = subparsers.add_parser("camera", help="measure camera motion per clip and tag clips.csv fixed/moving")
     p.add_argument("--clips", nargs="*", help="clip stems or globs")

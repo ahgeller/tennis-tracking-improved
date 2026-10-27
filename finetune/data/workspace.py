@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Union
 
 from finetune.data.fileio import atomic_csv, write_atomic
-from tennis_tracker.paths import GRIDTRACKNET_WEIGHTS
+from tennis_tracker.paths import BALL_WEIGHTS
 
 WORKSPACE_VARIABLE = "TENNIS_WORKSPACE"       # names another workspace folder, for tests and spare copies
 DEFAULT_WORKSPACE = Path(__file__).resolve().parents[1]     # the finetune/ folder itself
@@ -42,7 +42,7 @@ MANIFEST_NAME = "clips.csv"
 EXCLUDE_NAME = "exclude.txt"
 REVIEW_STATUS_NAME = "review_status.json"
 HOLDOUTS_NAME = "holdouts.json"               # the named held-out sets (finetune.data.holdouts)
-BEST_WEIGHTS_NAME = "gridtracknet_best.npz"   # the last training winner, under models/
+BEST_WEIGHTS_NAME = "ball_best.pt"            # the last training winner, under models/ (a GridTrackNet run writes the .npz)
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".mkv", ".avi", ".m4v"})
 
 LABEL_SUFFIX = "_ball.csv"
@@ -74,7 +74,7 @@ class Workspace:
     """One workspace folder and where it keeps things. Every path is derived from ``root`` when
     asked, so a ``Workspace`` is the whole layout in one value."""
     root: Path
-    repo_weights: Path = GRIDTRACKNET_WEIGHTS    # the weights the tracker runs: not under root, promoted to from it
+    repo_weights: Path = BALL_WEIGHTS    # the weights the tracker runs: not under root, promoted to from it
 
     @property
     def videos(self) -> Path:

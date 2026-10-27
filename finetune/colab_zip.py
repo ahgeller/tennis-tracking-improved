@@ -8,7 +8,7 @@ the outputs). It unpacks a single ``tennis_finetune_colab.zip`` whose entries al
     tennis_finetune/videos/<every video in the workspace>
     tennis_finetune/labels/<every file in the workspace labels folder>
     tennis_finetune/clips.csv, review_status.json, holdouts.json, exclude.txt
-    tennis_finetune/models/gridtracknet_weights_torch.npz    (the tracker's weights: the start)
+    tennis_finetune/models/ball_detector.pt                  (the tracker's weights: the start)
     tennis_finetune/code/<the trainer's import closure>      (the notebook's REQUIRED list)
 
 ``--code-only`` writes ``tennis_finetune_code.zip`` with the records and the code alone; the
@@ -39,7 +39,7 @@ from typing import Dict, List
 from finetune.data import workspace as ws
 from finetune.data.fileio import replace_file, temporary_for
 from finetune.data.workspace import videos_in
-from tennis_tracker.paths import GRIDTRACKNET_WEIGHTS, ROOT
+from tennis_tracker.paths import BALL_WEIGHTS, ROOT
 
 NOTEBOOK = ROOT / "finetune" / "GridTrackNet_FineTune_Colab.ipynb"
 TOP = "tennis_finetune"                                 # the folder every entry sits under
@@ -107,7 +107,7 @@ def plan_zip(code_only: bool = False) -> ZipPlan:
     if not code_only:
         if not layout.repo_weights.is_file():
             raise ColabZipError(f"{layout.repo_weights} is missing; the notebook starts from the tracker's weights")
-        plan.add("models", f"models/{GRIDTRACKNET_WEIGHTS.name}", layout.repo_weights)
+        plan.add("models", f"models/{BALL_WEIGHTS.name}", layout.repo_weights)
     for name in staged_files():
         if not (ROOT / name).is_file():
             raise ColabZipError(f"{name} is in the notebook's REQUIRED list but not in the repository")

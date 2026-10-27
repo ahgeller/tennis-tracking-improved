@@ -125,7 +125,7 @@ def test_the_settings_cell_exposes_the_architectures_and_names_the_files_by_them
     file, judged by the record inside a .pt, said early, which the trainer refuses anyway; the
     staging cell lists the modules the switch imports."""
     settings = code_cell_starting("#@title Training settings")
-    assert 'ARCH = "gridtracknet"       #@param ["gridtracknet", "heatmap_s4"]' in settings
+    assert 'ARCH = "heatmap_s4"         #@param ["gridtracknet", "heatmap_s4"]' in settings
     assert "'--arch', ARCH," in settings and "'--save', str(RUN / ('winner' + SUFFIX))" in settings
     assert "SUFFIX = '.npz' if ARCH == 'gridtracknet' else '.pt'" in settings
     assert "START = DATA / 'models' / START_WEIGHTS" in settings and "START = WORK / START_WEIGHTS" in settings

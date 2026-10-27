@@ -491,11 +491,13 @@ def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict], resume
     """Settle which network the run trains, what it starts from and where it saves: ``args.arch``
     is ``--arch``, or without it the architecture of the run being continued (`resumed`, the
     ``config.json`` a ``--resume`` read, so a resume names it no more than it names ``--epochs``)
-    or of the selection run (an ``--all-clips`` run inherits it), else GridTrackNet; an ``--arch``
-    that contradicts either is refused here, in one line that names the run (``same_run`` would
-    refuse it too, but after ``--weights`` had been judged by the wrong architecture). A fine-tune
-    starts from ``--weights``, so they must be the architecture's own file (``weights_suffix``,
-    the architecture read off them by ``arch_of``, which reads a ``.pt`` record); a
+    or of the selection run (an ``--all-clips`` run inherits it), else the architecture of
+    ``--weights`` (the tracker's model, by default: a plain run fine-tunes the network the tracker
+    runs); an ``--arch`` that contradicts a run is refused here, in one line that names it
+    (``same_run`` would refuse it too, but after ``--weights`` had been judged by the wrong
+    architecture). A fine-tune starts from ``--weights``, so they must be the architecture's own
+    file (``weights_suffix``, the architecture read off them by ``arch_of``, which reads a ``.pt``
+    record); a
     ``--from-scratch`` run reads them only for the hard-negative prepass, which takes any
     architecture's, except that a GridTrackNet scratch run needs the ``.npz`` as the template its
     weights are written into. A mismatch is a ValueError. ``--save`` is given the architecture's
@@ -506,7 +508,7 @@ def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict], resume
     elif selection_run:
         inherited, source = selection_run["recipe"]["arch"], "the selection run, which trained"
     if args.arch is None:
-        args.arch = inherited or GRIDTRACKNET
+        args.arch = inherited or arch_of(args.weights)
     elif inherited and args.arch != inherited:
         raise ValueError(f"--arch {args.arch} does not follow {source} {inherited}; leave --arch out to inherit it")
     suffix = weights_suffix(args.arch)
@@ -667,15 +669,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--videos", type=Path, default=layout.videos)
     parser.add_argument("--labels", type=Path, default=layout.labels)
     parser.add_argument("--arch", choices=ARCHITECTURES, default=None,
-                        help=f"The network: {GRIDTRACKNET} (the default; a --resume or --selection-run inherits its run's) "
-                             f"or {HEATMAP_S4}, the stride-4 heat-map network (a .pt file, naming its architecture inside)")
+                        help=f"The network: {HEATMAP_S4}, the stride-4 heat-map network (a .pt file, naming its architecture "
+                             f"inside), or {GRIDTRACKNET} (an .npz); without it, a --resume or --selection-run inherits its "
+                             f"run's, else the architecture of --weights (the tracker's model)")
     parser.add_argument("--weights", type=Path, default=layout.repo_weights,
                         help="The starting model of a fine-tune, the architecture's own file (.npz for gridtracknet, .pt "
                              f"for {HEATMAP_S4}); with --from-scratch, any "
                              "architecture's, read only by the --oversample-false-alarms prepass (a gridtracknet scratch "
                              "run still needs the .npz, the template it saves into)")
     parser.add_argument("--save", type=Path, default=layout.best_weights,
-                        help="Where the winner is copied (default: the workspace's gridtracknet_best.npz); given the "
+                        help="Where the winner is copied (default: the workspace's ball_best.pt); given the "
                              "other architecture's suffix, it is corrected to the right one")
     parser.add_argument("--data-dir", type=Path, default=layout.cache / "data")
     parser.add_argument("--run-dir", type=Path, default=layout.runs / "train")

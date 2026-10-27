@@ -53,7 +53,7 @@ has never seen.
 ```
 ARCH = "heatmap_s4"        (or "gridtracknet" to repeat the old recipe)
 MODE = "scratch"
-START_WEIGHTS = "gridtracknet_weights_torch.npz"
+START_WEIGHTS = "ball_detector.pt"
 HOLDOUT = "mixed_v1"
 SELECTION_RUN = ""
 EPOCHS = 40
@@ -114,8 +114,8 @@ score it on the held-out set, per source, against the bundled weights:
 ```
 
 The log has one `source=` line each for custom, prof and grid. The bundled
-weights trained on the custom clips, so compare on prof and grid; those are the
-only unseen numbers for both. The bar for a new architecture: at least 2 points
+weights (ctrl1, since 2026-10-26) trained on the clips outside `mixed_v1`, so
+every held-out line compares fairly. The bar for a new architecture: at least 2 points
 more recall at equal or lower false alarm, and the same commands with
 `--mode pipeline` (the whole tracker, selector included) not worse.
 
@@ -205,11 +205,14 @@ record read stay only so that a stale record is refused by name; if that is not
 wanted, `arch_of` can go back to the suffix alone.
 
 The winner's weights are promoted by copying them over the default path in
-`tennis_tracker/paths.py` (`GRIDTRACKNET_WEIGHTS`, what `Config.model_path`
-defaults to); for a `.pt` winner that default's suffix changes to `.pt` (and the
-file's name with it, say `models/ball_detector.pt`), the bundled `.npz` is
-retired, and `ft.py promote` learns the new file. Record the promotion in
-`audit/records/gridtracknet_recipe_2026-10.md` with the stage 3 numbers.
+`tennis_tracker/paths.py` (`BALL_WEIGHTS`, `models/ball_detector.pt`, what
+`Config.model_path` defaults to), which `ft.py promote` does with a backup. On
+2026-10-26 that file became the heat-map control run's winner (ctrl1, the ledger
+has the numbers); the GridTrackNet `.npz` files moved to `models/legacy/`
+(`gridtracknet_finetuned.npz`, the previous default, and `gridtracknet_upstream.npz`,
+the export it was fine-tuned from) beside the old YOLO `ball.engine`, and
+`clean_tracker.py --weights` still runs any of them. Record every promotion in
+`audit/records/gridtracknet_recipe_2026-10.md` with its held-out numbers.
 
 ## Where things are
 

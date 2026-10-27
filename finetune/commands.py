@@ -239,6 +239,11 @@ def cmd_promote(args: argparse.Namespace) -> int:
     if not source.is_file():
         print(f"No weights at {source}; train first (python finetune/ft.py train)")
         return 1
+    if source.suffix != layout.repo_weights.suffix:
+        print(f"{source.name} is a {source.suffix} file; the tracker reads the architecture off the suffix of "
+              f"{layout.repo_weights.name}, so only a {layout.repo_weights.suffix} winner can be promoted "
+              f"(the other network runs with clean_tracker.py --weights {source})")
+        return 1
     if layout.repo_weights.is_file():
         if sha8(source) == sha8(layout.repo_weights):
             print(f"{layout.repo_weights.name} already is {source.name}; nothing to do")

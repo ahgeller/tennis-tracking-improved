@@ -46,13 +46,13 @@ def test_training_self_test_passes():
 # --------------------------------------------------------------------------- the architecture switch
 
 def test_a_fine_tune_starts_from_its_own_architectures_weights_or_is_refused_in_one_line(tmp_path, capsys):
-    """Without --from-scratch, --weights is the starting model: a heatmap_s4 fine-tune from the
-    GridTrackNet .npz (the default) is refused before any cache or run folder is written, as is a
-    gridtracknet fine-tune from a .pt; a heatmap_s4 .pt starts a heatmap_s4 fine-tune, and the
-    record inside the .pt decides, so a .pt naming an unknown architecture is refused."""
+    """Without --from-scratch, --weights is the starting model: a heatmap_s4 fine-tune from a
+    GridTrackNet .npz is refused before any cache or run folder is written, as is a gridtracknet
+    fine-tune from a .pt; a heatmap_s4 .pt starts a heatmap_s4 fine-tune, and the record inside
+    the .pt decides, so a .pt naming an unknown architecture is refused."""
     videos, labels = workspace(tmp_path, ["a", "b"])
     argv = ["--videos", str(videos), "--labels", str(labels), "--data-dir", str(tmp_path / "cache"),
-            "--run-dir", str(tmp_path / "run"), "--arch", "heatmap_s4"]
+            "--run-dir", str(tmp_path / "run"), "--arch", "heatmap_s4", "--weights", str(tmp_path / "old.npz")]
     assert training.main(argv) == 1
     error = capsys.readouterr().err
     assert "[error] --weights" in error and "is a gridtracknet file, but the starting model of a heatmap_s4 fine-tune " \
@@ -87,7 +87,7 @@ def test_a_scratch_run_reads_either_weights_for_the_prepass_but_gridtracknet_nee
     args = parser.parse_args(["--arch", "heatmap_s4", "--from-scratch", "--weights", str(pt_record(tmp_path / "old.pt")),
                               "--save", str(tmp_path / "w.pt")])
     training.resolve_arch(args, None)
-    args = parser.parse_args(["--from-scratch", "--weights", str(tmp_path / "old.pt")])
+    args = parser.parse_args(["--arch", "gridtracknet", "--from-scratch", "--weights", str(tmp_path / "old.pt")])
     with pytest.raises(ValueError, match="the template the trained weights are written into must be a gridtracknet one"):
         training.resolve_arch(args, None)
 
@@ -120,10 +120,14 @@ def test_train_fine_tunes_a_heatmap_winner_from_its_pt(tmp_path, capsys):
 
 
 def test_resolve_arch_defaults_inherits_and_corrects_the_save_suffix(tmp_path, capsys):
-    """No --arch: GridTrackNet, or the selection run's architecture; one that contradicts the
-    selection run is refused; --save takes the architecture's suffix, with a line saying so."""
+    """No --arch: the architecture of --weights (the tracker's heatmap_s4 by default, gridtracknet
+    for an .npz), or the selection run's; one that contradicts the selection run is refused;
+    --save takes the architecture's suffix, with a line saying so."""
     parser = training.build_parser()
-    args = parser.parse_args(["--save", str(tmp_path / "best.npz")])
+    args = parser.parse_args(["--save", str(tmp_path / "best.pt")])
+    training.resolve_arch(args, None)
+    assert args.arch == "heatmap_s4" and args.save == tmp_path / "best.pt" and capsys.readouterr().out == ""
+    args = parser.parse_args(["--weights", str(tmp_path / "old.npz"), "--save", str(tmp_path / "best.npz")])
     training.resolve_arch(args, None)
     assert args.arch == "gridtracknet" and args.save == tmp_path / "best.npz" and capsys.readouterr().out == ""
     args = parser.parse_args(["--arch", "heatmap_s4", "--from-scratch", "--save", str(tmp_path / "gridtracknet_best.npz")])
@@ -897,7 +901,9 @@ def test_resume_needs_a_checkpoint_and_the_run_it_belongs_to(tmp_path, capsys):
     (run_dir / "checkpoint.pt").write_bytes(b"not a checkpoint")
     assert training.main([*argv, "--resume"]) == 1
     assert "readable config.json" in capsys.readouterr().err
-    config = training.run_config(training.build_parser().parse_args(argv), ["a", "b"], ["b"], {})
+    recorded = training.build_parser().parse_args(argv)
+    training.resolve_arch(recorded, None)
+    config = training.run_config(recorded, ["a", "b"], ["b"], {})
     config["epochs"], config["lr"] = 3, 0.3
     del config["lr_schedule"]                      # a run recorded before the schedule existed: its lr is the rate
     (run_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
@@ -923,7 +929,7 @@ def test_resume_through_main_keeps_the_run_and_raises_its_epochs(tmp_path, capsy
         write_labels(tmp_path / "labels" / f"{clip}_ball.csv", {f: (1.0 + f, 1.0) for f in range(7)}, *SIZE)
     run_dir = tmp_path / "run"
     argv = ["--videos", str(tmp_path / "videos"), "--labels", str(tmp_path / "labels"), "--data-dir", str(tmp_path / "cache"),
-            "--run-dir", str(run_dir), "--save", str(tmp_path / "save.npz"), "--device", "cpu", "--workers", "0",
+            "--run-dir", str(run_dir), "--save", str(tmp_path / "save.pt"), "--device", "cpu", "--workers", "0",
             "--from-scratch", "--max-train-steps", "1", "--max-val-steps", "1", "--prep-workers", "1"]
     recalls = iter([0.5, 0.6, 0.7])
     with patch.object(training, "score_weights", side_effect=lambda *_: training.metrics_of(next(recalls), 0.0)):
@@ -935,7 +941,7 @@ def test_resume_through_main_keeps_the_run_and_raises_its_epochs(tmp_path, capsy
         assert [row["epoch"] for row in results_of(run_dir)] == ["1", "2"]
         assert json.loads((run_dir / "config.json").read_text(encoding="utf-8"))["epochs"] == 2
         winner = json.loads((run_dir / "winner.json").read_text(encoding="utf-8"))
-        assert winner["best_epoch"] == 2 and winner["metrics"]["recall"] == 0.6 and (tmp_path / "save.npz").exists()
+        assert winner["best_epoch"] == 2 and winner["metrics"]["recall"] == 0.6 and (tmp_path / "save.pt").exists()
         assert training.main([*argv, "--resume"]) == 0                 # --epochs defaults to the run's: nothing left to train
         out = capsys.readouterr().out
         assert "after epoch 2 of 2: the epochs are done" in out and "[train] epoch" not in out

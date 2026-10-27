@@ -21,7 +21,7 @@ assert ROOT == _REPOSITORY, "tests/ must sit directly under the repository tenni
 @pytest.fixture
 def workspace_dir(tmp_path, monkeypatch):
     """Point the fine-tuning workspace (``finetune.data.workspace``) at a fresh folder under tmp_path,
-    with empty ``labels/`` and ``videos/`` and the tracker's weights redirected to ``models/tracker.npz``
+    with empty ``labels/`` and ``videos/`` and the tracker's weights redirected to ``models/tracker.pt``
     under it. The finetune modules read every path from ``workspace.current()`` when called, so
     replacing that one function moves all of them; no real label, video or model is touched.
     Returns the folder."""
@@ -30,7 +30,7 @@ def workspace_dir(tmp_path, monkeypatch):
     root = tmp_path / "workspace"
     (root / "labels").mkdir(parents=True)
     (root / "videos").mkdir()
-    relocated = workspace.Workspace(root, repo_weights=root / "models" / "tracker.npz")
+    relocated = workspace.Workspace(root, repo_weights=root / "models" / "tracker.pt")
     monkeypatch.setattr(workspace, "current", lambda: relocated)
     return root
 

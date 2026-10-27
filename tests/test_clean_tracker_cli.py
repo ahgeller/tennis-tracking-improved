@@ -26,19 +26,19 @@ def test_cli_paths_reach_the_config_and_the_output_folder_is_made(tmp_path):
     assert status == 0                                             # no --annotations: nothing to validate
     assert cfg.input_video == str((tmp_path / "in.mp4").resolve())
     assert cfg.tracking_json == str((tmp_path / "t.json").resolve())
-    assert cfg.model_path.endswith("gridtracknet_weights_torch.npz")
+    assert cfg.model_path.endswith("ball_detector.pt")
     assert (tmp_path / "out").is_dir()
 
 
-def test_weights_default_to_the_bundled_gridtracknet_and_a_pt_path_reaches_the_config_as_given(tmp_path):
+def test_weights_default_to_the_bundled_heatmapnet_and_another_path_reaches_the_config_as_given(tmp_path):
     """--weights feeds Config.model_path, whose suffix picks the detector: the default is the
-    bundled GridTrackNet file, and a HeatmapNet .pt is passed through unchanged."""
-    from tennis_tracker.paths import GRIDTRACKNET_WEIGHTS
-    assert clean_tracker._parser().get_default("weights") == str(GRIDTRACKNET_WEIGHTS)
+    bundled HeatmapNet file, and another path is passed through unchanged."""
+    from tennis_tracker.paths import BALL_WEIGHTS
+    assert clean_tracker._parser().get_default("weights") == str(BALL_WEIGHTS)
     _, cfg = _run_main(tmp_path, ["--weights", "runs/h1/best.pt", "--no-video"])
     assert cfg.model_path == "runs/h1/best.pt"
     _, cfg = _run_main(tmp_path, ["--no-video"])
-    assert cfg.model_path == str(GRIDTRACKNET_WEIGHTS)
+    assert cfg.model_path == str(BALL_WEIGHTS)
 
 
 def test_cli_flags_reach_the_config(tmp_path):

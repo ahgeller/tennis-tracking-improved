@@ -4,7 +4,7 @@ output/
 AiFolder/
 .venv/
 models/*finetuned*.npz
-models/*legacy*.npz
+models/legacy/gridtracknet_upstream.npz
 
 # fine-tuning workspace: videos, caches, runs and drafts are regenerable; own labels are kept
 finetune/videos/

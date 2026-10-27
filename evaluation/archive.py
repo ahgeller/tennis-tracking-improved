@@ -45,11 +45,11 @@ from finetune.data import workspace as ws
 from finetune.data.workspace import (HOLDOUTS_NAME, MANIFEST_NAME, clip_of, find_video, natural_key, read_exclusions,
                                      read_manifest, video_meta)
 from evaluation.pipeline_score import ClipScore, score_pipeline_clip
-from tennis_tracker.paths import GRIDTRACKNET_WEIGHTS, ROOT
+from tennis_tracker.paths import BALL_WEIGHTS, ROOT
 
 ARCHIVE_VARIABLE = "TENNIS_ARCHIVE"
 MODELS = {
-    "gridtracknet": GRIDTRACKNET_WEIGHTS,
+    "gridtracknet": BALL_WEIGHTS,
 }
 DEFAULT_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 PER_CLIP_CONF = 0.5         # the per-clip table and the offset report use this threshold

@@ -86,12 +86,17 @@ def test_promote_backs_up_the_tracker_weights_and_copies_the_winner_atomically(w
     assert not list(layout.models.glob("*.before_promote_*"))
     layout.best_weights.write_bytes(b"newer weights")
     assert ft.run_cli(["promote"]) == 0
-    backup, = layout.models.glob("tracker.npz.before_promote_*")
+    backup, = layout.models.glob("tracker.pt.before_promote_*")
     assert backup.read_bytes() == b"new weights" and layout.repo_weights.read_bytes() == b"newer weights"
     assert not list(layout.models.glob("*.tmp"))
-    other = workspace_dir / "other.npz"
+    other = workspace_dir / "other.pt"
     other.write_bytes(b"explicit")
     assert ft.run_cli(["promote", "--weights", str(other)]) == 0
+    assert layout.repo_weights.read_bytes() == b"explicit" and len(list(layout.models.glob("*.before_promote_*"))) == 2
+    gridtracknet = workspace_dir / "other.npz"                        # the other network's suffix: refused, nothing written
+    gridtracknet.write_bytes(b"a GridTrackNet winner")
+    assert ft.run_cli(["promote", "--weights", str(gridtracknet)]) == 1
+    assert "only a .pt winner can be promoted" in capsys.readouterr().out
     assert layout.repo_weights.read_bytes() == b"explicit" and len(list(layout.models.glob("*.before_promote_*"))) == 2
 
 

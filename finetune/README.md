@@ -26,7 +26,7 @@ The same actions exist as commands for scripts and power use:
 | `ft.py camera` | measure camera motion per clip and tag `clips.csv` `fixed` / `moving` (the background channel only learns from fixed) |
 | `ft.py eval` | raw detector recall / wrong / false-alarm on the reviewed clips not in `exclude.txt` (`--clips` narrows; `--all` scores every labelled clip; `--weights`) |
 | `ft.py train ...` | fine-tune or train from scratch; keeps the better of new vs starting weights |
-| `ft.py promote` | make the winner the tracker's model (`models/gridtracknet_weights_torch.npz`, old one backed up) |
+| `ft.py promote` | make the winner the tracker's model (`models/ball_detector.pt`, old one backed up) |
 | `ft.py paths` | which python, which folders |
 | `ft.py colab-zip` | build `output/tennis_finetune_colab.zip`, the one file the Colab notebook unpacks (videos, labels, records, weights, trainer code) |
 
@@ -46,7 +46,7 @@ finetune/
               <clip>_ball.review.json your review progress + zoom
   clips.csv   one row per clip: source, group, size, fps, stride, label counts (written by import_data.py)
   holdouts.json  named held-out sets of whole recordings (`mixed_v1`), for --holdout
-  models/     gridtracknet_best.npz   the winner of the last training run
+  models/     ball_best.pt            the winner of the last training run (a GridTrackNet run writes ball_best.npz)
   runs/       <tag>/results.csv, config.json, winner.json, best.npz, best_loss.npz, last.npz, checkpoint.pt (for --resume),
               <tag>/epochs/epoch_NNN.npz  every scored epoch's weights (31 MB each; --no-keep-epochs drops them)
   cache/      768x432 lossless PNG frames (the tracker's own resize), one folder per clip; keyed on the video, a label edit only adds frames (safe to delete; about 8 GB for the 64 trainable clips, measured 7.9 GB)
@@ -153,7 +153,7 @@ separately). `ft.py check` flags files that break this rule.
 
    Pre-label with your **newest** model — the better the model, the less you
    click: `.\finetune.ps1 prelabel --clips night1 --weights
-   finetune\models\gridtracknet_best.npz` (`--source pipeline` uses the full
+   finetune\models\ball_best.pt` (`--source pipeline` uses the full
    tracker instead of the raw detector).
 
 2. **Correct** — `.\finetune.ps1 label night1`. Each label frame comes up
@@ -217,8 +217,9 @@ separately). `ft.py check` flags files that break this rule.
      changes the draw probability per source (0 removes it from training);
      `--epoch-units N` fixes how many windows an epoch draws (an epoch over
      everything is ~50k windows, about an hour on the 5080).
-   - `--arch heatmap_s4` trains the second architecture, `HeatmapNet`
-     (`tennis_tracker/heatmapnet.py`): a U-shaped encoder-decoder with skip
+   - `--arch` picks the network; without it the run trains the architecture of
+     `--weights`, the tracker's model by default. `heatmap_s4` is `HeatmapNet`
+     (`tennis_tracker/heatmapnet.py`), the tracker's network since 2026-10-26: a U-shaped encoder-decoder with skip
      connections answering on a 192x108 grid (stride 4) instead of
      GridTrackNet's 48x27, trained on a Gaussian heat target with CenterNet's
      focal loss. It takes the same five frames and answers in the same layout,
@@ -271,7 +272,7 @@ separately). `ft.py check` flags files that break this rule.
      them) so any epoch can be re-scored on the PC with `evaluate_archive.py
      --gridtracknet-weights` or picked by another rule later. A fine-tune ends
      by setting the best epoch against the starting weights on the same clips,
-     and only the winner is written to `models/gridtracknet_best.npz`: a
+     and only the winner is written to `models/ball_best.pt`: a
      fine-tune that lowers recall or adds wrong-object detections cannot
      replace a good model (a `--from-scratch` run has no starting weights to
      beat; its best epoch is the winner). `winner.json` records the decision
@@ -307,9 +308,9 @@ separately). `ft.py check` flags files that break this rule.
      finished held-out run's `TAG` makes it the `--all-clips` run that
      follows that run's recipe (`EPOCHS` 0 takes its best epoch).
 
-5. **Use it** — `.\finetune.ps1 promote` copies the winner over
-   `models/gridtracknet_weights_torch.npz` (the old file is kept as
-   `*.npz.before_promote_<timestamp>`) — only worth doing when `runs/<tag>/winner.json`
+5. **Use it** - `.\finetune.ps1 promote` copies the winner over
+   `models/ball_detector.pt` (the old file is kept as
+   `*.pt.before_promote_<timestamp>`) - only worth doing when `runs/<tag>/winner.json`
    says the new weights won. Then `.\finetune.ps1 eval` and
    `python -m evaluation.parity`. Go back to step 1 with `--weights` pointing at
    the new model. `.\finetune.ps1 status` at any point shows what is

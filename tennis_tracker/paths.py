@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / "models"
-GRIDTRACKNET_WEIGHTS = MODELS / "gridtracknet_weights_torch.npz"   # the ball detector the tracker runs
+BALL_WEIGHTS = MODELS / "ball_detector.pt"                         # the ball detector the tracker runs (a heatmap_s4 record)
 PLAYER_ENGINE = MODELS / "player.engine"                           # TensorRT player detector
 COURT_ENGINE = MODELS / "courtdetection.engine"                    # TensorRT court keypoint detector
 BOUNCE_MODEL = MODELS / "ctb_regr_bounce.cbm"                      # CatBoost bounce model (--court)
