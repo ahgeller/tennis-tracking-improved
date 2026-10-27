@@ -32,6 +32,23 @@ and 162; `grid` = grid_match8, 16 and 22, 1592 and 149) and over ALL (8515 and 5
 | replay harness | `evaluation/replay_selector.py`; `core.output_trajectory` split from the chooser (no behaviour change, golden JSON unchanged); the baseline every row below compares to | 3384 / 9 / 36 (30+6) | 3158 / 33 / 26 (26+0) | 1381 / 0 / 19 (19+0) | 7923 / 42 / 81 (75+6) / 134 |
 | 1b track_breaks | switch rule: adjacent rows of one track are the ball moving, not a switch (control: switches 202 to 67, the 135 were fast balls, 99 of them on the 720p prof clips); `chosen_pruned` counted through the tracks' `in_timeline` flag (control: 1 to 3, from `other_track`); the selector returns the chain's record as a pruned copy so a one-track chain's own record keeps every observation. Output unchanged | same | same | same | same |
 | 1c single-detection tracks | `build_tracks` keeps tracks of one observation (schema 5): never selected, written to the JSON, left off the candidate trails; the replay then sees every detection of a new run. Output unchanged; the control JSONs predate it, so the replay row is the same | same | same | same | same |
+| 2 two-level confidence | `SelectorConfig.start_conf` 0.50 over the detector floor `Config.conf` 0.40: a detection below it is `weak` (flagged per observation, schema 6), may not start a track or rejoin a stale one, and continues only a live track of `weak_continue_min_obs` (3) observations within `weak_gate_frac` (0.02 of the diagonal) of its Kalman prediction; otherwise dropped. The control JSONs hold nothing below 0.50, so the replay on them is unchanged; the 0.40 and 0.30 runs in `output/selector_baseline` (same 24 clips) are the measurement, see the rows below | same | same | same | same |
+
+The two-level rule, replayed on the runs that hold detections below 0.50 (`output/selector_baseline/conf_0.40`
+and `conf_0.30` in the main checkout, the same 24 clips; the chain as it stands is the row above each):
+
+| run | rule | custom hits / wrong / fa | prof hits / wrong / fa | grid hits / wrong / fa | ALL hits / wrong / fa / tracks |
+|---|---|---|---|---|---|
+| 0.40 | none (chain) | 3418 / 11 / 35 (29+6) | 3176 / 36 / 27 (26+1) | 1404 / 0 / 16 (16+0) | 7998 / 47 / 78 (71+7) / 137 |
+| 0.40 | 0.50, 3 obs, 0.02 | 3418 / 9 / 37 (31+6) | 3173 / 36 / 26 (25+1) | 1402 / 0 / 16 (16+0) | 7993 / 45 / 79 (72+7) / 138 |
+| 0.30 | none (chain) | 3449 / 10 / 36 (28+8) | 3195 / 42 / 40 (35+5) | 1433 / 0 / 17 (16+1) | 8077 / 52 / 93 (79+14) / 136 |
+| 0.30 | 0.50, 3 obs, 0.02 | 3449 / 8 / 37 (30+7) | 3188 / 39 / 37 (34+3) | 1416 / 0 / 17 (16+1) | 8053 / 47 / 91 (80+11) / 139 |
+
+Other settings (ALL, hits / wrong / fa): gate 0.03 or 0.05 at 3 observations, 0.40 run 7994 / 47 / 77, 0.30 run
+8054 / 51 / 90 and 8070 / 51 / 91; 2 observations at 0.02, 7994 / 45 / 79 and 8055 / 47 / 91; at 0.05, 7995 / 47 /
+77 and 8072 / 51 / 91. Reading: the rule is neutral at 0.40 (-5 hits, -2 wrong, +1 false alarm) and costs hits at
+0.30 (-24 for -5 wrong); the hits it loses are tracks that began on a weak detection. It is kept at the asked
+defaults for the owner's GPU run to judge; `start_conf` set to the detector floor switches it off.
 
 ## What the chooser is worth
 

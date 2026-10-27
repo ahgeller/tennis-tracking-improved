@@ -73,6 +73,7 @@ class ObservationJson(TypedDict):
     conf: float
     area: float
     on_motion: bool
+    weak: bool                          # below SelectorConfig.start_conf: it could only continue a track
 
 
 class TrackStartJson(TypedDict):
@@ -87,8 +88,8 @@ class TrackStartJson(TypedDict):
 class TrackJson(TypedDict):
     """A selector track: its score, how it began and ended, what the selection made of it and
     every detection it holds (``track_to_json``). Since schema 5 the list holds the tracks of one
-    detection too (``num_obs == 1``), so every detection the selector saw is in some track; the
-    selection never takes them."""
+    detection too (``num_obs == 1``), so every detection the selector saw is in some track (a weak
+    one that joined no track excepted: it is dropped); the selection never takes them."""
 
     track_id: int
     score: float
