@@ -232,7 +232,7 @@ def test_track_colour_is_stable_and_never_dark():
 def test_candidate_trails_follow_each_track_and_mark_the_chosen_one():
     a = track(1, 10.0, det(0, 50.0, 50.0), det(1, 60.0, 50.0), det(3, 80.0, 50.0))
     b = track(2, 30.0, det(0, 300.0, 200.0))
-    trails = CandidateTrackTrails([a, b], chosen_track=b)
+    trails = CandidateTrackTrails([a, b], chosen_track=b, fps=FPS)
     assert [int(t.track_id) for t in trails.tracks] == [2, 1]        # best score first
     assert trails.chosen_id == 2
     debug = blank()
@@ -245,7 +245,7 @@ def test_candidate_trails_follow_each_track_and_mark_the_chosen_one():
 
 def test_candidate_trails_are_bounded():
     long = track(1, 1.0, *(det(f, 10.0 + f, 10.0) for f in range(CANDIDATE_TRAIL_LEN + 20)))
-    trails = CandidateTrackTrails([long], chosen_track=None)
+    trails = CandidateTrackTrails([long], chosen_track=None, fps=FPS)
     debug = blank()
     for frame in range(CANDIDATE_TRAIL_LEN + 20):
         trails.advance_and_draw(debug, frame)
@@ -262,7 +262,7 @@ def test_advance_once_then_draw_on_two_targets_at_two_weights():
     weight and the tracking frame at the light one hold the same trails."""
     a = track(1, 10.0, det(0, 50.0, 50.0), det(1, 60.0, 50.0), det(2, 70.0, 50.0))
     b = track(2, 30.0, det(0, 300.0, 200.0), det(1, 300.0, 210.0), det(2, 300.0, 220.0))
-    trails = CandidateTrackTrails([a, b], chosen_track=b)
+    trails = CandidateTrackTrails([a, b], chosen_track=b, fps=FPS)
     debug, main = blank(), blank()
     for frame in range(3):
         trails.advance(frame)
@@ -287,10 +287,77 @@ def test_advance_once_then_draw_on_two_targets_at_two_weights():
 def test_the_debug_style_is_the_default_of_advance_and_draw():
     a = track(1, 10.0, det(0, 50.0, 50.0))
     by_default, explicit = blank(), blank()
-    CandidateTrackTrails([a], chosen_track=a).advance_and_draw(by_default, 0)
-    CandidateTrackTrails([a], chosen_track=a).advance_and_draw(explicit, 0, DEBUG_TRACK_STYLE)
+    CandidateTrackTrails([a], chosen_track=a, fps=FPS).advance_and_draw(by_default, 0)
+    CandidateTrackTrails([a], chosen_track=a, fps=FPS).advance_and_draw(explicit, 0, DEBUG_TRACK_STYLE)
     assert np.array_equal(by_default, explicit)
     assert _painted(by_default, track_color(1))[50, 50]                        # the chosen dot is filled
+
+
+def _straight_track(track_id, first_frame, last_frame, y=100.0, step=4.0):
+    """A track along row ``y``, ``step`` px per frame, seen on every frame of the range."""
+    return track(track_id, 10.0, *(det(f, 40.0 + step * f, y) for f in range(first_frame, last_frame + 1)))
+
+
+def _both_frames(trails, frame_index):
+    """The debug and main frames of ``frame_index`` after one ``advance``."""
+    debug, main = blank(), blank()
+    trails.advance(frame_index)
+    trails.draw(debug, frame_index, DEBUG_TRACK_STYLE)
+    trails.draw(main, frame_index, LIGHT_TRACK_STYLE)
+    return debug, main
+
+
+def test_a_style_counts_its_seconds_in_the_clip_frames():
+    assert LIGHT_TRACK_STYLE.trail_seconds == 1.0 and LIGHT_TRACK_STYLE.linger_seconds == 0.5
+    assert DEBUG_TRACK_STYLE.trail_seconds is None and DEBUG_TRACK_STYLE.linger_seconds is None
+    at_30, at_60 = (CandidateTrackTrails([], None, fps=fps) for fps in (30.0, 60.0))
+    assert (at_30.frames(1.0), at_30.frames(0.5)) == (30, 15)
+    assert (at_60.frames(1.0), at_60.frames(0.5)) == (60, 30)       # 60 fps doubles them
+    assert at_30.frames(0.001) == 1
+
+
+def _tinted(frame, color):
+    """Pixels of ``frame`` in ``color`` at a tenth strength or more (the light trail's tail is a
+    fifth, less the anti-aliasing)."""
+    color = np.array(color, np.int16)
+    return (frame >= color // 10).all(axis=2) & (frame <= color).all(axis=2) & frame.any(axis=2)
+
+
+def test_the_light_trail_holds_the_last_second_and_fades_while_the_debug_trail_keeps_its_stored_length():
+    trails = CandidateTrackTrails([_straight_track(1, 0, 90)], chosen_track=None, fps=FPS)
+    for frame in range(90):
+        trails.advance(frame)
+    debug, main = _both_frames(trails, 90)
+    color = track_color(1)
+    # The middle of the stroke from a frame to the next, clear of the anti-aliased joints.
+    mid = lambda frame, img: img[100, int(40 + 4 * frame) + 2]      # noqa: E731
+    assert tuple(mid(89, main)) == color                            # the head stroke at full strength
+    assert _between(mid(61, main), (0, 0, 0), color)                # the oldest of the 30 frames, blended to the frame
+    assert _tinted(main, color)[100, int(40 + 4 * 61) + 2]
+    assert not mid(60, main).any() and not mid(30, main).any()      # nothing older
+    strong = np.array(color) * 0.85                                 # a 1 px anti-aliased line, unfaded
+    assert (mid(61, debug) >= strong).all() and (mid(0, debug) >= strong).all()   # the debug trail: all 91 points
+
+
+def test_a_track_that_ended_leaves_the_main_frame_after_the_linger_and_stays_on_the_debug_frame():
+    ended = _straight_track(1, 0, 20)
+    trails = CandidateTrackTrails([ended], chosen_track=None, fps=FPS)
+    linger = trails.frames(LIGHT_TRACK_STYLE.linger_seconds)
+    assert linger == 15
+    for frame in range(20):
+        trails.advance(frame)
+    for frame in range(20, 20 + linger + 3):
+        debug, main = _both_frames(trails, frame)
+        on_debug, on_main = _tinted(debug, track_color(1)).any(), _tinted(main, track_color(1)).any()
+        assert on_debug                                             # the debug video keeps it
+        assert on_main == (frame - 20 <= linger), frame             # the main frame lets it go after the linger
+    # The last main frame that shows it still shows its (shrinking) trail, not just its dot.
+    trails = CandidateTrackTrails([ended], chosen_track=None, fps=FPS)
+    for frame in range(20 + linger):
+        trails.advance(frame)
+    _, main = _both_frames(trails, 20 + linger)
+    tinted = _tinted(main, track_color(1))[100]
+    assert tinted[int(40 + 4 * 15) + 2] and not tinted[int(40 + 4 * 0) + 2]   # frames 6 to 20 are its last second
 
 
 # --------------------------------------------------------------------------- the break rules
