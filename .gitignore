@@ -17,7 +17,8 @@ scorecard.png
 .claude/skills/desloppify/
 
 # model weights are proprietary: kept locally, never committed
-/models/
+/models/*
+!/models/README.md
 *.pt
 *.pth
 *.npz
