@@ -123,7 +123,20 @@ class LinearKalman:
 
 
 class BallKalmanFilter:
-    """Constant-velocity (x, y, vx, vy) filter with the projectile transition and adaptive gating."""
+    """A linear filter over (x, y, vx, vy) in image pixels and frames, driven by the ball's
+    detections.
+
+    Not a constant-velocity filter: ``predict`` steps the state with the projectile transition
+    (``_projectile_matrices``: drag on both velocities, gravity added to vy), so the prediction
+    between detections falls the way the ball does. ``update`` sets the measurement noise from
+    the detection's confidence (2 px at 1.0 to 7 px at 0.0), inflates it and the velocity
+    covariance when the measurement fails the chi-square gate (so an outlier bends the state
+    rather than snapping it), and flips a descending vy to ``-bounce_restitution`` times itself
+    when a measurement lands 10 px above the prediction: the bounce heuristic. The filter's
+    velocity is therefore a smoothed estimate that the association's gates read as the ball's
+    expected motion; right after a bounce or a gated outlier it is deliberately not the last
+    observed step.
+    """
 
     def __init__(self, x0: float, y0: float, cfg: SelectorConfig) -> None:
         self.cfg = cfg

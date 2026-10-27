@@ -38,70 +38,36 @@ _TINY_BRIDGE_PENALTY_MULT = 0.4
 # frames) is within the handover distance; see _add_disjoint_tracks.
 _HANDOVER_WINDOW_SEC = 0.1
 _HANDOVER_MIN_FRAMES = 2
-# A turn sharper than 0.6 pi (108 deg) between consecutive velocities is jitter.
-_SHARP_TURN_PI_FRAC = 0.6
-# A step more than 2.5x the median step is a jump.
-_JUMP_MEDIAN_SPEED_MULT = 2.5
 # score_tracks: player boxes are dilated by this much (px) for the
 # near-player fraction, which only weakly multiplies the score.
 _NEAR_PLAYER_MARGIN_PX = 60
 _NEAR_PLAYER_MULT_FLOOR, _NEAR_PLAYER_MULT_RANGE = 0.70, 0.30
 
 
-def _track_kinematics(trk: Track) -> Tuple[List[Tuple[float, float]], List[float], float, float]:
-    """Return cached (velocities, speeds, avg_speed, peak_speed) for a track."""
+def _track_speed_stats(trk: Track) -> Tuple[float, float]:
+    """(average, peak) speed in px/frame over the track's consecutive observations, cached on the
+    track for the repeated scoring passes (the key is what a grown track changes)."""
     obs = trk.observations
     if len(obs) < 2:
-        trk._kin_cache_key = (len(obs),)
-        trk._cached_velocities = []
-        trk._cached_speeds = []
-        trk._cached_speed_stats = (0.0, 0.0)
-        return trk._cached_velocities, trk._cached_speeds, 0.0, 0.0
-
-    key = (
-        len(obs),
-        int(obs[0].frame),
-        int(obs[-1].frame),
-        float(obs[-1].cx),
-        float(obs[-1].cy),
-    )
+        return 0.0, 0.0
+    key = (len(obs), int(obs[0].frame), int(obs[-1].frame), float(obs[-1].cx), float(obs[-1].cy))
     if trk._kin_cache_key == key:
-        avg_speed, peak_speed = trk._cached_speed_stats
-        return trk._cached_velocities, trk._cached_speeds, avg_speed, peak_speed
-
-    velocities: List[Tuple[float, float]] = []
-    speeds: List[float] = []
+        return trk._cached_speed_stats
     total_dist = 0.0
     total_dt = 0
     peak = 0.0
-    for i in range(1, len(obs)):
-        dt = int(obs[i].frame - obs[i - 1].frame)
+    for earlier, later in zip(obs, obs[1:]):
+        dt = int(later.frame - earlier.frame)
         if dt <= 0:
             continue
-        dx = float(obs[i].cx - obs[i - 1].cx)
-        dy = float(obs[i].cy - obs[i - 1].cy)
-        vx = dx / dt
-        vy = dy / dt
-        dist = math.sqrt(dx * dx + dy * dy)
-        spd = dist / dt
-        velocities.append((vx, vy))
-        speeds.append(spd)
+        dist = math.hypot(float(later.cx - earlier.cx), float(later.cy - earlier.cy))
         total_dist += dist
         total_dt += dt
-        if spd > peak:
-            peak = spd
-
-    avg = total_dist / max(total_dt, 1)
+        peak = max(peak, dist / dt)
     trk._kin_cache_key = key
-    trk._cached_velocities = velocities
-    trk._cached_speeds = speeds
-    trk._cached_speed_stats = (avg, peak)
-    return velocities, speeds, avg, peak
+    trk._cached_speed_stats = (total_dist / max(total_dt, 1), peak)
+    return trk._cached_speed_stats
 
-def _track_speed_stats(trk: Track) -> Tuple[float, float]:
-    """Returns (avg_speed, peak_speed) in px/frame."""
-    _, _, avg, peak = _track_kinematics(trk)
-    return avg, peak
 
 def _track_extent(trk: Track) -> float:
     """Spatial extent (diag of bbox containing all obs centers)."""
@@ -428,28 +394,26 @@ def stitch_track_chain(chain: List[Track], cfg: SelectorConfig) -> Optional[Trac
 
 def _court_fractions(
     track: Track, court_poly: Optional[np.ndarray], expand_px: float
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float]:
     """Compute court occupancy fractions.
 
     Returns:
       near_court_frac: inside polygon or within expand_px margin (used for scoring).
-      far_outside_frac: farther than 2x expand_px outside polygon.
       strict_inside_frac: strictly inside polygon (dist >= 0).
 
     Without a court polygon nothing is known about where the ball is, so the
     scoring fraction is 1: the court term then neither ranks tracks (every
     track in the clip shares it) nor pushes them under the absolute score
     density gates in ``core.selected_tracks`` and the timeline, which a
-    "neutral" 0.5 did on every court-less clip. The band fractions stay 0.5,
+    "neutral" 0.5 did on every court-less clip. The strict fraction stays 0.5,
     between the "mostly outside" and "mostly inside" bands the selector reads.
     """
     if len(track.observations) == 0:
-        return 0.5, 0.5, 0.5
+        return 0.5, 0.5
     if court_poly is None:
-        return 1.0, 0.5, 0.5
+        return 1.0, 0.5
 
     near_court = 0
-    far_outside = 0
     strict_inside = 0
     for obs in track.observations:
         dist = cv2.pointPolygonTest(court_poly, (float(obs.cx), float(obs.cy)), True)
@@ -458,11 +422,9 @@ def _court_fractions(
             strict_inside += 1
         if dist >= -expand_px:  # inside or within margin
             near_court += 1
-        elif -dist > expand_px * 2:  # really far
-            far_outside += 1
 
     n = len(track.observations)
-    return near_court / n, far_outside / n, strict_inside / n
+    return near_court / n, strict_inside / n
 
 def _near_player_fractions(
     track: Track,
@@ -487,60 +449,6 @@ def _near_player_fractions(
     n = len(track.observations)
     return near_player_count / n, near_player_court_count / n
 
-
-def _motion_consistency(track: Track) -> float:
-    """Score 0-1 for how smooth/consistent the track motion is.
-    High jitter = low score. Smooth arcs = high score."""
-    obs = track.observations
-    if len(obs) < 3:
-        return 0.5
-
-    velocities, _, _, _ = _track_kinematics(track)
-
-    if len(velocities) < 2:
-        return 0.5
-
-    # Measure direction changes (angle between consecutive velocity vectors)
-    angle_changes = []
-    for i in range(1, len(velocities)):
-        v1 = velocities[i-1]
-        v2 = velocities[i]
-        dot = v1[0]*v2[0] + v1[1]*v2[1]
-        mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
-        mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
-        if mag1 < 0.5 or mag2 < 0.5:
-            continue  # near-stationary, skip
-        cos_angle = max(-1.0, min(1.0, dot / (mag1 * mag2 + 1e-9)))
-        angle_changes.append(abs(math.acos(cos_angle)))
-
-    if not angle_changes:
-        return 0.5
-
-    # Penalize frequent sharp direction changes (> 108 deg, i.e. 0.6 pi).
-    # Tennis ball has smooth arcs with direction changes at bounces/hits
-    # But random jitter has constant tiny direction changes
-    sharp = sum(1 for a in angle_changes if a > math.pi * _SHARP_TURN_PI_FRAC)
-    smooth_frac = 1.0 - sharp / len(angle_changes)
-    return max(0.0, min(1.0, smooth_frac))
-
-def _jump_penalty(track: Track) -> float:
-    """Sum of unusually large jumps between consecutive observations."""
-    obs = track.observations
-    if len(obs) < 2:
-        return 0.0
-    penalty = 0.0
-    _, speeds, _, _ = _track_kinematics(track)
-
-    if not speeds:
-        return 0.0
-
-    # Penalize jumps above 2.5x the median speed (never below 5 px/frame)
-    median_speed = sorted(speeds)[len(speeds) // 2]
-    threshold = max(median_speed * _JUMP_MEDIAN_SPEED_MULT, 5.0)
-    for s in speeds:
-        if s > threshold:
-            penalty += (s - threshold)
-    return penalty
 
 def score_tracks(
     tracks: List[Track],
@@ -578,10 +486,9 @@ def score_tracks(
         n = trk.num_obs
         span = trk.span
 
-        coverage_frac = n / total_frames if total_frames > 0 else 0.0
         span_frac = span / total_frames if total_frames > 0 else 0.0
 
-        inside_frac, _, strict_inside_frac = _court_fractions(
+        inside_frac, strict_inside_frac = _court_fractions(
             trk, court_poly, cfg.court_expand_px
         )
         motion_overlap = sum(1 for o in obs if o.on_motion) / max(n, 1)
@@ -591,8 +498,6 @@ def score_tracks(
 
         avg_speed, peak_speed = _track_speed_stats(trk)
         extent = _track_extent(trk)
-        jump_penalty_raw = _jump_penalty(trk)
-        motion_smooth = _motion_consistency(trk)
         motion_kin_frac = kinematic_motion_frac(
             avg_speed, peak_speed, extent, near_player_frac, cfg, cfg.diag
         )
@@ -627,10 +532,8 @@ def score_tracks(
             "avg_speed_pxpf": float(avg_speed),
             "peak_speed_pxpf": float(peak_speed),
             "extent_px": float(extent),
-            "jump_penalty": float(jump_penalty_raw),
             "near_player_frac": float(near_player_frac),
             "near_player_court_frac": float(near_player_court_frac),
-            "coverage_frac": float(coverage_frac),
             "span_frac": float(span_frac),
             "start_frame": float(trk.first_frame),
             "end_frame": float(trk.last_obs_frame),
@@ -642,7 +545,6 @@ def score_tracks(
             "motion_mult": float(motion_evidence),
             "inside_mult": float(inside_frac),
             "near_player_mult": float(near_player_mult),
-            "movement_quality": float(motion_smooth),
         }
 
     tracks.sort(key=lambda t: t.score, reverse=True)

@@ -43,10 +43,8 @@ SCORE_BREAKDOWN_DEFAULTS: Dict[str, float] = {
     "avg_speed_pxpf": 0.0,
     "peak_speed_pxpf": 0.0,
     "extent_px": 0.0,               # diagonal of the box around all observations
-    "jump_penalty": 0.0,
     "near_player_frac": 0.0,
     "near_player_court_frac": 0.0,
-    "coverage_frac": 0.0,           # observations / total frames
     "span_frac": 0.0,               # span / total frames
     "start_frame": 0.0,
     "end_frame": 0.0,
@@ -58,7 +56,6 @@ SCORE_BREAKDOWN_DEFAULTS: Dict[str, float] = {
     "motion_mult": 0.0,
     "inside_mult": 0.0,
     "near_player_mult": 0.0,
-    "movement_quality": 0.0,        # scoring._motion_consistency
     "timeline_tracks": 0.0,         # stitched chains only: tracks joined
 }
 
@@ -89,11 +86,9 @@ class Track:
     # Scoring
     score: float = 0.0
     score_breakdown: Dict[str, float] = field(default_factory=dict)
-    # Cached kinematics for repeated scoring passes
-    # (num_obs, first frame, last frame, last cx, last cy); see scoring._track_kinematics
+    # Cached speed statistics for repeated scoring passes
+    # (num_obs, first frame, last frame, last cx, last cy); see scoring._track_speed_stats
     _kin_cache_key: Optional[Tuple[int, int, int, float, float]] = field(default=None, init=False, repr=False)
-    _cached_velocities: List[Tuple[float, float]] = field(default_factory=list, init=False, repr=False)
-    _cached_speeds: List[float] = field(default_factory=list, init=False, repr=False)
     _cached_speed_stats: Tuple[float, float] = field(default=(0.0, 0.0), init=False, repr=False)
 
     @property

@@ -991,6 +991,8 @@ def output_trajectory(scene: _Scene, selected: List[Track]) -> List[Optional[Fra
         if len(observations) >= 2:
             _extend_tail(scene, results, selected, observations)
     _close_single_frame_holes(scene, results)
-    refine_trajectory(results, scene.cfg.diag)
+    # Drop before the refit, so a fill that left the frame or jumped the court is not among the
+    # points the refit smooths its neighbours towards.
     _drop_implausible_fills(scene, results)
+    refine_trajectory(results, scene.cfg.diag)
     return results

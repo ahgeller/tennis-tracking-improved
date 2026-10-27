@@ -67,13 +67,10 @@ class SelectorConfig:
     start_conf: float = 0.50
     weak_continue_min_obs: int = 3
     weak_gate_frac: float = 0.02
-    assoc_min_speed_for_dir: float = 2.5    # 30 FPS px/frame below which direction is not judged
+    assoc_min_speed_for_ratio: float = 2.5  # 30 FPS px/frame below which the speed ratio is not judged
     assoc_speed_ratio_min: float = 0.15
     assoc_speed_ratio_max: float = 3.80
-    assoc_dir_cos_min: float = -1.0         # bounces and racket hits reverse direction
     assoc_accel_frac: float = 0.09          # per-frame velocity change ceiling, diag fraction
-    assoc_area_ratio_min: float = 0.15
-    assoc_area_ratio_max: float = 6.00
     # A track that has sat still for eight observations may not absorb a
     # detection moving twice this fast (diag fraction per frame): that is a
     # ball passing a static false positive, not the false positive moving.

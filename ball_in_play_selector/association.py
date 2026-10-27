@@ -115,11 +115,6 @@ def _implausibility(
     if trk.num_obs < 2:
         return ""
 
-    last_obs = trk.observations[-1]
-    area_ratio = det.area / max(last_obs.area, 1.0)
-    if area_ratio < cfg.assoc_area_ratio_min or area_ratio > cfg.assoc_area_ratio_max:
-        return "area"
-
     stride = cfg.detector_phase_stride
     if stride > 1:
         reference = _speed_reference(trk.observations, det.frame, stride)
@@ -136,16 +131,12 @@ def _implausibility(
 
     exp_vx, exp_vy = trk.last_vel
     exp_speed = math.sqrt(exp_vx * exp_vx + exp_vy * exp_vy)
-    min_speed_for_dir = pxpf_at_fps(cfg.assoc_min_speed_for_dir, cfg.fps, clamp=True)
+    min_speed_for_ratio = pxpf_at_fps(cfg.assoc_min_speed_for_ratio, cfg.fps, clamp=True)
 
-    if exp_speed >= min_speed_for_dir:
+    if exp_speed >= min_speed_for_ratio:
         speed_ratio = obs_speed / max(exp_speed, 1e-6)
         if speed_ratio < cfg.assoc_speed_ratio_min or speed_ratio > cfg.assoc_speed_ratio_max:
             return "speed_ratio"
-        dot = obs_vx * exp_vx + obs_vy * exp_vy
-        cos_sim = dot / max(obs_speed * exp_speed, 1e-6)
-        if cos_sim < cfg.assoc_dir_cos_min:
-            return "direction"
 
     dvx = obs_vx - exp_vx
     dvy = obs_vy - exp_vy
