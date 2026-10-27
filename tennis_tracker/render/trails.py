@@ -1,7 +1,8 @@
 """The trails of the tracking video and its track-debug twin: the chosen ball's recent path
-(``BallTrail``), the chosen track's display path (``DisplayPathTrail``) and every selector
-track's dots and short trails (``CandidateTrackTrails``, at the debug video's full weight or
-the lighter ``LIGHT_TRACK_STYLE`` the tracking video takes with ``Config.show_all_tracks``).
+(``BallTrail``: a comet on the tracking video, a thin fading line on the debug video), the
+chosen track's display path (``DisplayPathTrail``) and every selector track's dots and short
+trails (``CandidateTrackTrails``, at the debug video's full weight or the lighter
+``LIGHT_TRACK_STYLE`` the tracking video takes with ``Config.show_all_tracks``).
 Each one advances once per frame in pass 2 and draws onto the ``rendering.Canvas``.
 """
 from __future__ import annotations
@@ -16,7 +17,7 @@ from ball_in_play_selector import FrameResult, Track
 
 from ..court.court_geometry import court_axis_spans
 from .rendering import (
-    COLOR_DISPLAY_PATH, COLOR_DISPLAY_PATH_INTERP, COLOR_INTERP, COLOR_OUTLINE, Canvas, Color, Point,
+    COLOR_DISPLAY_PATH, COLOR_DISPLAY_PATH_INTERP, COLOR_INTERP, COLOR_OUTLINE, Canvas, Color, Point, paint_blended,
 )
 
 # Trail colour per FrameResult.source, before the age fade.
@@ -31,9 +32,14 @@ TRAIL_SECONDS = 0.25
 TRAIL_MIN_LEN = 10
 DISPLAY_PATH_TRAIL_MIN_LEN = 40
 DISPLAY_PATH_TRAIL_EXTRA = 20
-_TRAIL_FADE_BASE, _TRAIL_FADE_RANGE = 0.55, 0.45    # alpha = base + range * age fraction
-_TRAIL_THICKNESS = 2
-_TRAIL_MIN_THICKNESS = 1
+# The debug video's ball trail: a thin line whose colour darkens with age.
+_DEBUG_TRAIL_FADE_BASE, _DEBUG_TRAIL_FADE_RANGE = 0.55, 0.45    # colour scale = base + range * position in the trail
+_DEBUG_TRAIL_THICKNESS = 2
+_DEBUG_TRAIL_MIN_THICKNESS = 1
+# The tracking video's comet: the trail tapers and fades toward the frame from head to tail.
+COMET_HEAD_THICKNESS, COMET_TAIL_THICKNESS = 4, 1
+COMET_HEAD_ALPHA, COMET_TAIL_ALPHA = 1.0, 0.25
+FADE_BANDS = 4      # a fading trail is blended in this many age bands, not per segment
 _TRAIL_HARD_MIN_X_PX, _TRAIL_HARD_MIN_Y_PX = 34.0, 26.0
 _TRAIL_BRIDGE_FRAC, _TRAIL_BRIDGE_MIN_PX = 0.035, 18.0
 _TRAIL_TRANSITION_FRAC, _TRAIL_TRANSITION_MIN_PX = 0.020, 14.0
@@ -112,6 +118,69 @@ def _trail_direction_break(prev2: Sequence[float], prev: Sequence[float], curr_x
 TrailPoint = Tuple[int, int, str, float]
 
 
+class Stroke(NamedTuple):
+    """One trail segment waiting to be painted by ``draw_fading_strokes``."""
+    p0: Point
+    p1: Point
+    color: Color
+    thickness: int
+    newness: float      # 1.0 at the trail's head, 0.0 at the oldest point it may hold
+
+
+def _joint_patch(older: Stroke, newer: Stroke) -> Stroke:
+    """The end of ``older`` that the outline cap of ``newer`` (which starts where ``older`` ends)
+    reaches over: as long as that cap, or the whole of ``older`` when it is shorter."""
+    dx, dy = older.p1[0] - older.p0[0], older.p1[1] - older.p0[1]
+    length = math.hypot(dx, dy)
+    reach = newer.thickness + 2
+    if length <= reach:
+        return older
+    scale = reach / length
+    start = (int(round(older.p1[0] - dx * scale)), int(round(older.p1[1] - dy * scale)))
+    return older._replace(p0=start)
+
+
+def draw_fading_strokes(target: np.ndarray, strokes: Sequence[Stroke], head_alpha: float, tail_alpha: float,
+                        outline: bool) -> None:
+    """Paint the strokes blended toward the frame by age.
+
+    The strokes, in trail order, fall into ``FADE_BANDS`` bands by newness, the oldest band at
+    ``tail_alpha`` and the newest at ``head_alpha``; each band is drawn around itself and blended
+    back with one ``paint_blended`` (per band, not per stroke, to keep pass 2 fast), oldest first
+    so newer strokes lie on top where the trail crosses itself.  With ``outline`` every stroke of
+    a band sits on a dark line one pixel wider, the outlines under all of the band's colour; the
+    end of the older stroke that meets the band's first one is coloured again with the band
+    (``_joint_patch``), so the newer outline's cap does not darken it.
+    """
+    bands: List[List[Stroke]] = [[] for _ in range(FADE_BANDS)]
+    for stroke in strokes:
+        bands[min(int(stroke.newness * FADE_BANDS), FADE_BANDS - 1)].append(stroke)
+    previous: Optional[Stroke] = None
+    for k, band in enumerate(bands):
+        if not band:
+            continue
+        alpha = tail_alpha + (head_alpha - tail_alpha) * k / (FADE_BANDS - 1)
+        meets = outline and previous is not None and previous.p1 == band[0].p0
+        joint = [_joint_patch(previous, band[0])] if meets else []
+        pad = max(stroke.thickness for stroke in band) + 2
+        xs = [x for stroke in joint + band for x in (stroke.p0[0], stroke.p1[0])]
+        ys = [y for stroke in joint + band for y in (stroke.p0[1], stroke.p1[1])]
+        box = (min(xs) - pad, min(ys) - pad, max(xs) + pad + 1, max(ys) + pad + 1)
+
+        def paint(img: np.ndarray, offset: Point, band: List[Stroke] = band, joint: List[Stroke] = joint) -> None:
+            ox, oy = offset
+            if outline:
+                for stroke in band:
+                    cv2.line(img, (stroke.p0[0] - ox, stroke.p0[1] - oy), (stroke.p1[0] - ox, stroke.p1[1] - oy),
+                             COLOR_OUTLINE, stroke.thickness + 1, cv2.LINE_AA)
+            for stroke in joint + band:
+                cv2.line(img, (stroke.p0[0] - ox, stroke.p0[1] - oy), (stroke.p1[0] - ox, stroke.p1[1] - oy),
+                         stroke.color, stroke.thickness, cv2.LINE_AA)
+
+        paint_blended(target, box, alpha, paint)
+        previous = band[-1]
+
+
 class _SegmentLimits(NamedTuple):
     """The pixel distances beyond which a trail segment breaks (see ``BallTrail._breaks_before``)."""
     hard_x_px: float        # a jump along the court's width axis
@@ -139,8 +208,8 @@ def _reversal_breaks(src: str, prev_src: str, dist: float, limits: _SegmentLimit
 class BallTrail:
     """The chosen ball's recent path, broken into segments at jumps and reversals.
 
-    ``advance`` appends this frame's position (or a break) and ``draw`` paints
-    the segments, newest brightest and thickest.
+    ``advance`` appends this frame's position (or a break) and ``draw`` paints the segments,
+    newest brightest and thickest: a comet on the main frame, a thin line on the debug frame.
     """
 
     def __init__(self, cfg: TrailSettings, fps: float, frame_w: int, frame_h: int) -> None:
@@ -218,26 +287,38 @@ class BallTrail:
         while len(self.points) > self.max_len:
             self.points.pop(0)
 
+    def _comet_stroke(self, i: int, p0: Point, p1: Point, base: Color) -> Stroke:
+        """The main frame's segment ending on ``points[i]``: its width tapers from
+        ``COMET_HEAD_THICKNESS`` at the head to ``COMET_TAIL_THICKNESS`` at the age the trail
+        may hold, over which ``draw_fading_strokes`` also fades it."""
+        age = len(self.points) - 1 - i
+        newness = 1.0 - age / max(self.max_len - 1, 1)
+        thickness = int(round(COMET_TAIL_THICKNESS + (COMET_HEAD_THICKNESS - COMET_TAIL_THICKNESS) * newness))
+        return Stroke(p0, p1, base, thickness, newness)
+
     def draw(self, canvas: Canvas, draw_main: bool) -> None:
         """Paint the segments: the debug frame always, the main frame when ``draw_main``.  Each
-        segment takes its end point's source colour (``_segment_source``) and fades with age."""
+        segment takes its end point's source colour (``_segment_source``).  The debug frame's line
+        darkens and thins with the segment's position in the trail; the main frame's comet tapers
+        and blends toward the frame with the segment's age."""
         n = len(self.points)
+        strokes: List[Stroke] = []
         for i in range(1, n):
             a, b = self.points[i - 1], self.points[i]
             if a is None or b is None:
                 continue
             p0, p1 = (a[0], a[1]), (b[0], b[1])
             base = _trail_base_color(_segment_source(self.points, i))
-            alpha = _TRAIL_FADE_BASE + _TRAIL_FADE_RANGE * (i / n)
-            color = (int(base[0] * alpha), int(base[1] * alpha), int(base[2] * alpha))
             if canvas.debug is not None:
-                th = max(_TRAIL_MIN_THICKNESS, int(_TRAIL_THICKNESS * alpha))
+                scale = _DEBUG_TRAIL_FADE_BASE + _DEBUG_TRAIL_FADE_RANGE * (i / n)
+                color = (int(base[0] * scale), int(base[1] * scale), int(base[2] * scale))
+                th = max(_DEBUG_TRAIL_MIN_THICKNESS, int(_DEBUG_TRAIL_THICKNESS * scale))
                 cv2.line(canvas.debug, p0, p1, COLOR_OUTLINE, th + 1, cv2.LINE_AA)
                 cv2.line(canvas.debug, p0, p1, color, th, cv2.LINE_AA)
             if draw_main:
-                th = max(_TRAIL_MIN_THICKNESS, int(round(_TRAIL_THICKNESS * alpha)))
-                cv2.line(canvas.main, p0, p1, COLOR_OUTLINE, th + 1, cv2.LINE_AA)
-                cv2.line(canvas.main, p0, p1, color, th, cv2.LINE_AA)
+                strokes.append(self._comet_stroke(i, p0, p1, base))
+        if strokes:
+            draw_fading_strokes(canvas.main, strokes, COMET_HEAD_ALPHA, COMET_TAIL_ALPHA, outline=True)
 
 
 # A display-path trail point: (x, y, exact); None marks a gap.

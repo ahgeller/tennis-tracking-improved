@@ -1,17 +1,19 @@
-"""tennis_tracker.render.trails: the chosen ball's trail breaks where it should, the display-path trail
-keeps exact and filled points apart, and the candidate overlay draws every track. Synthetic
-frames and results only."""
+"""tennis_tracker.render.trails: the chosen ball's trail breaks where it should and draws as a comet,
+the display-path trail keeps exact and filled points apart, and the candidate overlay draws
+every track. Synthetic frames and results only."""
+import timeit
 from types import SimpleNamespace
 
 import numpy as np
 from ball_in_play_selector import Detection, FrameResult
 
 from tennis_tracker.config import Config
-from tennis_tracker.render.rendering import Canvas
+from tennis_tracker.render.rendering import COLOR_OUTLINE, Canvas
 from tennis_tracker.render.trails import (
-    CANDIDATE_TRAIL_LEN, DEBUG_TRACK_STYLE, LIGHT_TRACK_STYLE, TRAIL_MIN_LEN, TRAIL_SECONDS,
-    _TRAIL_DIRECTION_BRIDGE_SCALE, BallTrail, CandidateTrackTrails, DisplayPathTrail, _reversal_breaks,
-    _segment_source, _SegmentLimits, _trail_jump_fracs, _transition_too_far, track_color,
+    CANDIDATE_TRAIL_LEN, COMET_HEAD_THICKNESS, COMET_TAIL_ALPHA, COMET_TAIL_THICKNESS, DEBUG_TRACK_STYLE,
+    FADE_BANDS, LIGHT_TRACK_STYLE, TRAIL_MIN_LEN, TRAIL_SECONDS, _TRAIL_DIRECTION_BRIDGE_SCALE, BallTrail,
+    CandidateTrackTrails, DisplayPathTrail, Stroke, _reversal_breaks, _segment_source, _SegmentLimits,
+    _trail_jump_fracs, _transition_too_far, draw_fading_strokes, track_color,
 )
 
 WIDTH, HEIGHT, FPS = 640, 360, 30.0
@@ -23,6 +25,27 @@ def result(cx, cy, source="det", conf=0.9):
 
 def blank():
     return np.zeros((HEIGHT, WIDTH, 3), np.uint8)
+
+
+GREY = (90, 90, 90)
+
+
+def grey():
+    return np.full((HEIGHT, WIDTH, 3), GREY, np.uint8)
+
+
+def _between(pixel, a, b) -> bool:
+    """``pixel`` is a blend of the colours ``a`` and ``b``: every channel within their range, and
+    the pixel neither colour itself."""
+    pixel = tuple(int(v) for v in pixel)
+    return pixel not in (tuple(a), tuple(b)) and all(min(x, y) <= v <= max(x, y) for v, x, y in zip(pixel, a, b))
+
+
+def _painted_rows(frame, column, min_contrast: int = 24) -> int:
+    """How many pixels of ``column`` stand out from the grey background by ``min_contrast`` in
+    some channel: a line's height there, without the faint anti-aliased fringe."""
+    contrast = np.abs(frame[:, column].astype(np.int16) - np.array(GREY, np.int16)).max(axis=1)
+    return int((contrast >= min_contrast).sum())
 
 
 # --------------------------------------------------------------------------- BallTrail
@@ -101,6 +124,59 @@ def test_drawn_trail_colours_follow_the_segment_source():
     assert not _is_green(main[200, 120])        # the first of two motion points: orange
     assert not _is_green(main[200, 128])
     assert _is_green(main[200, 136])            # back on a detection
+
+
+def _straight_trail(fps: float, frame_w: int = WIDTH, frame_h: int = HEIGHT) -> BallTrail:
+    """A full-length detector trail along one row, the head at the right."""
+    trail = BallTrail(Config(), fps, frame_w, frame_h)
+    for i in range(trail.max_len):
+        trail.advance(result(40.0 + 8 * i, 200.0), None)
+    return trail
+
+
+def test_the_main_frame_comet_tapers_and_fades_from_head_to_tail():
+    trail = _straight_trail(fps=60.0)                                    # 15 points: 40 to 152
+    main = grey()
+    trail.draw(Canvas(main, None), draw_main=True)
+    head_x, tail_x = 40 + 8 * (trail.max_len - 1) - 4, 44
+    assert _painted_rows(main, head_x) > _painted_rows(main, tail_x)    # thicker at the head ...
+    assert _painted_rows(main, head_x) >= COMET_HEAD_THICKNESS
+    assert _painted_rows(main, tail_x) <= COMET_TAIL_THICKNESS + 1       # ... a 1 px line at the tail
+    green = (40, 255, 40)
+    assert tuple(main[200, head_x]) == green                             # the head at full strength
+    assert _between(main[200, tail_x], GREY, green)                      # the tail blended toward the frame
+    assert _is_green(main[200, tail_x])
+    assert not (main == np.array(COLOR_OUTLINE, np.uint8)).all(axis=2).any()   # the outline is blended too
+
+
+def test_the_debug_frame_trail_is_the_thin_line_it_was():
+    trail = _straight_trail(fps=60.0)
+    main, debug = grey(), grey()
+    trail.draw(Canvas(main, debug), draw_main=True)
+    head_x = 40 + 8 * (trail.max_len - 1) - 4
+    assert _painted_rows(debug, head_x) < _painted_rows(main, head_x)
+    assert (debug == np.array(COLOR_OUTLINE, np.uint8)).all(axis=2).any()   # its outline is solid
+
+
+def test_fading_strokes_blend_by_band_and_colour_the_joint_between_bands():
+    frame = blank()
+    color = (0, 0, 200)
+    strokes = [Stroke((20, 50), (60, 50), color, 2, 0.0), Stroke((60, 50), (100, 50), color, 2, 1.0)]
+    draw_fading_strokes(frame, strokes, head_alpha=1.0, tail_alpha=0.25, outline=True)
+    assert tuple(frame[50, 80]) == color                                 # the head band, painted straight on
+    assert tuple(frame[50, 40]) == (0, 0, 50)                            # the tail band at a quarter
+    assert tuple(frame[50, 60]) == color                                 # the joint is colour, not the head's outline
+    assert tuple(frame[50, 52]) == (0, 0, 50)                            # ... and the patch stops behind the joint
+    assert FADE_BANDS >= 3 and COMET_TAIL_ALPHA == 0.25
+
+
+def test_drawing_a_sixty_point_comet_on_a_1080p_frame_is_fast():
+    trail = _straight_trail(fps=240.0, frame_w=1920, frame_h=1080)
+    assert trail.max_len == 60
+    frame = np.full((1080, 1920, 3), GREY, np.uint8)
+    canvas = Canvas(frame, None)
+    seconds = min(timeit.repeat(lambda: trail.draw(canvas, draw_main=True), number=20, repeat=3)) / 20
+    assert seconds < 0.005, f"{seconds * 1e3:.2f} ms per draw"
 
 
 # --------------------------------------------------------------------------- DisplayPathTrail
