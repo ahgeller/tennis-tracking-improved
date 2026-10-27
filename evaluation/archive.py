@@ -52,7 +52,7 @@ MODELS = {
     "gridtracknet": BALL_WEIGHTS,
 }
 DEFAULT_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-PER_CLIP_CONF = 0.5         # the per-clip table and the offset report use this threshold
+PER_CLIP_CONF = 0.4         # the per-clip table and the offset report use this threshold
 BAD_FRAMES_LISTED = 40      # how many of a clip's bad frames the pipeline report names
 CELL_BINS = 5               # --cell-histogram: bins across a grid cell, per axis
 
@@ -339,7 +339,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--cell-histogram", action="store_true",
                         help="Raw mode: also report recall by where the ball sat within its grid cell")
     parser.add_argument("--thresholds", nargs="+", type=float, default=DEFAULT_THRESHOLDS)
-    parser.add_argument("--gridtracknet-conf", type=float, default=0.50)
+    parser.add_argument("--gridtracknet-conf", type=float, default=0.40)
     parser.add_argument("--device", default="0")
     parser.add_argument("--out-dir", default=str(ROOT / "output" / "archive_eval"))
     parser.add_argument("--archive", default=None,

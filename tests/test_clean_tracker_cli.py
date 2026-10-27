@@ -60,7 +60,7 @@ def test_cli_defaults(tmp_path):
         assert clean_tracker.main([]) == 0
     cfg = run.call_args.args[0]
     assert cfg.save_tracking_video is True
-    assert cfg.conf == 0.5
+    assert cfg.conf == 0.4
     assert cfg.draw_court_minimap is False and cfg.court_events is False and cfg.info_timing is False
     assert cfg.show_all_tracks is False
     assert cfg.input_video.endswith("pomona.mp4")
