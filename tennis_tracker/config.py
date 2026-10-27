@@ -14,7 +14,7 @@ class Config:
 
     # Ball detector
     ball_class_name: Optional[str] = None
-    conf: float = 0.50
+    conf: float = 0.40     # 0.50 until 2026-10-27: on mixed_v1 0.40 gave +92 hits for +2 false alarms (output/selector_baseline)
     device: str = "auto"
     # Shift applied to GridTrackNet points, in px at 1080p (positive = down).
     # Measured on the 41 hand-verified clips video13-53: with 0 the median error

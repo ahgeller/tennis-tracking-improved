@@ -33,7 +33,7 @@ def _parser() -> argparse.ArgumentParser:
                              f"else {OUTPUT / 'tracking.json'}")
     parser.add_argument("--weights", default=str(BALL_WEIGHTS),
                         help="ball detector weights, .pt HeatmapNet (the default) or .npz GridTrackNet")
-    parser.add_argument("--conf", type=float, default=0.50)
+    parser.add_argument("--conf", type=float, default=0.40)
     parser.add_argument("--device", default="0")
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument("--court", action="store_true",
