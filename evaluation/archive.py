@@ -288,11 +288,12 @@ def run_raw(models: List[str], clips: List[ClipPair], thresholds: List[float], d
 
 def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float], device: str,
                  out_dir: Path, reuse_json: bool = False, court_events: bool = False,
-                 weights: Optional[Dict[str, Path]] = None) -> None:
+                 weights: Optional[Dict[str, Path]] = None, window_step: int = 5) -> None:
     """Track every clip (``headless.run_headless``) and score the per-frame output; with
     ``court_events`` each clip's tracking JSON also carries its court events, which
     ``score_court_events.py`` reads. `weights` (model name -> file) replaces a model's bundled
-    weights, as it does in ``run_raw``."""
+    weights, and `window_step` is the prepass's ``Config.gridtracknet_window_step``, as both are
+    in ``run_raw``."""
     from tennis_tracker.headless import run_headless, tracking_payload   # the pipeline: CUDA and TensorRT, only here
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -310,7 +311,7 @@ def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float
                 result = run_headless(video_path, model_path=(weights or {}).get(name) or MODELS[name],
                                       conf=conf[name], device=device,
                                       tracking_json=json_path, output_video=out_dir / f"{video_path.stem}_{name}.mp4",
-                                      court_events=court_events)
+                                      court_events=court_events, window_step=window_step)
                 payload = tracking_payload(result)
             results.append((video_path.stem, score_pipeline_clip(labels, payload, meta.width)))
         print(f"\n=== pipeline [{name}] per clip ===")
@@ -359,8 +360,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--gridtracknet-stride", type=int, default=None,
                         help="Force the frame spacing fed to GridTrackNet (1 = consecutive frames even at 60 FPS)")
     parser.add_argument("--window-step", type=int, default=5,
-                        help="Raw mode: frames of a phase between unit starts; below 5 a frame's overlapping units "
-                             "are averaged before it is decoded (1 = a unit at every frame)")
+                        help="Frames of a phase between the prepass's unit starts, in both modes; below 5 a frame's "
+                             "overlapping units are averaged before it is decoded (1 = a unit at every frame)")
     args = parser.parse_args(argv)
 
     archive = Path(args.archive) if args.archive else default_archive()
@@ -380,7 +381,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.models, clips,
             {"gridtracknet": args.gridtracknet_conf},
             args.device, Path(args.out_dir), reuse_json=bool(args.reuse_json), court_events=bool(args.court),
-            weights=weights,
+            weights=weights, window_step=args.window_step,
         )
     return 0
 

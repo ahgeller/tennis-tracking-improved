@@ -24,6 +24,10 @@ def test_headless_config_writes_json_and_no_video_with_the_bundled_engines():
     with_events = headless.headless_config(Path("v.mp4"), model_path=Path("w.npz"), conf=0.5, device="0",
                                            tracking_json=Path("v.json"), court_events=True)
     assert with_events.court_events is True and with_events.draw_court_minimap is False   # computed, not drawn
+    assert cfg.gridtracknet_window_step == Config.gridtracknet_window_step
+    dense = headless.headless_config(Path("v.mp4"), model_path=Path("w.pt"), conf=0.5, device="0",
+                                     tracking_json=Path("v.json"), window_step=1)
+    assert dense.gridtracknet_window_step == 1
 
 
 def _result(frame_count: int) -> RunResult:
@@ -47,6 +51,6 @@ def test_run_headless_runs_the_pipeline_on_that_config_and_the_payload_mirrors_t
     assert [row["frame"] for row in payload["frames"]] == [0, 1] and not any(row["present"] for row in payload["frames"])
     with patch("tennis_tracker.pipeline.run", run):
         headless.run_headless(Path("v.mp4"), model_path=Path("w.npz"), conf=0.5, device="0", tracking_json=Path("v.json"),
-                              court_events=True)
+                              court_events=True, window_step=1)
     assert seen["cfg"] == headless.headless_config(Path("v.mp4"), model_path=Path("w.npz"), conf=0.5, device="0",
-                                                   tracking_json=Path("v.json"), court_events=True)
+                                                   tracking_json=Path("v.json"), court_events=True, window_step=1)
