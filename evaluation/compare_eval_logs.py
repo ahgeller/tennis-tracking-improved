@@ -3,8 +3,9 @@
     python evaluation/compare_eval_logs.py output/baseline/pipeline.log output/fix/pipeline.log
 
 Both logs may be raw or pipeline mode; each ``name vis=... recall=... | ... | med=...px p90=...px``
-line the evaluator prints is read, and for every clip in both logs the change in recall, wrong,
-false alarm and median/p90 pixels is printed, the pooled lines (``ALL``, the threshold sweep,
+line the evaluator prints is read (with or without the counts beside the false-alarm rate, and
+with or without their ``bridged`` / ``false`` split), and for every clip in both logs the change
+in recall, wrong, false alarm and median/p90 pixels is printed, the pooled lines (``ALL``, the threshold sweep,
 ``macro`` and ``source=<name>``) last. Clips in only one log are listed at the end. Positive
 recall deltas and negative wrong / false alarm / pixel deltas are improvements.
 """
@@ -18,7 +19,8 @@ from typing import Dict, NamedTuple, Optional, Sequence
 
 LINE = re.compile(
     r"^(?P<name>\S+)\s+vis=\s*(?P<vis>\d+) recall=(?P<recall>[\d.]+) wrong=(?P<wrong>[\d.]+) "
-    r"miss=(?P<miss>[\d.]+) \| invis=\s*(?P<invis>\d+) falseAlarm=(?P<false_alarm>[\d.]+)(?: \(\d+/\d+\))? \| "
+    r"miss=(?P<miss>[\d.]+) \| invis=\s*(?P<invis>\d+) falseAlarm=(?P<false_alarm>[\d.]+)"
+    r"(?: \(\d+/\d+(?:: bridged=\d+ false=\d+)?\))? \| "
     r"med=(?P<med>[\d.]+)px p90=(?P<p90>[\d.]+)px"
 )
 

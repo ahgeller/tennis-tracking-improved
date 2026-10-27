@@ -190,17 +190,18 @@ def test_report_raw_pools_pairs_at_1080p_and_measures_the_hit_offset(capsys):
             LabelledDetection(None, (50.0, 50.0), 0.8),                      # a false alarm
             LabelledDetection((200.0, 200.0), None, 0.0)]                    # a miss
     per_clip = [RawClip("clip", 960, 540, 30.0, 1.0, rows)]
-    pairs = _pooled_pairs(per_clip, 0.5)
+    [pairs] = _pooled_pairs(per_clip, 0.5)                                   # one list per clip
     assert pairs[0] == ((200.0, 200.0), (202.0, 204.0)) and pairs[1] == ((200.0, 200.0), None)
     assert pairs[2] == (None, (100.0, 100.0)) and pairs[3] == ((400.0, 400.0), None)
-    assert len(_pooled_pairs(per_clip, 0.2)) == 4 and _pooled_pairs(per_clip, 0.2)[1][1] == (200.0, 200.0)
+    assert len(_pooled_pairs(per_clip, 0.2)[0]) == 4 and _pooled_pairs(per_clip, 0.2)[0][1][1] == (200.0, 200.0)
     dx, dy, count = _hit_offset(per_clip)
     assert (dx, dy, count) == (1.0, 2.0, 1) and PER_CLIP_CONF > 0.3 and HIT_PX >= 3
     report_raw("probe", per_clip, [0.5])
     out = capsys.readouterr().out
     assert "probe: threshold sweep" in out and "conf>=0.50" in out and "clip" in out
     assert "mean offset on hits dx=+1.00px dy=+2.00px (n=1)" in out
-    assert "clip           vis=   3 recall=0.333 wrong=0.000 miss=0.667 | invis=  1 falseAlarm=1.000 (1/1) |" in out
+    assert ("clip           vis=   3 recall=0.333 wrong=0.000 miss=0.667 | invis=  1 falseAlarm=1.000 "
+            "(1/1: bridged=0 false=1) |") in out
     assert "source=" not in out                                               # no manifest given: no per-source lines
 
 
@@ -239,9 +240,11 @@ def test_report_raw_adds_a_macro_line_and_one_line_per_source(capsys):
     assert scores["source=prof"].recall == pytest.approx(0.9) and scores["source=prof"].visible == 100
     assert scores["source=custom"].recall == pytest.approx(0.5) and scores["source=grid"].false_alarm == pytest.approx(0.5)
     lines = {line.split()[0]: line for line in out.splitlines() if " vis=" in line}
-    assert "falseAlarm=0.050 (1/20) |" in lines["video13"] and "falseAlarm=0.000 (0/0) |" in lines["video1"]
-    assert "falseAlarm=0.500 (2/4) |" in lines["grid_match8"] and "falseAlarm=0.125 (3/24) |" in lines["conf>=0.50"]
-    assert "falseAlarm=0.275 (3/24) |" in lines["macro"]                       # the mean rate, beside the pooled count
+    assert "falseAlarm=0.050 (1/20: bridged=0 false=1) |" in lines["video13"]
+    assert "falseAlarm=0.000 (0/0: bridged=0 false=0) |" in lines["video1"]
+    assert "falseAlarm=0.500 (2/4: bridged=0 false=2) |" in lines["grid_match8"]
+    assert "falseAlarm=0.125 (3/24: bridged=0 false=3) |" in lines["conf>=0.50"]
+    assert "falseAlarm=0.275 (3/24: bridged=0 false=3) |" in lines["macro"]   # the mean rate, beside the pooled counts
     assert list(lines)[-4:] == ["macro", "source=custom", "source=grid", "source=prof"]
     report_raw("probe", [long_prof, short_own, grid], [0.5], sources={"video13": "prof"})      # a clip without a source
     names = [line.split()[0] for line in capsys.readouterr().out.splitlines() if " vis=" in line]

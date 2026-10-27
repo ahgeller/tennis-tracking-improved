@@ -324,8 +324,11 @@ def best_scored_epoch(results: Path) -> Tuple[int, Optional[DetectorMetrics]]:
         for row in csv.DictReader(handle):
             if not row.get("recall"):
                 continue
+            # A column the metric gained after the run began (``bridged``) is missing from its
+            # earlier rows and reads as the field's default.
             metrics = DetectorMetrics(**{field: (int if field in ("visible", "invisible") else float)(row[field])
-                                         for field in DetectorMetrics._fields})
+                                         for field in DetectorMetrics._fields
+                                         if row.get(field) or field not in DetectorMetrics._field_defaults})
             if best_metrics is None or epoch_score(metrics) > epoch_score(best_metrics):
                 best_epoch, best_metrics = int(row["epoch"]), metrics
     return best_epoch, best_metrics

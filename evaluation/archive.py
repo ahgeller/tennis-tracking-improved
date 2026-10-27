@@ -129,15 +129,18 @@ def list_clips(names: Optional[List[str]], archive: Path, include_excluded: bool
     return clips
 
 
-def fmt(name: str, stats: DetectorMetrics, alarms: Optional[int] = None) -> str:
-    """One metric line. ``alarms`` is the false-alarm count printed beside the rate (the rate's
-    own numerator by default; a macro line passes the pooled count beside its mean rate)."""
-    if alarms is None:
-        alarms = round(stats.false_alarm * stats.invisible)
+def fmt(name: str, stats: DetectorMetrics, counts: Optional[DetectorMetrics] = None) -> str:
+    """One metric line. The false-alarm rate is printed with its counts: the alarms over the
+    invisible labels, then how many of them bridged an occlusion (``DetectorMetrics.bridged``) and
+    how many are false outright. ``counts`` supplies them when the rate is not their ratio (a
+    macro line prints the pooled counts beside its mean rate); it is ``stats`` itself otherwise."""
+    counted = stats if counts is None else counts
     return (
         f"{name:14s} vis={stats.visible:4d} recall={stats.recall:.3f} "
         f"wrong={stats.wrong:.3f} miss={stats.miss:.3f} | "
-        f"invis={stats.invisible:3d} falseAlarm={stats.false_alarm:.3f} ({alarms}/{stats.invisible}) | "
+        f"invis={stats.invisible:3d} falseAlarm={stats.false_alarm:.3f} "
+        f"({counted.false_alarm_count}/{counted.invisible}: bridged={counted.bridged_count} "
+        f"false={counted.false_alarm_count - counted.bridged_count}) | "
         f"med={stats.median_px:.1f}px p90={stats.p90_px:.1f}px"
     )
 
@@ -160,15 +163,16 @@ def raw_rows(detector, clips: List[ClipPair], name: str) -> List[RawClip]:
     return out
 
 
-def _pooled_pairs(per_clip: List[RawClip], threshold: float) -> list:
-    """Every clip's (label, prediction) pairs at 1080p scale, a prediction under `threshold` a miss."""
-    pairs = []
+def _pooled_pairs(per_clip: List[RawClip], threshold: float) -> List[list]:
+    """Each clip's (label, prediction) pairs at 1080p scale, a prediction under `threshold` a miss;
+    one list per clip, as ``DetectorMetrics.of_clips`` pools them."""
+    pooled = []
     for clip in per_clip:
         scale = scale_for_width(clip.width)
-        pairs.extend((None if label is None else (label[0] * scale, label[1] * scale),
-                      (pred[0] * scale, pred[1] * scale) if pred is not None and conf >= threshold else None)
-                     for label, pred, conf in clip.rows)
-    return pairs
+        pooled.append([(None if label is None else (label[0] * scale, label[1] * scale),
+                        (pred[0] * scale, pred[1] * scale) if pred is not None and conf >= threshold else None)
+                       for label, pred, conf in clip.rows])
+    return pooled
 
 
 def _hit_offset(per_clip: List[RawClip]) -> Tuple[float, float, int]:
@@ -211,6 +215,7 @@ def macro_metrics(per_clip: List[DetectorMetrics]) -> DetectorMetrics:
         false_alarm=_mean([stats.false_alarm for stats in without]),
         median_px=_mean([stats.median_px for stats in located]),
         p90_px=_mean([stats.p90_px for stats in located]),
+        bridged=_mean([stats.bridged for stats in without]),
     )
 
 
@@ -243,17 +248,17 @@ def report_raw(name: str, per_clip: List[RawClip], thresholds: List[float],
     cell."""
     print(f"\n=== {name}: threshold sweep (all clips pooled) ===")
     for threshold in thresholds:
-        print(fmt(f"conf>={threshold:.2f}", DetectorMetrics.of(_pooled_pairs(per_clip, threshold), 1.0)))
+        print(fmt(f"conf>={threshold:.2f}", DetectorMetrics.of_clips(_pooled_pairs(per_clip, threshold), 1.0)))
     print(f"\n=== {name}: per clip at conf>={PER_CLIP_CONF:.2f} ===")
     per_clip_stats = [_clip_metrics(clip, PER_CLIP_CONF) for clip in per_clip]
     for clip, stats in zip(per_clip, per_clip_stats):
         print(fmt(clip.clip, stats))
-    pooled = DetectorMetrics.of(_pooled_pairs(per_clip, PER_CLIP_CONF), 1.0)
-    print(fmt("macro", macro_metrics(per_clip_stats), alarms=round(pooled.false_alarm * pooled.invisible)))
+    pooled = DetectorMetrics.of_clips(_pooled_pairs(per_clip, PER_CLIP_CONF), 1.0)
+    print(fmt("macro", macro_metrics(per_clip_stats), counts=pooled))
     source_of = sources or {}
     for source in sorted({source_of.get(clip.clip, "") for clip in per_clip} - {""}):
         of_source = [clip for clip in per_clip if source_of.get(clip.clip) == source]
-        print(fmt(f"source={source}", DetectorMetrics.of(_pooled_pairs(of_source, PER_CLIP_CONF), 1.0)))
+        print(fmt(f"source={source}", DetectorMetrics.of_clips(_pooled_pairs(of_source, PER_CLIP_CONF), 1.0)))
     dx, dy, count = _hit_offset(per_clip)
     if count:
         print(f"{name}: mean offset on hits dx={dx / count:+.2f}px dy={dy / count:+.2f}px (n={count})")
@@ -315,17 +320,17 @@ def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float
                 payload = tracking_payload(result)
             results.append((video_path.stem, score_pipeline_clip(labels, payload, meta.width)))
         print(f"\n=== pipeline [{name}] per clip ===")
-        pooled = []
+        pooled: List[list] = []
         pooled_landed: Dict[str, int] = {}
         for clip, scored in results:
             print(fmt(clip, scored.stats), "| by source:", scored.by_source, "| bad outputs landed on:", scored.landed)
             if scored.bad_frames:
                 print("    bad frames:", ", ".join(f"{f}:{kind[0]}/{src}/{where}"
                                                    for f, kind, src, where in scored.bad_frames[:BAD_FRAMES_LISTED]))
-            pooled.extend(scored.pairs)
+            pooled.append(scored.pairs)
             for key, value in scored.landed.items():
                 pooled_landed[key] = pooled_landed.get(key, 0) + value
-        print(fmt("ALL", DetectorMetrics.of(pooled, 1.0)), "| bad outputs landed on:", pooled_landed)
+        print(fmt("ALL", DetectorMetrics.of_clips(pooled, 1.0)), "| bad outputs landed on:", pooled_landed)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

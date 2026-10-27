@@ -42,24 +42,31 @@ def score_weights(weights: Path, clips: List[Clip], device: torch.device, thresh
     evaluate_archive metric). The detector runs on CUDA only; ``device`` names which card
     (``cuda`` alone is card 0)."""
     detector = ball_detector(weights, conf=threshold, device=str(device.index or 0))
-    pairs = []
+    pooled = []
     for clip, video, csv_path, _ in clips:
         meta = video_meta(video)
         labels = training_targets(csv_path, meta.width, meta.height)
         scale = scale_for_width(meta.width)
         points = detect_points(detector, video, meta)
-        for frame, label in labels.items():
+        pairs = []
+        for frame, label in sorted(labels.items()):
             point = points.get(frame)
             pairs.append((None if label is None else (label[0] * scale, label[1] * scale),
                           None if point is None else (point[0] * scale, point[1] * scale)))
-    return DetectorMetrics.of(pairs, 1.0)
+        pooled.append(pairs)
+    return DetectorMetrics.of_clips(pooled, 1.0)
 
 
 def false_alarm_units(weights: Path, clips: List[Clip], samples: Sequence[TrainingUnit], device: torch.device,
                       threshold: float = FALSE_ALARM_CONF) -> Set[int]:
     """The indices into ``samples`` of the units in which the detector on ``weights`` fired, at or
     above ``threshold``, on a frame labelled as having no ball: one prepass over each clip the
-    units come from, the hard negatives ``--oversample-false-alarms`` weights up."""
+    units come from, the hard negatives ``--oversample-false-alarms`` weights up.
+
+    Every such firing counts, the bridged ones too (``detector_metrics.bridged_alarms``: the ball
+    drawn through a one-to-three-frame occlusion the labels mark invisible). Those frames hold the
+    ball, so weighting them up teaches the network to stay silent on it; a later change may leave
+    them out of the hard negatives once the recipe has been measured without them."""
     detector = ball_detector(weights, conf=threshold, device=str(device.index or 0))
     videos = {clip: video for clip, video, _, _ in clips}
     fired: Dict[str, Set[int]] = {}

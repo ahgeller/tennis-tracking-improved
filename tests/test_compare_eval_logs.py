@@ -19,6 +19,9 @@ macro          vis= 450 recall=0.850 wrong=0.005 miss=0.145 | invis= 25 falseAla
 source=prof    vis= 300 recall=0.900 wrong=0.010 miss=0.090 | invis= 20 falseAlarm=0.250 (5/20) | med=2.8px p90=6.0px
 conf>=0.50     vis= 450 recall=0.867 wrong=0.007 miss=0.127 | invis= 25 falseAlarm=0.200 (5/25) | med=2.9px p90=6.5px
 """
+SPLIT = """
+video13        vis= 300 recall=0.900 wrong=0.010 miss=0.090 | invis= 20 falseAlarm=0.250 (5/20: bridged=4 false=1) | med=2.8px p90=6.0px
+"""
 
 
 def test_read_scores_takes_the_count_beside_the_false_alarm_rate_and_logs_without_one():
@@ -26,6 +29,8 @@ def test_read_scores_takes_the_count_beside_the_false_alarm_rate_and_logs_withou
     assert list(scores) == ["video13", "macro", "source=prof", "conf>=0.50"]
     assert scores["video13"].false_alarm == 0.25 and scores["macro"].false_alarm == 0.125
     assert read_scores(BEFORE)["video13"].false_alarm == 0.25                  # the older line, without a count
+    assert read_scores(SPLIT)["video13"].false_alarm == 0.25                   # the newer line, with the bridged split
+    assert "0.250 (+0.000)" in compare(read_scores(COUNTED), read_scores(SPLIT))   # the three generations compare
 
 
 def test_macro_and_source_lines_are_pooled_lines():

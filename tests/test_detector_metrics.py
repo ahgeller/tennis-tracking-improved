@@ -74,5 +74,50 @@ def test_percentiles_come_from_the_sorted_errors():
 def test_the_metric_is_a_named_record_with_one_vocabulary():
     stats = DetectorMetrics.of([((0.0, 0.0), (1.0, 0.0)), (None, None)], 1.0)
     assert isinstance(stats, DetectorMetrics)
-    assert list(stats._asdict()) == ["visible", "recall", "wrong", "miss", "invisible", "false_alarm", "median_px", "p90_px"]
+    assert list(stats._asdict()) == ["visible", "recall", "wrong", "miss", "invisible", "false_alarm", "median_px",
+                                      "p90_px", "bridged"]
     assert stats._asdict()["wrong"] == 0.0 and "wrong_obj" not in stats._asdict()
+    # A record written before the metric gained ``bridged`` (an older winner.json, checkpoint or
+    # results.csv row) still builds: the field defaults.
+    older = {name: value for name, value in stats._asdict().items() if name != "bridged"}
+    assert DetectorMetrics(**older).bridged == 0.0
+
+
+VISIBLE_RUN = [((0.0, 100.0), (0.0, 100.0)), ((100.0, 100.0), (100.0, 100.0))]    # the ball moving along y=100
+
+
+def _occlusion(run, flanked=True):
+    """A visible label, `run` invisible ones with a prediction each, and (when `flanked`) a visible
+    label 400 px further along the same line."""
+    pairs = [VISIBLE_RUN[0]] + [(None, prediction) for prediction in run]
+    if flanked:
+        pairs.append(((400.0, 100.0), (400.0, 100.0)))
+    return pairs
+
+
+def test_an_output_through_a_short_occlusion_on_the_balls_line_is_bridged():
+    stats = DetectorMetrics.of(_occlusion([(100.0, 104.0), (200.0, 96.0), (300.0, 109.0)]), 1.0)
+    assert stats.invisible == 3 and stats.false_alarm == 1.0                         # the total keeps every alarm
+    assert stats.bridged == 1.0 and stats.bridged_count == 3 and stats.false_alarm_count == 3
+    # 11 px off the line at 1080p is the ball somewhere else, so is a point within 10 native px of
+    # it on a 720p clip, where the scale makes that 15.
+    assert DetectorMetrics.of(_occlusion([(100.0, 111.0)]), 1.0).bridged == 0.0
+    assert DetectorMetrics.of(_occlusion([(100.0, 108.0)]), 1.5).bridged == 0.0
+    assert DetectorMetrics.of(_occlusion([(100.0, 106.0)]), 1.5).bridged == 1.0
+
+
+def test_a_long_or_unflanked_run_of_invisible_labels_is_not_an_occlusion():
+    on_line = [(100.0 + 50.0 * index, 100.0) for index in range(4)]
+    assert DetectorMetrics.of(_occlusion(on_line), 1.0).bridged == 0.0               # four frames: dead time, not an occlusion
+    assert DetectorMetrics.of(_occlusion(on_line[:3], flanked=False), 1.0).bridged == 0.0
+    assert DetectorMetrics.of(_occlusion(on_line[:3])[1:], 1.0).bridged == 0.0       # no visible label before the run
+    assert DetectorMetrics.of(_occlusion([(100.0, 100.0), None]), 1.0).bridged == 0.5  # a silent frame inside the run is quiet
+
+
+def test_clips_pool_without_one_clips_labels_flanking_the_next():
+    first = [VISIBLE_RUN[0], (None, (100.0, 100.0))]                     # ends in an invisible label
+    second = [((200.0, 100.0), (200.0, 100.0))]                          # begins with a visible one on the same line
+    assert DetectorMetrics.of(first + second, 1.0).bridged == 1.0        # one sequence: the alarm reads as bridged
+    pooled = DetectorMetrics.of_clips([first, second], 1.0)
+    assert pooled.bridged == 0.0 and pooled.false_alarm == 1.0 and pooled.visible == 2
+    assert DetectorMetrics.of_clips([], 1.0).visible == 0 and math.isnan(DetectorMetrics.of_clips([], 1.0).median_px)
