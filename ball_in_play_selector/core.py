@@ -62,10 +62,19 @@ _TOP_REENTRY_FRAC = 0.15
 _SINGLE_HOLE_MAX_STEP_DIAG_FRAC = 0.015
 # A non-detector point further than max(120 px, 5.5% of the diagonal) from
 # its predecessor is dropped: better one missing row than a cross-court line.
+# The jump gate's floor, the kink and spike gates below and the relabel floor
+# are 1080p pixels, scaled to the clip's diagonal where they are read (``_px``).
+# The refit's bounds, Huber width and outlier floor are not: they describe the
+# detector's error, which the replay says is the same count of native pixels at
+# 720p as at 1080p (scaling them cost 17 hits on the 720p clips, 2026-10-27).
 _JUMP_GATE_MIN_PX = 120.0
 _JUMP_GATE_DIAG_FRAC = 0.055
 # Shortest continuous run the trajectory refit will touch.
 _MIN_REFIT_RUN = 9
+# The refit's kink finder ignores segments slower than this (px/frame); its
+# spike finder's deviation gate never falls below this many pixels.
+_KINK_MIN_SPEED_PX = 2.5
+_SPIKE_GATE_MIN_PX = 10.0
 # Refit weight per source: a detector point anchors the fit (a weak one a
 # little less), a motion blob is a coarse observation, a fitted fill carries
 # almost no information of its own, and a spike almost none at all.
@@ -89,8 +98,14 @@ _REFIT_BOUND_FILL_PX = 12.0
 _REFIT_OUTLIER_MIN_PX = 9.0
 _REFIT_OUTLIER_RESIDUAL_MULT = 4.0
 # Past this much correction a "det" point is no longer where the detector
-# fired, so it stops being reported as one (~44 px at 1080p).
+# fired, so it stops being reported as one (~44 px at 1080p, never under 12).
 _REFINE_DET_RELABEL_FRAC = 0.02
+_REFINE_DET_RELABEL_MIN_PX = 12.0
+
+
+def _px(value_at_1080p: float, diag: float) -> float:
+    """A length tuned in 1080p pixels, in the pixels of a frame with diagonal ``diag``."""
+    return value_at_1080p * diag / REFERENCE_DIAG_PX
 
 
 def selected_tracks(tracks: List[Track]) -> List[Track]:
@@ -367,11 +382,11 @@ def frame_result(
     )
 
 
-def _find_trajectory_kinks(x: np.ndarray, y: np.ndarray) -> List[int]:
+def _find_trajectory_kinks(x: np.ndarray, y: np.ndarray, diag: float = REFERENCE_DIAG_PX) -> List[int]:
     """Locate contact/bounce vertices so smoothing never rounds a real hit."""
     m = len(x)
     baseline = 3
-    min_speed = 2.5
+    min_speed = _px(_KINK_MIN_SPEED_PX, diag)
     max_cos = math.cos(math.radians(30.0))
     turns = np.zeros(m)
     for i in range(baseline, m - baseline):
@@ -394,9 +409,10 @@ def _find_trajectory_kinks(x: np.ndarray, y: np.ndarray) -> List[int]:
     return kinks
 
 
-def _find_spikes(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+def _find_spikes(x: np.ndarray, y: np.ndarray, diag: float = REFERENCE_DIAG_PX) -> np.ndarray:
     """Mark short detector excursions that immediately return to the path."""
     m = len(x)
+    gate_min = _px(_SPIKE_GATE_MIN_PX, diag)
     spikes = np.zeros(m, dtype=bool)
     if m < 4:
         return spikes
@@ -411,7 +427,7 @@ def _find_spikes(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         for i in range(1, m - length):
             a_x, a_y = x[i - 1], y[i - 1]
             b_x, b_y = x[i + length], y[i + length]
-            gate = max(10.0, 3.0 * local_step(i))
+            gate = max(gate_min, 3.0 * local_step(i))
             deviation = min(
                 math.hypot(
                     x[i + j] - (a_x + (b_x - a_x) * (j + 1) / (length + 1)),
@@ -550,17 +566,17 @@ def _refine_run(results: List[FrameResult], start: int, end: int, diag: float = 
     x = np.array([item.cx for item in points])
     y = np.array([item.cy for item in points])
     weights, is_strong_det = _refine_weights(points)
-    spikes = _find_spikes(x, y)
+    spikes = _find_spikes(x, y, diag)
     weights[spikes] = _REFINE_SPIKE_WEIGHT
     is_strong_det[spikes] = False
-    kinks = _find_trajectory_kinks(*_despiked(x, y, spikes))
+    kinks = _find_trajectory_kinks(*_despiked(x, y, spikes), diag)
     new_x, new_y = _refit_positions(points, x, y, weights, is_strong_det, spikes, kinks)
 
     # Repairing a short target switch needs a large correction, so the move
     # itself stays unbounded. Large relocations are labeled as fitted recovery;
     # smaller detector-supported adjustments retain their source. The immutable
     # measurement coordinates remain available separately in either case.
-    relabel_px = max(12.0, _REFINE_DET_RELABEL_FRAC * float(diag))
+    relabel_px = max(_px(_REFINE_DET_RELABEL_MIN_PX, diag), _REFINE_DET_RELABEL_FRAC * float(diag))
     for index, item in enumerate(points):
         if item.source == "det" and item.measurement is None:
             item.measurement = (float(item.cx), float(item.cy))
@@ -870,7 +886,7 @@ def _drop_implausible_fills(scene: _Scene, results: List[Optional[FrameResult]])
 
     One missing row is safer than connecting two balls across the court.
     """
-    jump_gate = max(_JUMP_GATE_MIN_PX, _JUMP_GATE_DIAG_FRAC * scene.cfg.diag)
+    jump_gate = max(_px(_JUMP_GATE_MIN_PX, scene.cfg.diag), _JUMP_GATE_DIAG_FRAC * scene.cfg.diag)
     previous = None
     for frame, result in enumerate(results):
         if (

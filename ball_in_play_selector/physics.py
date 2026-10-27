@@ -2,7 +2,7 @@ import math
 import numpy as np
 from typing import Optional, Tuple
 
-from .config import SelectorConfig
+from .config import REFERENCE_DIAG_PX, SelectorConfig
 from .utils import clamp01, pxpf_at_fps
 
 
@@ -120,6 +120,11 @@ class LinearKalman:
         self.x = self.x + np.dot(K, y)
         I_KH = self._identity - np.dot(K, self.H)
         self.P = np.dot(np.dot(I_KH, self.P), I_KH.T) + np.dot(np.dot(K, self.R), K.T)
+
+
+def _bounce_scale(cfg: SelectorConfig) -> float:
+    """The clip's pixels per 1080p pixel, for the bounce heuristic's thresholds."""
+    return cfg.diag / REFERENCE_DIAG_PX
 
 
 class BallKalmanFilter:
@@ -247,8 +252,10 @@ class BallKalmanFilter:
         # This keeps bounces plausible without forbidding racket hits (which can look similar).
         hx = np.dot(self.kf.H, x).astype(float)
         residual = np.array([z_x, z_y], dtype=float) - hx
+        # The thresholds are 1080p pixels (per frame), scaled to the clip's diagonal.
+        res_scale = _bounce_scale(self.cfg)
         pred_vy = float(x[3])
-        if pred_vy > 2.0 and float(residual[1]) < -10.0:
+        if pred_vy > 2.0 * res_scale and float(residual[1]) < -10.0 * res_scale:
             self.kf.x[3, 0] = -abs(pred_vy) * self.cfg.bounce_restitution
             self.kf.P[3, 3] += 80.0
 

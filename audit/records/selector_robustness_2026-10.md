@@ -38,6 +38,7 @@ and 162; `grid` = grid_match8, 16 and 22, 1592 and 149) and over ALL (8515 and 5
 | 5a dead code | removed: the score terms `total_score` never read (`jump_penalty`, `movement_quality`, `coverage_frac`, with `_motion_consistency`, `_jump_penalty` and the cached per-step velocities), the far-outside court fraction nothing read, the direction gate (`assoc_dir_cos_min = -1.0` never fired) and the area gate (the detector's box is synthetic, so the ratio is 1); `assoc_min_speed_for_dir` renamed `assoc_min_speed_for_ratio`; `BallKalmanFilter` docstring says what the filter does. Replay identical to 3a, golden frames identical (the three keys leave the breakdown) | same | same | same | same |
 | 5b drop before refit | `_drop_implausible_fills` runs before `refine_trajectory`, so a fill that left the frame or jumped the court is not among the points the refit smooths towards. Replay identical to 5a on every clip line (the drop fires on rows the refit's runs did not contain) | same | same | same | same |
 | 5c timeline gaps in seconds | `timeline_max_gap_frac` 0.85 and `timeline_small_gap_frac` 0.02 of the clip become `timeline_max_gap_sec` 11.0 and `timeline_small_gap_sec` 0.26 (those fractions of the 13 s median held-out clip, 1.6 to 30 s). Replay identical to 5b on every clip line: no control clip's chain met either limit | same | same | same | same |
+| 5d pixel constants scaled | the jump gate's 120 px floor, the refit's kink speed (2.5 px/frame) and spike floor (10 px), the relabel floor and the Kalman bounce thresholds (vy > 2, residual < -10) are read in the clip's pixels (1080p reference, `core._px`, `physics._bounce_scale`). Measured one group at a time: spike and kink +2 hits, jump gate and bounce thresholds no change; scaling the refit's bounds, Huber width and outlier floor cost 17 hits on the 720p clips (p90 4.8 to 3.6 px but hits lost), so those stay native pixels | 3396 / 9 / 38 (32+6) | 3177 / 33 / 32 (32+0) | 1388 / 0 / 19 (19+0) | 7961 / 42 / 89 (83+6) / 134 |
 
 The two-level rule, replayed on the runs that hold detections below 0.50 (`output/selector_baseline/conf_0.40`
 and `conf_0.30` in the main checkout, the same 24 clips; the chain as it stands is the row above each):
@@ -75,6 +76,40 @@ that the chain leaves out) and 14 false alarms outright, for 9 fewer hits. The c
 almost entirely in `grid`: on `custom` and `prof` the union and the chain are within a handful
 of frames.
 
+The same three variants on the runs made at the lower detector thresholds (`output/selector_baseline`,
+same 24 clips; the chain here is the selector as it stood at the harness commit):
+
+| run | variant | custom hits / wrong / fa | prof hits / wrong / fa | grid hits / wrong / fa | ALL hits / wrong / fa |
+|---|---|---|---|---|---|
+| 0.40 | raw | 3427 / 10 / 29 (16+13) | 3222 / 9 / 17 (16+1) | 1401 / 29 / 13 (6+7) | 8050 / 48 / 59 (38+21) |
+| 0.40 | chain | 3418 / 11 / 35 (29+6) | 3176 / 36 / 27 (26+1) | 1404 / 0 / 16 (16+0) | 7998 / 47 / 78 (71+7) |
+| 0.30 | raw | 3468 / 15 / 37 (19+18) | 3264 / 14 / 38 (30+8) | 1432 / 30 / 19 (10+9) | 8164 / 59 / 94 (59+35) |
+| 0.30 | chain | 3449 / 10 / 36 (28+8) | 3195 / 42 / 40 (35+5) | 1433 / 0 / 17 (16+1) | 8077 / 52 / 93 (79+14) |
+
+At 0.40 the detector alone has 52 more hits than the chain and 19 fewer false alarms, for one more
+wrong frame: below 0.50 the detector finds ball frames the selector then discards (its `prof`
+tracks lose 46 hits to the chain's pruning and chooser), while the chain's fills add bridged
+occlusions. The chooser's one clear win stays `grid`: 29 wrong frames at 0.40 and 30 at 0.30 that
+the chain turns into 0.
+
 ## For the owner's GPU run
 
-(filled in as the commits land)
+The replay measures everything above except what needs a detector run: proposal 2 at the 0.40
+floor on fresh detections (the control JSONs hold none below 0.50; the 0.40 and 0.30 runs are the
+proxy), the motion rows the fills take from the masks (3a's lower floor lets more tails and gaps
+reach the masks), and the 60 FPS phase behaviour of the association on new detections. From the
+main checkout, on the `selector-robust` branch:
+
+```powershell
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' evaluate_archive.py --archive finetune --mode pipeline --holdout mixed_v1 --gridtracknet-conf 0.40 --out-dir output/selector_robust_eval
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' track_breaks.py output/selector_robust_eval --compare output/ctrl_eval/track_breaks.log
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.compare_eval_logs output/ctrl_eval/pipeline.log output/selector_robust_eval/pipeline.log
+& 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' -m evaluation.replay_selector output/selector_robust_eval --archive finetune --variant control chain union raw minimal
+```
+
+The control was made at 0.50; `output/selector_baseline/conf_0.40/pipeline.log` is the 0.40 run
+of the unchanged selector (ALL recall 0.942, 90 false alarms) and the fairer `compare_eval_logs`
+first argument. The `track_breaks` switch column is not comparable to the control log's (1b
+changed the rule: 202 became 67 on the control JSONs); rerun `track_breaks.py output/ctrl_eval/pipeline`
+for a like-for-like control. The new run's JSONs are schema 6 and carry every single-detection
+track and the `weak` flag, so the replay on them sees everything the selector saw, down to 0.40.
