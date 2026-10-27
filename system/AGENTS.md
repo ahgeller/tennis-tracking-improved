@@ -12,8 +12,8 @@ per-frame JSON. It is not a calibrated 3D ball-flight or line-calling system.
 The labelling and GridTrackNet fine-tuning workspace (`finetune/`, its launchers,
 the Colab notebook, the hand-corrected labels, and the scorers over those labels:
 `evaluate_archive.py`, `score_court_events.py`, `track_breaks.py`) lives on the
-`train` branch, which carries this tracker as well. This branch, `main`, is the
-tracker alone; do not add workspace code here.
+`train` branch, which carries this tracker as `system/`, an exact copy of this
+tree. This branch, `main`, is the tracker alone; do not add workspace code here.
 
 - `tennis_tracker/gridtracknet.py`: PyTorch port and NPZ loader. Five raw RGB
   frames at 768x432 become 15 input channels. Output is five confidence/x-offset/
@@ -80,7 +80,7 @@ tracker alone; do not add workspace code here.
   and timing report.
 - `ball_in_play_selector/`: candidate association (`association.py`), Kalman
   state, track scoring, timeline selection, bounded recovery, trajectory refit.
-  Its changes are measured on the `train` branch (`evaluation/replay_selector.py` and
+  Its changes are measured on the `train` branch (`finetune/scoring/replay_selector.py` and
   `audit/records/selector_robustness_2026-10.md` there). A minimal selector without the
   score and the timeline chain was built and rejected on 2026-10-27: it cannot choose
   between two balls on screen.
