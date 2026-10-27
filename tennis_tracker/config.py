@@ -151,7 +151,7 @@ class Config:
     trail_hard_switch_y_frac: float = 0.30
     ball_marker_box_scale: float = 0.22
     ball_marker_min_radius: int = 3
-    ball_marker_max_radius: int = 12
+    ball_marker_max_radius: int = 6
 
     # output encoding
     use_nvenc: bool = True

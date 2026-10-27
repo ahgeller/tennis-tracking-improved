@@ -31,8 +31,8 @@ TRAIL_MIN_LEN = 10
 DISPLAY_PATH_TRAIL_MIN_LEN = 40
 DISPLAY_PATH_TRAIL_EXTRA = 20
 _TRAIL_FADE_BASE, _TRAIL_FADE_RANGE = 0.55, 0.45    # alpha = base + range * age fraction
-_TRAIL_THICKNESS = 3
-_TRAIL_MIN_THICKNESS = 2
+_TRAIL_THICKNESS = 2
+_TRAIL_MIN_THICKNESS = 1
 _TRAIL_HARD_MIN_X_PX, _TRAIL_HARD_MIN_Y_PX = 34.0, 26.0
 _TRAIL_BRIDGE_FRAC, _TRAIL_BRIDGE_MIN_PX = 0.035, 18.0
 _TRAIL_TRANSITION_FRAC, _TRAIL_TRANSITION_MIN_PX = 0.020, 14.0
@@ -60,6 +60,20 @@ class TrailSettings(Protocol):
 
 def _trail_base_color(src: str) -> Color:
     return _SOURCE_BASE_COLOR.get(src, _UNKNOWN_SOURCE_COLOR)
+
+
+def _segment_source(points: Sequence[Optional["TrailPoint"]], i: int) -> str:
+    """The source that colours the segment ending on ``points[i]``: the point's own, except that a
+    single motion point between two detections is a one-frame fill of the detector's track and
+    takes the detector's colour; a run of two or more motion points keeps its own."""
+    src = points[i][2]
+    if src != "motion":
+        return src
+    prev = points[i - 1]
+    nxt = points[i + 1] if i + 1 < len(points) else None
+    if prev is not None and nxt is not None and prev[2] == "det" and nxt[2] == "det":
+        return "det"
+    return src
 
 
 def _trail_jump_fracs(src: Optional[str], cfg: TrailSettings) -> Tuple[float, float]:
@@ -204,15 +218,15 @@ class BallTrail:
             self.points.pop(0)
 
     def draw(self, canvas: Canvas, draw_main: bool) -> None:
-        """Paint the segments: the debug frame always, the main frame when ``draw_main``."""
+        """Paint the segments: the debug frame always, the main frame when ``draw_main``.  Each
+        segment takes its end point's source colour (``_segment_source``) and fades with age."""
         n = len(self.points)
         for i in range(1, n):
             a, b = self.points[i - 1], self.points[i]
             if a is None or b is None:
                 continue
-            src = b[2]
             p0, p1 = (a[0], a[1]), (b[0], b[1])
-            base = _trail_base_color(src)
+            base = _trail_base_color(_segment_source(self.points, i))
             alpha = _TRAIL_FADE_BASE + _TRAIL_FADE_RANGE * (i / n)
             color = (int(base[0] * alpha), int(base[1] * alpha), int(base[2] * alpha))
             if canvas.debug is not None:

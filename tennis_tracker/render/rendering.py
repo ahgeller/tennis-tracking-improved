@@ -46,8 +46,7 @@ HUD_LABEL: Dict[str, str] = {"det": "DET", "motion": "MOT"}
 HUD_LABEL_DEFAULT = "PHY"
 
 # Marker geometry.
-_DET_MARKER_DEFAULT_RADIUS = 6
-_ESTIMATE_MARKER_MIN_RADIUS, _ESTIMATE_MARKER_MAX_RADIUS = 4, 12
+_DET_MARKER_DEFAULT_RADIUS = 3
 _LABEL_OFFSET: Point = (10, -5)
 _ANCHOR_RADIUS_EMA_KEEP, _ANCHOR_RADIUS_EMA_NEW = 0.80, 0.20   # running ball-radius estimate weights
 _ANCHOR_RADIUS_CAP_SCALE = 3               # cap = ball_marker_max_radius * this
@@ -159,7 +158,7 @@ class MarkerSizer:
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.radius = float(max(cfg.ball_marker_min_radius, 4))
+        self.radius = float(max(cfg.ball_marker_min_radius, 2))
         self._cap = float(max(cfg.ball_marker_max_radius * _ANCHOR_RADIUS_CAP_SCALE, cfg.ball_marker_min_radius))
 
     def observe_box(self, box_w: float, box_h: float) -> int:
@@ -175,8 +174,9 @@ class MarkerSizer:
 
     @property
     def estimate_radius(self) -> int:
-        """Marker radius for a position without a detector box (motion/interp)."""
-        return int(np.clip(round(self.radius), _ESTIMATE_MARKER_MIN_RADIUS, _ESTIMATE_MARKER_MAX_RADIUS))
+        """Marker radius for a position without a detector box (motion/interp), within the same
+        limits as a detection's marker so the two shrink together."""
+        return int(np.clip(round(self.radius), self.cfg.ball_marker_min_radius, self.cfg.ball_marker_max_radius))
 
 
 class SearchCentreSmoother:
@@ -220,13 +220,14 @@ def draw_selected_result(canvas: Canvas, result: FrameResult, frame_index: int, 
         if result.bbox:
             bx1f, by1f, bx2f, by2f = map(float, result.bbox)
             bx1, by1, bx2, by2 = map(int, (bx1f, by1f, bx2f, by2f))
-            # High-contrast box: dark halo + bright box + emphasised bottom edge.
-            rectangle(both, (bx1, by1), (bx2, by2), COLOR_OUTLINE, 4)
-            rectangle(both, (bx1, by1), (bx2, by2), COLOR_DET, 2)
-            line(both, (bx1, by2), (bx2, by2), COLOR_WHITE, 2)
+            # High-contrast box: dark halo + bright box + emphasised bottom edge, each one pixel
+            # wide so the box does not hide the ball's movement.
+            rectangle(both, (bx1, by1), (bx2, by2), COLOR_OUTLINE, 2)
+            rectangle(both, (bx1, by1), (bx2, by2), COLOR_DET, 1)
+            line(both, (bx1, by2), (bx2, by2), COLOR_WHITE, 1)
             marker_radius = sizer.observe_box(max(bx2f - bx1f, 1.0), max(by2f - by1f, 1.0))
         # The marker sits on the measured centre, not a bottom anchor.
-        circle(both, (rcx, rcy), marker_radius + 2, COLOR_OUTLINE, 2)
+        circle(both, (rcx, rcy), marker_radius + 1, COLOR_OUTLINE, 1)
         circle(both, (rcx, rcy), marker_radius, COLOR_DET, -1)
         text(both, "DET", label_at, 0.4, COLOR_DET)
     elif result.source == "motion":

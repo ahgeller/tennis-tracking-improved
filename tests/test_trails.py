@@ -10,7 +10,8 @@ from tennis_tracker.config import Config
 from tennis_tracker.render.rendering import Canvas
 from tennis_tracker.render.trails import (
     CANDIDATE_TRAIL_LEN, TRAIL_MIN_LEN, TRAIL_SECONDS, _TRAIL_DIRECTION_BRIDGE_SCALE, BallTrail, CandidateTrackTrails,
-    DisplayPathTrail, _reversal_breaks, _SegmentLimits, _trail_jump_fracs, _transition_too_far, track_color,
+    DisplayPathTrail, _reversal_breaks, _segment_source, _SegmentLimits, _trail_jump_fracs, _transition_too_far,
+    track_color,
 )
 
 WIDTH, HEIGHT, FPS = 640, 360, 30.0
@@ -70,6 +71,36 @@ def test_drawing_paints_the_debug_frame_and_the_main_frame_only_when_asked():
     assert debug.any() and not main.any()
     trail.draw(Canvas(main, debug), draw_main=True)
     assert main.any()
+
+
+def _is_green(pixel) -> bool:
+    """The detector's trail colour (green) against motion's orange, whatever the age fade."""
+    b, g, r = (int(v) for v in pixel)
+    return g > r and g > b
+
+
+def test_a_one_frame_motion_fill_between_detections_takes_the_detector_colour():
+    points = [(0, 0, "det", 0.9), (8, 0, "motion", 0.9), (16, 0, "det", 0.9)]
+    assert _segment_source(points, 1) == "det" and _segment_source(points, 2) == "det"
+    run = [(0, 0, "det", 0.9), (8, 0, "motion", 0.9), (16, 0, "motion", 0.9), (24, 0, "det", 0.9)]
+    assert [_segment_source(run, i) for i in (1, 2, 3)] == ["motion", "motion", "det"]
+    assert _segment_source([(0, 0, "det", 0.9), (8, 0, "motion", 0.9)], 1) == "motion"     # the trail's last point
+    assert _segment_source([None, (8, 0, "motion", 0.9), (16, 0, "det", 0.9)], 1) == "motion"  # after a break
+    assert _segment_source([(0, 0, "det", 0.9), (8, 0, "interp", 0.9), (16, 0, "det", 0.9)], 1) == "interp"
+
+
+def test_drawn_trail_colours_follow_the_segment_source():
+    trail = BallTrail(Config(), FPS, WIDTH, HEIGHT)
+    for x, source in ((100.0, "det"), (108.0, "motion"), (116.0, "det"), (124.0, "motion"), (132.0, "motion"),
+                      (140.0, "det")):
+        trail.advance(result(x, 200.0, source), None)
+    main = blank()
+    trail.draw(Canvas(main, None), draw_main=True)
+    assert _is_green(main[200, 104])            # det -> one motion fill -> det: drawn as the detector's track
+    assert _is_green(main[200, 112])
+    assert not _is_green(main[200, 120])        # the first of two motion points: orange
+    assert not _is_green(main[200, 128])
+    assert _is_green(main[200, 136])            # back on a detection
 
 
 # --------------------------------------------------------------------------- DisplayPathTrail
