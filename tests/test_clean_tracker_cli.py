@@ -17,7 +17,7 @@ def _run_main(tmp_path, argv):
     return status, run.call_args.args[0]
 
 
-FLAGS = ["--no-video", "--conf", "0.3", "--court", "--info"]
+FLAGS = ["--no-video", "--conf", "0.3", "--court", "--info", "--showtracks"]
 
 
 def test_cli_paths_reach_the_config_and_the_output_folder_is_made(tmp_path):
@@ -50,6 +50,8 @@ def test_cli_flags_reach_the_config(tmp_path):
     assert cfg.info_timing is True
     assert cfg.print_selector_tracks is False
     assert cfg.motion_diagnostics is False
+    assert cfg.show_all_tracks is True                                     # --showtracks
+    assert cfg.save_track_debug_video is False                             # ... without the track-debug video
 
 
 def test_cli_defaults(tmp_path):
@@ -60,6 +62,7 @@ def test_cli_defaults(tmp_path):
     assert cfg.save_tracking_video is True
     assert cfg.conf == 0.5
     assert cfg.draw_court_minimap is False and cfg.court_events is False and cfg.info_timing is False
+    assert cfg.show_all_tracks is False
     assert cfg.input_video.endswith("pomona.mp4")
     assert cfg.tracking_json == str(tmp_path / "tracking.json")
 

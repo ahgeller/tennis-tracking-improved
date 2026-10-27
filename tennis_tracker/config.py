@@ -145,6 +145,9 @@ class Config:
     selector_track_limit: int = 0  # 0 = print all
     draw_search_regions: bool = False
     draw_ball_trail: bool = True
+    # Every selector track on the tracking video too, each in its track colour, under the
+    # chosen track's trail and marker (``--showtracks``; the track-debug video always has them).
+    show_all_tracks: bool = False
 
     # trail rendering / switch guards
     trail_hard_switch_x_frac: float = 0.30

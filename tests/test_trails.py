@@ -9,9 +9,9 @@ from ball_in_play_selector import Detection, FrameResult
 from tennis_tracker.config import Config
 from tennis_tracker.render.rendering import Canvas
 from tennis_tracker.render.trails import (
-    CANDIDATE_TRAIL_LEN, TRAIL_MIN_LEN, TRAIL_SECONDS, _TRAIL_DIRECTION_BRIDGE_SCALE, BallTrail, CandidateTrackTrails,
-    DisplayPathTrail, _reversal_breaks, _segment_source, _SegmentLimits, _trail_jump_fracs, _transition_too_far,
-    track_color,
+    CANDIDATE_TRAIL_LEN, DEBUG_TRACK_STYLE, LIGHT_TRACK_STYLE, TRAIL_MIN_LEN, TRAIL_SECONDS,
+    _TRAIL_DIRECTION_BRIDGE_SCALE, BallTrail, CandidateTrackTrails, DisplayPathTrail, _reversal_breaks,
+    _segment_source, _SegmentLimits, _trail_jump_fracs, _transition_too_far, track_color,
 )
 
 WIDTH, HEIGHT, FPS = 640, 360, 30.0
@@ -174,6 +174,47 @@ def test_candidate_trails_are_bounded():
     for frame in range(CANDIDATE_TRAIL_LEN + 20):
         trails.advance_and_draw(debug, frame)
     assert len(trails.trails[1]) == CANDIDATE_TRAIL_LEN
+
+
+def _painted(frame, color):
+    """Pixels of ``frame`` that hold exactly ``color``."""
+    return (frame == np.array(color, np.uint8)).all(axis=2)
+
+
+def test_advance_once_then_draw_on_two_targets_at_two_weights():
+    """One ``advance`` per frame feeds any number of ``draw`` calls: the debug frame at the full
+    weight and the tracking frame at the light one hold the same trails."""
+    a = track(1, 10.0, det(0, 50.0, 50.0), det(1, 60.0, 50.0), det(2, 70.0, 50.0))
+    b = track(2, 30.0, det(0, 300.0, 200.0), det(1, 300.0, 210.0), det(2, 300.0, 220.0))
+    trails = CandidateTrackTrails([a, b], chosen_track=b)
+    debug, main = blank(), blank()
+    for frame in range(3):
+        trails.advance(frame)
+        trails.draw(debug, frame, DEBUG_TRACK_STYLE)
+        trails.draw(main, frame, LIGHT_TRACK_STYLE)
+    assert trails.trails[1] == [(50.0, 50.0), (60.0, 50.0), (70.0, 50.0)]      # advanced once per frame
+    for tid, (x, y) in ((1, (70, 50)), (2, (300, 220))):
+        for frame in (debug, main):
+            assert _painted(frame, track_color(tid))[y - 3:y + 4, x - 3:x + 4].any()
+    # The light layer is lighter: fewer pixels in each track's colour (no label, a 2 px ring,
+    # the chosen track drawn like the others), and the debug frame's filled chosen dot is a ring.
+    for tid in (1, 2):
+        assert _painted(main, track_color(tid)).sum() < _painted(debug, track_color(tid)).sum()
+    assert _painted(debug, track_color(2))[220, 300]
+    assert not _painted(main, track_color(2))[220, 300]
+    # The label's text sits right and below the dot on the debug frame only.
+    label_region = (slice(222, 240), slice(306, 360))
+    assert _painted(debug, track_color(2))[label_region].any()
+    assert not _painted(main, track_color(2))[label_region].any()
+
+
+def test_the_debug_style_is_the_default_of_advance_and_draw():
+    a = track(1, 10.0, det(0, 50.0, 50.0))
+    by_default, explicit = blank(), blank()
+    CandidateTrackTrails([a], chosen_track=a).advance_and_draw(by_default, 0)
+    CandidateTrackTrails([a], chosen_track=a).advance_and_draw(explicit, 0, DEBUG_TRACK_STYLE)
+    assert np.array_equal(by_default, explicit)
+    assert _painted(by_default, track_color(1))[50, 50]                        # the chosen dot is filled
 
 
 # --------------------------------------------------------------------------- the break rules

@@ -125,6 +125,11 @@ To run the tracker with the new weights on any video:
 & 'C:\Users\Andrew\.conda\envs\tennis-analysis\python.exe' clean_tracker.py -i <video.mp4> --weights <best.pt>
 ```
 
+Add `--showtracks` to see what the selector chose from: every selector track is drawn on
+the tracking video in its own colour, chosen or not, under the chosen track's green trail
+and marker (`--court` adds the court events and minimap, `--motion-diagnostics` the
+per-frame motion diagnostics in the tracking JSON).
+
 ## Stage 4: the deployable weights (every clip)
 
 The winner from stage 1 never saw the 24 held-out clips. For the weights you

@@ -6,8 +6,12 @@ import cv2
 import numpy as np
 import pytest
 
+from ball_in_play_selector import Detection, FrameResult
 from tennis_tracker import pass2
 from tennis_tracker.config import Config
+from tennis_tracker.pass1 import Pass1Result
+from tennis_tracker.render.trails import track_color
+from tennis_tracker.run_context import CourtEvents, Selection
 from tests._helpers import Capture
 from tests.test_pipeline_run import (  # noqa: F401
     FRAMES, FULL_OVERRIDES, FakeCourtDetector, assert_json_close, clip, load_golden, run_pipeline,
@@ -130,3 +134,77 @@ def test_frames_before_the_first_court_detection_are_drawn_without_a_court_model
     result = run_pipeline(tmp_path, monkeypatch, clip, **FULL_OVERRIDES)
     assert len(has_model) == result["raw_json"]["video"]["total_frames"]
     assert has_model[:5] == [False] * 5 and all(has_model[5:])
+
+
+# --------------------------------------------------------------------------- show_all_tracks
+
+WIDTH, HEIGHT = 640, 360
+
+
+def _track(track_id, score, *points):
+    return SimpleNamespace(track_id=track_id, score=score,
+                           observations=[Detection(f, x, y, x - 4, y - 4, x + 4, y + 4, 0.9, 64.0, False)
+                                         for f, x, y in points])
+
+
+def _renderer(cfg: Config, frame_count: int, tracks, chosen):
+    """A ``_FrameRenderer`` over ``frame_count`` blank frames with no court, players, detections or
+    ROIs, the chosen track's observations as the selected results and no track-debug writer."""
+    ctx = SimpleNamespace(cfg=cfg, video=SimpleNamespace(fps=30.0, width=WIDTH, height=HEIGHT),
+                          timing=SimpleNamespace(enabled=False))
+    pass1 = Pass1Result(detections=[[] for _ in range(frame_count)], rois=[None] * frame_count,
+                        player_boxes=[{} for _ in range(frame_count)], court_keypoints=[None] * frame_count)
+    chosen_at = {o.frame: o for o in chosen.observations}
+    per_frame = [FrameResult(cx=o.cx, cy=o.cy, conf=0.9, source="det") if (o := chosen_at.get(fi)) else None
+                 for fi in range(frame_count)]
+    selection = Selection(per_frame=per_frame, chosen_track=chosen, all_tracks=list(tracks), court_polygon=None,
+                          last_court_keypoints=None, display_path={})
+    writers = SimpleNamespace(main=object(), motion_debug=None, track_debug=None)
+    return pass2._FrameRenderer(ctx, pass1, selection, CourtEvents(), writers)
+
+
+def _main_frames(show_all_tracks: bool, with_rejected: bool = True):
+    """The tracking frames of a three-frame clip with a chosen track and, unless ``with_rejected``
+    is off, a rejected one."""
+    chosen = _track(1, 30.0, (0, 100.0, 100.0), (1, 110.0, 100.0), (2, 120.0, 100.0))
+    rejected = _track(2, 5.0, (0, 400.0, 250.0), (1, 400.0, 260.0), (2, 400.0, 270.0))
+    tracks = [chosen, rejected] if with_rejected else [chosen]
+    renderer = _renderer(Config(show_all_tracks=show_all_tracks), 3, tracks, chosen)
+    frames = []
+    for fi in range(3):
+        canvas = renderer._draw(fi, np.zeros((HEIGHT, WIDTH, 3), np.uint8), renderer.selection.per_frame[fi],
+                                None, draw_in_place=True)
+        assert canvas.debug is None                        # no track-debug video was asked for
+        frames.append(canvas.main)
+    return frames
+
+
+def _holds(frame, color) -> bool:
+    return bool((frame == np.array(color, np.uint8)).all(axis=2).any())
+
+
+def _tinted(frame, color):
+    """Pixels of ``frame`` in ``color`` at half strength or more: the colour itself, and the
+    anti-aliased 1 px trail, which lands at about nine tenths of it."""
+    color = np.array(color, np.uint8)
+    return (frame >= color // 2).all(axis=2) & (frame <= color).all(axis=2) & frame.any(axis=2)
+
+
+def test_show_all_tracks_puts_the_rejected_track_on_the_tracking_frame_without_the_debug_video():
+    off, on = _main_frames(False)[-1], _main_frames(True)[-1]
+    assert not _holds(off, track_color(2))
+    assert _holds(on, track_color(2))
+    # Its ring sits where the selector saw it this frame and its trail runs up from there.
+    assert (on[268, 400] == np.array(track_color(2), np.uint8)).all()
+    assert _tinted(on, track_color(2))[250:266, 400].all()
+    # The chosen track's marker still sits on top of its own candidate colour at the ball.
+    assert not (on[100, 120] == np.array(track_color(1), np.uint8)).all()
+    assert np.array_equal(on[100, 120], off[100, 120])
+
+
+def test_without_show_all_tracks_the_rejected_track_leaves_no_trace_on_the_tracking_frame():
+    frames = _main_frames(False)
+    alone = _main_frames(False, with_rejected=False)
+    assert all(np.array_equal(a, b) for a, b in zip(frames, alone))
+    assert not any(_holds(frame, track_color(2)) for frame in frames)
+    assert all(frame.any() for frame in frames)                      # the chosen marker is still drawn

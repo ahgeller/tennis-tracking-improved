@@ -2,9 +2,11 @@
 
 Frames come from the RAM cache pass 1 filled (the clip's first frames, as many
 as fit the budget) and, past it, from a second decode of the clip.  Every
-frame gets the court, players, the selected ball and its trail; the track-debug
-video adds raw detections, ROIs, every candidate track and the chosen track's
-display path; the motion-debug video shows the masks.
+frame gets the court, players, the selected ball and its trail (and, with
+``Config.show_all_tracks``, every candidate track lightly underneath); the
+track-debug video adds raw detections, ROIs, every candidate track with its id
+and score, and the chosen track's display path; the motion-debug video shows
+the masks.
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ from .render.rendering import (
     Canvas, MarkerSizer, SearchCentreSmoother, draw_hud, draw_motion_rois, draw_player_boxes, draw_raw_detections,
     draw_selected_result,
 )
-from .render.trails import BallTrail, CandidateTrackTrails, DisplayPathTrail
+from .render.trails import DEBUG_TRACK_STYLE, LIGHT_TRACK_STYLE, BallTrail, CandidateTrackTrails, DisplayPathTrail
 from .run_context import CourtEvents, RunContext, Selection
 from .video_io import ThreadedFrameReader, VideoWriter
 
@@ -192,12 +194,17 @@ class _FrameRenderer:
         draw_court_layer(canvas.both, cfg, court_kps, model, selection.court_polygon)
         if cfg.draw_players:
             draw_player_boxes(canvas.both, pass1.player_boxes[fi])
-        # Rejected proposals, ROIs and candidate tracks belong only in the track-debug view;
-        # candidates go under the chosen result so the final choice sits on top.
+        # Rejected proposals and ROIs belong only in the track-debug view.  Candidate tracks go
+        # there too and, with show_all_tracks, lightly on the tracking frame; either way under
+        # the chosen result and its trail so the final choice sits on top.
         draw_raw_detections(canvas.debug_only, pass1.detections[fi])
         draw_motion_rois(canvas.debug_only, pass1.rois[fi])
+        if canvas.debug is not None or cfg.show_all_tracks:
+            self.candidate_trails.advance(fi)
         if canvas.debug is not None:
-            self.candidate_trails.advance_and_draw(canvas.debug, fi)
+            self.candidate_trails.draw(canvas.debug, fi, DEBUG_TRACK_STYLE)
+        if cfg.show_all_tracks:
+            self.candidate_trails.draw(canvas.main, fi, LIGHT_TRACK_STYLE)
         if result is not None:
             draw_selected_result(canvas, result, fi, self.sizer, self.search_smoother, cfg.draw_search_regions)
         # The trail's break limits follow the court's extent on screen; until the first detection
