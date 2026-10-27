@@ -123,11 +123,12 @@ class _TimelineLimits(NamedTuple):
 
 def _timeline_limits(cfg: SelectorConfig, total_frames: int) -> _TimelineLimits:
     tden = max(total_frames, 1)
-    small_gap = int(round(cfg.timeline_small_gap_frac * tden))
+    fps = max(float(cfg.fps), 1.0)
+    small_gap = int(round(cfg.timeline_small_gap_sec * fps))
     return _TimelineLimits(
         diag=cfg.diag,
         tden=tden,
-        max_gap=max(1, int(round(cfg.timeline_max_gap_frac * tden))),
+        max_gap=max(1, int(round(cfg.timeline_max_gap_sec * fps))),
         overlap_tol=int(round(cfg.timeline_overlap_tol_frac * tden)),
         small_gap=small_gap,
         medium_gap=max(small_gap + 1, int(round(small_gap * 2.0))),
