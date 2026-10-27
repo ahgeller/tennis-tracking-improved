@@ -906,13 +906,7 @@ def select_ball_in_play(
     """
     total = len(detections_by_frame)
     cfg = SelectorConfig(fps=fps, width=width, height=height)
-    scene = _Scene(
-        cfg=cfg, fps=fps, total=total, width=width, height=height,
-        boost_masks=boost_masks, raw_motions=raw_motions,
-        player_boxes_by_frame=player_boxes_by_frame,
-        fill_frames=max(_FILL_WINDOW_MIN_FRAMES, int(round(float(fps) * _FILL_WINDOW_SEC))),
-        min_fill_speed=pxpf_at_fps(_MIN_FILL_SPEED_PXPF, fps, clamp=False),
-    )
+    scene = make_scene(cfg, fps, total, width, height, boost_masks, raw_motions, player_boxes_by_frame)
     detections = build_detections(detections_by_frame, boost_masks)
     tracks = score_tracks(
         build_tracks(detections, cfg),
@@ -925,12 +919,50 @@ def select_ball_in_play(
     for track in selected:
         track.in_timeline = True
     chosen = stitch_track_chain(selected, cfg)
+    if debug:
+        print(f"[clean selector] selected tracks: {[track.track_id for track in selected]}")
+    return output_trajectory(scene, selected, chosen), chosen, tracks
+
+
+def make_scene(
+    cfg: SelectorConfig,
+    fps: float,
+    total: int,
+    width: int,
+    height: int,
+    boost_masks: Optional[Sequence[Optional[MaskLike]]],
+    raw_motions: Optional[Sequence[Optional[MaskLike]]],
+    player_boxes_by_frame: Optional[PlayerBoxesByFrame],
+) -> _Scene:
+    """The inputs the output phase reads, with the fill window and speed floor at this clip's
+    frame rate."""
+    return _Scene(
+        cfg=cfg, fps=fps, total=total, width=width, height=height,
+        boost_masks=boost_masks, raw_motions=raw_motions,
+        player_boxes_by_frame=player_boxes_by_frame,
+        fill_frames=max(_FILL_WINDOW_MIN_FRAMES, int(round(float(fps) * _FILL_WINDOW_SEC))),
+        min_fill_speed=pxpf_at_fps(_MIN_FILL_SPEED_PXPF, fps, clamp=False),
+    )
+
+
+def output_trajectory(
+    scene: _Scene, selected: List[Track], chosen: Optional[Track]
+) -> List[Optional[FrameResult]]:
+    """The per-frame output from the tracks the chooser kept: their trajectory observations
+    placed (the stronger track winning a shared frame), the gaps between them filled where the
+    evidence allows, the tails extended on motion, single holes closed, the refit, and the
+    implausible fills dropped. ``chosen`` (the stitched chain, None when nothing qualified) is
+    pruned to its trajectory observations too, so its record matches what was drawn.
+
+    Separate from ``select_ball_in_play`` so a chooser other than the timeline chain (the
+    evaluation's replay variants) produces its output the same way.
+    """
     selected_observations = {
-        id(track): trajectory_observations(track, fps) for track in selected
+        id(track): trajectory_observations(track, scene.fps) for track in selected
     }
     if chosen is not None:
-        chosen.observations = trajectory_observations(chosen, fps)
-    results: List[Optional[FrameResult]] = [None] * total
+        chosen.observations = trajectory_observations(chosen, scene.fps)
+    results: List[Optional[FrameResult]] = [None] * scene.total
 
     _place_detections(results, selected, selected_observations)
     _fill_internal_gaps(scene, results, selected, selected_observations)
@@ -939,9 +971,6 @@ def select_ball_in_play(
         if len(observations) >= 2:
             _extend_tail(scene, results, selected, observations)
     _close_single_frame_holes(scene, results)
-    refine_trajectory(results, cfg.diag)
-
-    if debug:
-        print(f"[clean selector] selected tracks: {[track.track_id for track in selected]}")
+    refine_trajectory(results, scene.cfg.diag)
     _drop_implausible_fills(scene, results)
-    return results, chosen, tracks
+    return results

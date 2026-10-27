@@ -161,7 +161,11 @@ the default, `models/ball_detector.pt`, is the heat-map network's control run of
   scores a `--court` pipeline run's landings against the landing labels (tiers, a 0.1 s
   match, `--compare`, and `--recompute` to rerun the event stages on a run's frames without
   the GPU), `parity.py` is the Pomona gate, `compare_eval_logs.py` sets two evaluator logs
-  side by side and `track_breaks.py` buckets a pipeline run's misses by cause.
+  side by side, `track_breaks.py` buckets a pipeline run's misses by cause and
+  `replay_selector.py` reruns the selector on the CPU over a pipeline run's recorded
+  detections and scores it (the chain, every track, or the detector alone), the tool a
+  selector change is measured with before a GPU run; `audit/records/selector_robustness_2026-10.md`
+  is the ledger of the selector changes.
   `validate.py` and `parity.py` run as modules from the root (`python -m evaluation.validate`,
   `python -m evaluation.parity`); `evaluate_archive.py`, `score_court_events.py` and
   `track_breaks.py` at the root are thin entry points to the workspace scorers.
