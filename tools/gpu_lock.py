@@ -21,7 +21,23 @@ import sys
 import time
 from pathlib import Path
 
-LOCK = Path(__file__).resolve().parent.parent / ".gpu_bench_lock"
+def _lock_path() -> Path:
+    """The lock beside the main checkout, shared by every worktree of the repository.
+
+    A path relative to this file would give each ``git worktree`` its own lock and so lock
+    nothing: the main checkout is the parent of the common git directory, which all
+    worktrees share.  Outside git the repository root beside this file is used.
+    """
+    here = Path(__file__).resolve().parent.parent
+    try:
+        common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=here,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return here / ".gpu_bench_lock"
+    return Path(common).parent / ".gpu_bench_lock"
+
+
+LOCK = _lock_path()
 
 
 def acquire(stale_minutes: float, poll_seconds: float) -> None:
