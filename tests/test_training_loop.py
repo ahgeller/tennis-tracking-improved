@@ -9,7 +9,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from finetune.training.dataset import make_target
 from finetune.training.loop import (HEAT_OFFSET_WEIGHT, LOSSES, batch_loss, build_optimizer, check_finite, evaluate_loss,
                                     fresh_model, gridtracknet_loss, heatmap_loss, hold_conv_scale, FILTER_NORM,
-                                    largest_running_variance, normalised_conv_weights, save_weights, train_epoch, unit_loss)
+                                    largest_running_variance, loss_of, normalised_conv_weights, save_weights, train_epoch,
+                                    unit_loss, unpack)
 from tennis_tracker import heatmapnet
 from tennis_tracker.ball_models import load_ball_model
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
@@ -190,3 +191,29 @@ def test_check_finite_names_a_poisoned_running_statistic_and_the_largest_varianc
     with pytest.raises(RuntimeError, match=r"up2\.4\.running_var holds a non-finite value"):
         check_finite(model)
     assert largest_running_variance(fresh_model(torch.device("cpu"), "gridtracknet")) == ("", 0.0)
+
+
+@pytest.mark.parametrize("arch", ["gridtracknet", heatmapnet.ARCH])
+def test_an_ignored_frame_leaves_the_loss_and_a_valid_mask_of_ones_changes_nothing(arch):
+    """A pseudo-labelled unit's ignored frames (``valid`` 0) count neither as positives nor as
+    negatives: the loss is the loss of the other frames, whatever is predicted on them."""
+    loss = loss_of(arch)
+    target = make_target([[960.0, 540.0], None, [300.0, 200.0], None, [10.0, 10.0]], 1920, 1080, arch).unsqueeze(0)
+    torch.manual_seed(0)
+    prediction = torch.rand_like(target).clamp(0.05, 0.95)
+    ones = torch.ones(1, FRAMES_PER_UNIT)
+    assert torch.allclose(loss(prediction, target), loss(prediction, target, ones))
+    valid = torch.tensor([[1.0, 1.0, 0.0, 1.0, 1.0]])
+    scrambled = prediction.clone()
+    scrambled[:, 6:9] = torch.rand_like(scrambled[:, 6:9]).clamp(0.05, 0.95)       # frame 2's answer, ignored
+    assert torch.allclose(loss(prediction, target, valid), loss(scrambled, target, valid))
+    assert not torch.allclose(loss(prediction, target), loss(scrambled, target))
+    assert loss_of("heatmap_lite") is heatmap_loss and loss_of("gridtracknet") is LOSSES["gridtracknet"]
+
+
+def test_unpack_reads_the_plain_and_the_longer_batches():
+    images, target = torch.zeros(1, 15, 2, 2), torch.zeros(1, 15, 1, 1)
+    assert unpack((images, target), torch.device("cpu"))[2:] == (None, None)
+    valid, teacher = torch.ones(1, 5), torch.ones(1, 15, 1, 1)
+    unpacked = unpack((images, target, valid, teacher), torch.device("cpu"))
+    assert unpacked[2] is not None and unpacked[3] is not None and torch.equal(unpacked[3], teacher)

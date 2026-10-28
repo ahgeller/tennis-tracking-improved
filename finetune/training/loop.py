@@ -3,8 +3,16 @@ optimisation, the validation loss and writing the weights back in the layout the
 (the .npz for GridTrackNet, the .pt record for HeatmapNet).
 
 Which loss and which layout is read off the model's ``ARCH`` (the contract ``ball_models``
-spells), so the loop holds no architecture switch of its own: ``LOSSES`` maps the id to the
-loss, ``save_weights`` to the writer.
+spells), so the loop holds no architecture switch of its own: ``loss_of`` maps the id to the
+loss (GridTrackNet's own, the heat-map loss for every other architecture: they all answer on a
+Gaussian target), ``save_weights`` to the writer.
+
+A batch is ``(images, target)``, or ``(images, target, valid)`` and ``(images, target, valid,
+teacher)`` when its dataset carries frames without a label (the ignored frames of pseudo-labelled
+clips) or a precomputed teacher answer (``dataset.UnitDataset``): ``valid`` is one weight per
+frame, 0 for a frame the labelled loss must not read, and ``teacher`` the teacher's 15-channel
+answer. With a ``distill.Distiller`` an epoch adds its loss (the teacher's soft maps and
+features) to the labelled one; without it the loop is what it always was.
 """
 
 from __future__ import annotations
@@ -12,7 +20,7 @@ from __future__ import annotations
 import math
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -31,37 +39,53 @@ POSITIVE_WEIGHT, NEGATIVE_WEIGHT = 0.75, 0.25    # the focal loss's class weight
 HEAT_ALPHA, HEAT_BETA = 2.0, 4.0                 # CenterNet's focal exponents: the easy-example one and the penalty reduction
 
 
-def gridtracknet_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def frame_weights(valid: Optional[torch.Tensor], units: int, like: torch.Tensor) -> torch.Tensor:
+    """The (units, FRAMES_PER_UNIT, 1, 1) weight of every frame's loss terms: `valid` (one weight
+    per frame, 0: no label) reshaped, or ones when the batch carries none."""
+    if valid is None:
+        return torch.ones(units, FRAMES_PER_UNIT, 1, 1, dtype=like.dtype, device=like.device)
+    return valid.to(like.device, like.dtype).reshape(units, FRAMES_PER_UNIT, 1, 1)
+
+
+def gridtracknet_loss(prediction: torch.Tensor, target: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
     """GridTrackNet's loss, as the upstream trainer has it: a class-weighted focal loss on the
     one-hot confidence grid (``POSITIVE_WEIGHT`` / ``NEGATIVE_WEIGHT``, exponent 2), averaged over
-    every cell, plus ``OFFSET_LOSS_WEIGHT`` times the L1 of the offsets at the labelled cells."""
+    every cell, plus ``OFFSET_LOSS_WEIGHT`` times the L1 of the offsets at the labelled cells,
+    averaged over frames. `valid` leaves an unlabelled frame's terms out and the confidence average
+    is then over the cells of the frames that count, so a batch without one scores as before."""
     prediction = prediction.float().reshape(-1, FRAMES_PER_UNIT, 3, GRID_ROWS, GRID_COLS)
     target = target.reshape_as(prediction)
+    weight = frame_weights(valid, prediction.shape[0], prediction)
     confidence_true = target[:, :, 0]
     confidence_pred = prediction[:, :, 0].clamp(LOSS_EPSILON, 1 - LOSS_EPSILON)
     positive = POSITIVE_WEIGHT * confidence_true * (1 - confidence_pred).square() * confidence_pred.log()
     negative = NEGATIVE_WEIGHT * (1 - confidence_true) * confidence_pred.square() * (1 - confidence_pred).log()
-    confidence_loss = -(positive + negative).mean()
-    offset_loss = ((prediction[:, :, 1:3] - target[:, :, 1:3]).abs() * confidence_true.unsqueeze(2)).sum(dim=(2, 3, 4)).mean()
+    confidence_loss = -((positive + negative) * weight).sum() / (weight.sum().clamp(min=1.0) * GRID_ROWS * GRID_COLS)
+    offsets = ((prediction[:, :, 1:3] - target[:, :, 1:3]).abs() * confidence_true.unsqueeze(2)).sum(dim=(2, 3, 4))
+    offset_loss = (offsets * weight.flatten(1)).sum() / offsets.numel()
     return confidence_loss + OFFSET_LOSS_WEIGHT * offset_loss
 
 
-def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
     """HeatmapNet's loss: CenterNet's penalty-reduced focal loss on the heat channel against
     the Gaussian target (``dataset.make_target``), where a cell at exactly 1 is a positive and
     every other cell a negative whose penalty is reduced by ``(1 - heat) ** HEAT_BETA`` near the
     peak, the sum normalised by the number of positives (at least one); plus ``HEAT_OFFSET_WEIGHT``
     times the L1 of the offsets at the peak cells, normalised the same way. The grid is the
-    target's own, so the loss does not care which stride the network answers at."""
+    target's own, so the loss does not care which stride the network answers at. `valid` (one
+    weight per frame, 0: no label, the ignored frames of a pseudo-labelled clip) leaves a frame
+    out of both sums and of the positive count: such a frame is neither a ball nor a negative."""
     rows, cols = int(target.shape[-2]), int(target.shape[-1])
     prediction = prediction.float().reshape(-1, FRAMES_PER_UNIT, 3, rows, cols)
     target = target.reshape_as(prediction)
+    weight = frame_weights(valid, prediction.shape[0], prediction)
     heat_true = target[:, :, 0]
     heat_pred = prediction[:, :, 0].clamp(LOSS_EPSILON, 1 - LOSS_EPSILON)
-    peak = (heat_true == 1).float()
+    peak = (heat_true == 1).float() * weight
     positives = peak.sum().clamp(min=1.0)
     positive = peak * (1 - heat_pred).pow(HEAT_ALPHA) * heat_pred.log()
-    negative = (1 - peak) * (1 - heat_true).pow(HEAT_BETA) * heat_pred.pow(HEAT_ALPHA) * (1 - heat_pred).log()
+    negative = weight * (1 - (heat_true == 1).float()) * (1 - heat_true).pow(HEAT_BETA) * heat_pred.pow(HEAT_ALPHA) \
+        * (1 - heat_pred).log()
     heat_loss = -(positive + negative).sum() / positives
     offset_loss = ((prediction[:, :, 1:3] - target[:, :, 1:3]).abs() * peak.unsqueeze(2)).sum() / positives
     return heat_loss + HEAT_OFFSET_WEIGHT * offset_loss
@@ -70,14 +94,31 @@ def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor
 LOSSES = {GRIDTRACKNET: gridtracknet_loss, HEATMAP_S4: heatmap_loss}
 
 
-def unit_loss(model: torch.nn.Module, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """The loss of `model`'s architecture (``LOSSES`` by ``model.ARCH``) on one batch of units."""
-    return LOSSES[model.ARCH](prediction, target)
+def loss_of(arch: str) -> Callable[..., torch.Tensor]:
+    """The labelled loss of an architecture: its own in ``LOSSES``, else the heat-map loss, which
+    every architecture after GridTrackNet answers on (``dataset.make_target`` draws the Gaussian
+    target for every id but GridTrackNet's)."""
+    return LOSSES.get(arch, heatmap_loss)
 
 
-def batch_loss(model: torch.nn.Module, images: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def unit_loss(model: torch.nn.Module, prediction: torch.Tensor, target: torch.Tensor,
+              valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """The loss of `model`'s architecture (``loss_of`` its ``ARCH``) on one batch of units."""
+    return loss_of(model.ARCH)(prediction, target, valid)
+
+
+def batch_loss(model: torch.nn.Module, images: torch.Tensor, target: torch.Tensor,
+               valid: Optional[torch.Tensor] = None) -> torch.Tensor:
     """The loss of one batch from the loader: ``unit_loss`` on the model's output."""
-    return unit_loss(model, model(images), target)
+    return unit_loss(model, model(images), target, valid)
+
+
+def unpack(batch: Sequence[torch.Tensor], device: torch.device
+           ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """One loader batch moved to `device` as (images, target, valid or None, teacher or None): the
+    two items of a plain dataset's batch and the longer batches the module docstring names."""
+    moved = [item.to(device, non_blocking=True) for item in batch]
+    return moved[0], moved[1], moved[2] if len(moved) > 2 else None, moved[3] if len(moved) > 3 else None
 
 
 def save_weights(model: torch.nn.Module, template: Path, destination: Path) -> None:
@@ -150,11 +191,12 @@ def hold_conv_scale(weights: List[torch.Tensor]) -> None:
         weight.mul_((FILTER_NORM / norms).view(-1, 1, 1, 1))
 
 
-def build_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Adadelta:
+def build_optimizer(model: torch.nn.Module, lr: float, extra: Sequence[torch.nn.Parameter] = ()) -> torch.optim.Adadelta:
     """The run's Adadelta (rho 0.95, eps 1e-7, upstream's), one parameter group and no weight
     decay: recipe 2's decay on the normalised convolutions held their scale at 0.3 and lost to
-    the step at 1.0 (heat3); ``hold_conv_scale`` holds it exactly at either."""
-    return torch.optim.Adadelta(model.parameters(), lr=lr, rho=0.95, eps=1e-7)
+    the step at 1.0 (heat3); ``hold_conv_scale`` holds it exactly at either. `extra` parameters
+    train beside the model in the same group (a ``distill.Distiller``'s feature adapters)."""
+    return torch.optim.Adadelta([*model.parameters(), *extra], lr=lr, rho=0.95, eps=1e-7)
 
 
 def check_finite(model: torch.nn.Module) -> None:
@@ -202,10 +244,10 @@ def evaluate_loss(model, loader, device, max_steps=None) -> float:
     total, steps = 0.0, 0
     try:
         with torch.inference_mode():
-            for images, target in loader:
-                images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
+            for batch in loader:
+                images, target, valid, _ = unpack(batch, device)
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-                    loss = batch_loss(model, images, target)
+                    loss = batch_loss(model, images, target, valid)
                 total += float(loss)
                 steps += 1
                 if max_steps and steps >= max_steps:
@@ -216,20 +258,28 @@ def evaluate_loss(model, loader, device, max_steps=None) -> float:
 
 
 def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: int, epochs: int,
-                max_steps: Optional[int]) -> float:
+                max_steps: Optional[int], distiller: Any = None) -> float:
     """One pass over the training loader; returns the mean loss. The normalised convolutions are
     held at ``FILTER_NORM`` per filter before the first step and after every step (``hold_conv_scale``;
-    nothing to hold in a GridTrackNet)."""
+    nothing to hold in a GridTrackNet). With a `distiller` (``distill.Distiller``) every step adds
+    its loss on the same output to the labelled one, and the progress lines name its parts."""
     model.train()
     held = normalised_conv_weights(model)
     hold_conv_scale(held)
     total, steps = 0.0, 0
+    parts: Dict[str, float] = {}
     started = time.perf_counter()
-    for images, target in loader:
-        images, target = images.to(device, non_blocking=True), target.to(device, non_blocking=True)
+    for batch in loader:
+        images, target, valid, teacher = unpack(batch, device)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-            loss = batch_loss(model, images, target)
+            prediction = model(images)
+            loss = unit_loss(model, prediction, target, valid)
+            if distiller is not None:
+                extra, terms = distiller.loss(prediction, images, teacher)
+                loss = loss + extra
+                for name, value in terms.items():
+                    parts[name] = parts.get(name, 0.0) + value
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -239,8 +289,9 @@ def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: i
         if steps == 1 or steps % PROGRESS_EVERY == 0:
             rate = steps / max(time.perf_counter() - started, 1e-6)
             remaining = (len(loader) - steps) / max(rate, 1e-6)
+            named = "".join(f" {name}={value / steps:.4f}" for name, value in sorted(parts.items()))
             print(f"[train] epoch {epoch}/{epochs} step {steps}/{len(loader)} "
-                  f"loss={total / steps:.6f} {rate:.1f} it/s eta {remaining / 60:.0f} min", flush=True)
+                  f"loss={total / steps:.6f}{named} {rate:.1f} it/s eta {remaining / 60:.0f} min", flush=True)
         if max_steps and steps >= max_steps:
             break
     return total / max(steps, 1)
