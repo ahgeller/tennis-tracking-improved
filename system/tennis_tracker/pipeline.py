@@ -6,9 +6,10 @@ call.  Each stage takes and returns explicit data (see ``run_context``,
 """
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
-from typing import Dict, NamedTuple
+from typing import Dict, NamedTuple, Optional
 
 import cv2
 import torch
@@ -31,7 +32,7 @@ from .engines.player_detector import PlayerDetector, prefetch_bytetrack
 from .render.display_path import build_display_path
 from .run_context import CourtEvents, RunContext, Selection, Timing, VideoInfo
 from .render.summaries import print_selector_track_summary, print_timing_summary
-from .utils import detect_device, print_platform_report, resolve_runtime
+from .utils import EncoderChoice, choose_encoder, detect_device, print_platform_report, resolve_runtime
 from .video_io import check_writable_video_path
 
 _DEFAULT_FPS = 24.0                 # when the container reports none
@@ -121,6 +122,30 @@ def _build_ball_detector(cfg: Config) -> BallDetectorBackend:
     return TensorRTRuntimeBallDetector(str(engine_path), cfg, ball_cls_id, names=names)
 
 
+class _EncoderProbe:
+    """``utils.choose_encoder`` for a CUDA run, on a thread of its own; ``result`` waits for it and
+    raises what it raised."""
+
+    def __init__(self, cfg: Config) -> None:
+        self._choice: Optional[EncoderChoice] = None
+        self._error: Optional[BaseException] = None
+        self._thread = threading.Thread(target=self._run, args=(cfg,), name="encoder-probe", daemon=True)
+        self._thread.start()
+
+    def _run(self, cfg: Config) -> None:
+        try:
+            self._choice = choose_encoder(cfg, is_cuda=True)
+        except BaseException as error:  # noqa: BLE001 - re-raised by result()
+            self._error = error
+
+    def result(self) -> EncoderChoice:
+        self._thread.join()
+        if self._error is not None:
+            raise self._error
+        assert self._choice is not None
+        return self._choice
+
+
 def _open_inputs(cfg: Config) -> RunContext:
     """Validate the config, pick the device and encoder, build the detectors and open the clip."""
     input_path = validate_io_paths(cfg)
@@ -137,9 +162,11 @@ def _open_inputs(cfg: Config) -> RunContext:
     if not torch.cuda.is_available() or device_index >= torch.cuda.device_count():
         raise RuntimeError(f"CUDA device {device_index} is unavailable.")
     # The caller's Config is not changed. A run that writes no video gets no encoder: FFmpeg is
-    # not probed or dry-run for it.
-    cfg, encoder = resolve_runtime(cfg, str(device_index), writes_video=bool(_video_outputs(cfg)))
-    print_platform_report(cfg, encoder)
+    # not probed or dry-run for it. A run that does probes on a thread (FFmpeg's encoder list and an
+    # NVENC dry run, ~0.4 s of subprocesses) while the detectors are built; the platform report
+    # follows once the choice is in.
+    cfg, _ = resolve_runtime(cfg, str(device_index), writes_video=False)
+    encoder_probe = _EncoderProbe(cfg) if _video_outputs(cfg) else None
     device = torch.device(f"cuda:{device_index}")
 
     # The run owns the process: let cuDNN autotune the fixed-shape convolutions.
@@ -157,11 +184,19 @@ def _open_inputs(cfg: Config) -> RunContext:
         frame_count_hint=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
     )
     print(f"[init] Video: {video.width}x{video.height} @ {video.fps:.1f}fps, ~{video.frame_count_hint} frames")
-    # The court and player engines are built, and the player engine's CUDA graph captured, before
-    # the prepass worker starts: a capture is invalidated by CUDA work from another thread.
+    # A prepass on a worker thread starts after the court and player engines are built and the
+    # player engine's CUDA graph is captured: a capture is invalidated by CUDA work from another
+    # thread. A prepass in the foreground (the default) runs first instead, so boxmot's import
+    # (prefetch_bytetrack, ~2 s that PlayerDetector waits for) finishes behind it.
+    foreground_prepass = not (cfg.gridtracknet_prepass_background and isinstance(detector, GridTrackNetBallDetector))
+    if foreground_prepass:
+        detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
     court_detector = CourtDetector(cfg)
     player_detector = PlayerDetector(cfg, court_keypoints=None)
-    detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
+    if not foreground_prepass:
+        detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
+    encoder = encoder_probe.result() if encoder_probe is not None else None
+    print_platform_report(cfg, encoder)
 
     return RunContext(
         cfg=cfg,

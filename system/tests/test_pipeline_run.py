@@ -36,6 +36,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -700,3 +701,64 @@ def test_pass2_refuses_a_clip_it_cannot_reopen(tmp_path, monkeypatch, fake_cuda,
     monkeypatch.setattr(video_decode, "cv2", SimpleNamespace(VideoCapture=Unopenable))   # pass 1 keeps the real one
     with pytest.raises(RuntimeError, match="reopen the input video for pass 2"):
         pipeline.run(cfg)
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_a_foreground_prepass_runs_before_the_engines_and_a_background_one_after(
+        tmp_path, monkeypatch, fake_cuda, clip, background):
+    """A prepass on the main thread runs before the court and player detectors are built, so
+    boxmot's import finishes behind it; a prepass on a worker thread starts after them, so the
+    player engine's CUDA graph is captured with no other thread's CUDA work in flight."""
+    events: List[str] = []
+    prepare = FakeGridTrackNet.prepare_video
+
+    def recording_prepare(self, *args, **kwargs):
+        events.append("prepass")
+        return prepare(self, *args, **kwargs)
+
+    class RecordingCourt(FakeCourtDetector):
+        def __init__(self, cfg: Config):
+            events.append("court")
+            super().__init__(cfg)
+
+    class RecordingPlayers(FakePlayerDetector):
+        def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None):
+            events.append("players")
+            super().__init__(cfg, court_keypoints)
+
+    install_fakes(monkeypatch)
+    monkeypatch.setattr(FakeGridTrackNet, "prepare_video", recording_prepare)
+    monkeypatch.setattr(pipeline, "CourtDetector", RecordingCourt)
+    monkeypatch.setattr(pipeline, "PlayerDetector", RecordingPlayers)
+    pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, gridtracknet_prepass_background=background))
+    assert events == (["court", "players", "prepass"] if background else ["prepass", "court", "players"])
+
+
+def test_a_video_run_probes_the_encoder_alongside_init_and_raises_what_the_probe_raised(
+        tmp_path, monkeypatch, fake_cuda, capsys, clip):
+    """The encoder is chosen on a thread while the detectors are built; the platform report still
+    names it, and a probe that fails fails the run as it did when it ran inline."""
+    monkeypatch.setattr(utils, "find_ffmpeg", lambda prefer_encoder="h264_nvenc": "/opt/ffmpeg")
+    monkeypatch.setattr(utils, "ffmpeg_has_encoder", lambda ffmpeg, encoder: True)
+    monkeypatch.setattr(utils, "ffmpeg_encoder_failure", lambda ffmpeg, encoder: None)
+    probes: List[str] = []
+    choose = utils.choose_encoder
+
+    def recording_choose(cfg, is_cuda=True):
+        probes.append(threading.current_thread().name)
+        return choose(cfg, is_cuda)
+
+    monkeypatch.setattr(pipeline, "choose_encoder", recording_choose)
+    install_fakes(monkeypatch)
+    ctx = pipeline._open_inputs(make_config(tmp_path, clip, use_nvenc=True))
+    ctx.capture.release()
+    assert probes == ["encoder-probe"]
+    assert ctx.encoder is not None and ctx.encoder.preferred == utils.ENCODER_NVENC
+    assert "[platform] Accelerations: TensorRT, NVENC encoding, CUDA preprocessing" in capsys.readouterr().out
+
+    def broken(cfg, is_cuda=True):
+        raise OSError("ffmpeg vanished")
+
+    monkeypatch.setattr(pipeline, "choose_encoder", broken)
+    with pytest.raises(OSError, match="ffmpeg vanished"):
+        pipeline._open_inputs(make_config(tmp_path, clip, use_nvenc=True))
