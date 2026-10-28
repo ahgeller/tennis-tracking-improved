@@ -103,6 +103,23 @@ Clip `system/sample/pomona.mp4`: 1920x1080, 59.67 fps, 2022 frames, 33.9 s, H.26
   pose model must beat that heuristic. Spin class from arc shape + post-bounce kick.
 - Scoring state machine on rally legs; doubles as dead-time removal.
 
+### E. Realtime streaming and iOS (final stage, needs B + C first)
+- Why a redesign: the tracker already runs faster than realtime on the 5080 (Pomona in
+  ~16 s for 34 s of video) but is offline: the prepass reads the whole clip, the selector
+  picks the track from every frame, pass 2 renders afterwards. Its stack (CUDA, TensorRT,
+  NVDEC/NVENC, PyTorch, OpenCV, Python ByteTrack) does not run on iOS.
+- Streaming pipeline on the PC first: a causal loop on a fixed lag; the selector and
+  bounce/contact logic decide on a sliding window and commit ~0.2-0.5 s behind live. Gate:
+  replayed offline, it must match the offline tracker within the existing gates.
+- Core ML: convert the Phase B student (RepVGG fused) and the player/court models with
+  `coremltools` for the Neural Engine. First a feasibility test: time the converted ball
+  model on a real iPhone in Xcode (needs a Mac + iPhone) before porting anything else.
+- Port the logic to Swift (Metal for motion and drawing, Accelerate for the selector,
+  tracker and court events). The bulk of the work.
+- Phone budget at 60 fps (estimates): heatmap_s4 ~1500 GMAC/s (too heavy), heatmap_lite
+  ~240, stream_s4 ~160, ~40-60 with the Phase C crop gate; players every few frames.
+  Phase A's gains are mostly NVIDIA-specific; B and C are what make this plausible.
+
 ## 4. Fact-check of the Google AI Mode conversation (summary)
 
 True: on-device, Neural Engine, founder ex-Tesla Autopilot, patent US11893808B2
