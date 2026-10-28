@@ -42,3 +42,4 @@ scorecard.png
 *.engine
 *.onnx
 *.cbm
+/.gpu_bench_lock/
