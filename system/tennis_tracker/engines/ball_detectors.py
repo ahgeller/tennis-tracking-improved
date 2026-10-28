@@ -26,6 +26,7 @@ from ball_in_play_selector import RawDetection
 
 from ..config import Config
 from .ball_gpu import HeatRing, ModelResize, Readback, grid_peaks, peak_points
+from .ball_prepass_process import RemotePrepass
 from .engine_boxes import OutputMode, decode_engine_boxes, engine_output_mode
 from .engine_session import TensorRTRuntimeSession
 from ..ball_models import load_ball_model
@@ -178,7 +179,6 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         # instead (the tests' seam for stand-in models that answer no grid).
         self._decode: Optional[Callable[[torch.Tensor, int, int, float], List[GridPoint]]] = None
         self._resizers: Dict[Tuple[int, int], ModelResize] = {}
-        self.model: Any = load_ball_model(Path(weights_path), self.device)
         window_step = self.window_step()
         # One entry per decoded source frame, appended by the prepass.
         self.precomputed: Optional[List[List[RawDetection]]] = None
@@ -189,6 +189,17 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         self._ready = threading.Condition()
         self._worker: Optional[threading.Thread] = None
         self._worker_error: Optional[BaseException] = None
+        # Called with every newly published ``upto`` (the prepass process sends the rows on).
+        self.on_publish: Optional[Callable[[int], None]] = None
+        self._remote: Optional[RemotePrepass] = None
+        self.model: Any = None
+        self.engine: Any = None
+        if cfg.gridtracknet_prepass_process and cfg.gridtracknet_prepass_background:
+            # The child builds the model and the engine; this process only reads its answers.
+            self._remote = RemotePrepass(weights_path, cfg)
+            print(f"[detector] the ball prepass runs in its own process ({Path(weights_path).name})")
+            return
+        self.model = load_ball_model(Path(weights_path), self.device)
         self.engine = self._open_engine(Path(weights_path))
         if self.engine is None:         # the PyTorch model runs: let cuDNN pick its kernels now
             channels = int(getattr(self.model, "INPUT_CHANNELS"))
@@ -264,7 +275,6 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         whose failure raises from here.
         """
         source_stride = self.source_stride_for(fps)
-        capture = open_frames(video_path)
         cached: List[List[RawDetection]] = []
         self.precomputed = cached
         self._ready_upto = 0
@@ -272,6 +282,15 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         self._worker_error = None
         if background is None:
             background = self.cfg.gridtracknet_prepass_background
+        if self._remote is not None:
+            self._run_remote(self._remote, video_path, fps, width, height, total, cached)
+            if not background:
+                with self._ready:
+                    while not self._done:
+                        self._ready.wait(timeout=0.5)
+                self._raise_if_failed()
+            return
+        capture = open_frames(video_path)
         args = (capture, cached, source_stride, width, height, int(total))
         if background:
             self._worker = threading.Thread(target=self._prepass, args=args, daemon=True, name="gridtracknet-prepass")
@@ -281,10 +300,33 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             self._prepass(*args)
             self._raise_if_failed()
 
+    def _run_remote(self, remote: RemotePrepass, video_path: Path, fps: float, width: int, height: int, total: int,
+                    cached: List[List[RawDetection]]) -> None:
+        """Start the prepass process on the clip: its final rows land in `cached` in order and are
+        published as they arrive; its end, or its error, finishes the prepass here."""
+        def on_rows(start: int, rows: List[List[RawDetection]]) -> None:
+            del cached[start:]
+            cached.extend(rows)
+            self._publish(start + len(rows))
+
+        def on_end(error: Optional[BaseException]) -> None:
+            self._worker_error = error
+            self._finish()
+
+        remote.run(video_path, fps, width, height, total, on_rows, on_end)
+
+    def close(self) -> None:
+        """Stop the prepass process, if the prepass runs in one."""
+        if self._remote is not None:
+            self._remote.close()
+            self._remote = None
+
     def _publish(self, upto: int) -> None:
         with self._ready:
             self._ready_upto = max(self._ready_upto, upto)
             self._ready.notify_all()
+        if self.on_publish is not None:
+            self.on_publish(upto)
 
     def _finish(self) -> None:
         with self._ready:
@@ -322,8 +364,8 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         network = engine if engine is not None else self.model
         batch_units = engine.batch if engine is not None else _UNITS_PER_INFERENCE
         averaging = window_step != 5
-        # The frames summed in the ring and not yet decoded, with the number of units that covered each.
-        covered: Dict[int, int] = {}
+        # The frames summed in the ring and not yet decoded.
+        covered: Set[int] = set()
         ring: Optional[HeatRing] = None
         finalized: Set[int] = set()
         in_flight: Deque[_Flush] = deque()
@@ -388,7 +430,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                         ring = HeatRing(_ring_slots(batch_units, window_step, source_stride), *grid, output.device)
                     for indices in units:
                         for index in indices:
-                            covered[index] = covered.get(index, 0) + 1
+                            covered.add(index)
                     ring.check_span(min(covered), frame_index)
                     ring.add(output, units)
                 elif self._decode is not None:
@@ -402,7 +444,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                 ready = sorted(index for index in covered if index < upto)
                 if ready:
                     for index in ready:
-                        del covered[index]
+                        covered.discard(index)
                     record.peaks, record.frames = Readback(ring.take(ready)), ready
             in_flight.append(record)
             drain(everything=final)

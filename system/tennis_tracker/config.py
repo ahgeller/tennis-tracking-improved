@@ -36,6 +36,9 @@ class Config:
     ball_prepass_runtime: str = "tensorrt"
     ball_engine_batch: int = 8          # units per engine call (the batch sweep in audit/records/opt_ball_prepass.md)
     ball_engine_dir: str = str(MODELS / "engine_cache")
+    # Run the background prepass in a child process (engines/ball_prepass_process.py) instead of a
+    # worker thread, so it never contends with pass 1 for the interpreter lock.
+    gridtracknet_prepass_process: bool = False
 
     # TensorRT
     trt_async_execute: bool = True

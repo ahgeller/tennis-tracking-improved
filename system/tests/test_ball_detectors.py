@@ -76,6 +76,8 @@ def _bare_detector(cfg=None) -> GridTrackNetBallDetector:
     detector._decode = lambda output, width, height, conf: [((10.0, 20.0), 0.9)] * (int(output.shape[0]) * 5)
     detector.engine = None
     detector._resizers = {}
+    detector._remote = None
+    detector.on_publish = None
     detector.precomputed = None
     detector._ready_upto = 0
     detector._done = False
@@ -298,3 +300,47 @@ def test_a_static_batch_engine_answers_what_the_pytorch_model_answers(step, stri
             answers.append(detector.detect_clip(Path("s.mp4"), _FPS_FOR_STRIDE[stride], 1920, 1080, count))
         assert published == sorted(published) and published[-1] == count
     assert answers[0] == answers[1] and sum(map(bool, answers[0])) > count // 2
+
+
+class FakeRemote:
+    """A ``RemotePrepass`` that answers from a script on a thread: rows in two runs, then the end."""
+
+    def __init__(self, rows, error=None):
+        self.rows, self.error, self.closed = rows, error, False
+
+    def run(self, video_path, fps, width, height, total, on_rows, on_end):
+        def feed():
+            half = len(self.rows) // 2
+            on_rows(0, self.rows[:half])
+            on_rows(half, self.rows[half:])
+            on_end(self.error)
+        threading.Thread(target=feed).start()
+
+    def close(self):
+        self.closed = True
+
+
+def _remote_detector(remote):
+    detector = _bare_detector(Config(device="0", gridtracknet_prepass_process=True))
+    detector.on_publish = None
+    detector._remote = remote
+    return detector
+
+
+def test_a_prepass_process_answers_through_the_same_cache():
+    rows = [[] if index % 3 else [([1.0, 2.0, 3.0, 4.0], 0.5)] for index in range(7)]
+    detector = _remote_detector(FakeRemote(rows))
+    assert detector.detect_clip(Path("clip.mp4"), 30.0, 1920, 1080, total=7) == rows
+    detector.prepare_video(Path("clip.mp4"), 30.0, 1920, 1080, total=7, background=True)
+    assert detector.detections_at(6) == rows[6]
+    with pytest.raises(IndexError):
+        detector.detections_at(7)
+    remote = detector._remote
+    detector.close()
+    assert remote.closed and detector._remote is None
+
+
+def test_a_prepass_process_failure_reaches_the_consumer():
+    detector = _remote_detector(FakeRemote([[]] * 4, error=RuntimeError("the prepass process failed: boom")))
+    with pytest.raises(RuntimeError, match="prepass failed"):
+        detector.detect_clip(Path("clip.mp4"), 30.0, 1920, 1080, total=4)
