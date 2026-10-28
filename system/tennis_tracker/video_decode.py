@@ -56,9 +56,10 @@ BACKEND_NVDEC = "nvdec"
 BACKEND_OPENCV = "opencv"
 # Frames NVDEC's decode thread keeps ready ahead of the reader (PyNvVideoCodec recommends 8 to 16).
 NVDEC_BUFFER_FRAMES = 12
-# The OpenCV seek lands up to this share of the target frame number away from it on a
-# variable-frame-rate clip (pomona: 1%; the VFR test clip: 24%), plus a fixed allowance.
-_SYNC_MARGIN_SHARE = 0.5
+# The OpenCV seek lands up to a share of the target frame number away from it on a variable-frame-rate
+# clip (pomona: 1%; the VFR test clip: 24%), plus a fixed allowance.  The walk tries the tight share
+# first (the walk costs a decode and a comparison per frame: 1.8 s at frame 690 with 50%), then the wide.
+_SYNC_MARGIN_SHARES = (0.05, 0.5)
 _SYNC_MARGIN_FRAMES = 30
 # Pictures of the cached prefix the walk matches in a row; more when they are all alike.
 _SYNC_TAIL_FRAMES = 3
@@ -96,23 +97,25 @@ def _pmulhw(a: torch.Tensor, coefficient: int) -> torch.Tensor:
 
 
 def nv12_to_bgr(nv12: torch.Tensor, full_range: bool) -> torch.Tensor:
-    """One NV12 picture (``(H * 3 / 2, W)`` uint8: the Y plane over the interleaved UV plane) as
-    BGR HWC uint8, the pixels OpenCV's FFmpeg backend gives for it (swscale's x86 ``yuv2rgb``:
-    samples shifted left 3, offsets taken off, ``pmulhw`` by the coefficients, chroma sums
-    saturated to 16 bits, the result saturated to 0..255; each chroma sample serves a 2x2 block)."""
+    """NV12 pictures (``(..., H * 3 / 2, W)`` uint8: the Y plane over the interleaved UV plane,
+    any leading batch dimensions) as BGR ``(..., H, W, 3)`` uint8, the pixels OpenCV's FFmpeg
+    backend gives for them (swscale's x86 ``yuv2rgb``: samples shifted left 3, offsets taken off,
+    ``pmulhw`` by the coefficients, chroma sums saturated to 16 bits, the result saturated to
+    0..255; each chroma sample serves a 2x2 block)."""
     c = _swscale_coefficients(full_range)
-    height = nv12.shape[0] * 2 // 3
-    width = nv12.shape[1]
-    y = nv12[:height].to(torch.int32)
-    uv = nv12[height:].view(height // 2, width // 2, 2).to(torch.int32)
+    batch = nv12.shape[:-2]
+    height = nv12.shape[-2] * 2 // 3
+    width = nv12.shape[-1]
+    y = nv12[..., :height, :].to(torch.int32)
+    uv = nv12[..., height:, :].reshape(*batch, height // 2, width // 2, 2).to(torch.int32)
     u = (uv[..., 0] << 3) - 1024
     v = (uv[..., 1] << 3) - 1024
-    luma = _pmulhw((y << 3) - c["y_offset"], c["y"]).view(height // 2, 2, width // 2, 2)
+    luma = _pmulhw((y << 3) - c["y_offset"], c["y"]).view(*batch, height // 2, 2, width // 2, 2)
     blue = _pmulhw(u, c["u2b"])
     red = _pmulhw(v, c["v2r"])
     green = (_pmulhw(u, c["u2g"]) + _pmulhw(v, c["v2g"])).clamp_(-32768, 32767)
-    bgr = torch.stack([luma + term[:, None, :, None] for term in (blue, green, red)], dim=-1)
-    return bgr.clamp_(0, 255).to(torch.uint8).view(height, width, 3)
+    bgr = torch.stack([luma + term[..., :, None, :, None] for term in (blue, green, red)], dim=-1)
+    return bgr.clamp_(0, 255).to(torch.uint8).view(*batch, height, width, 3)
 
 
 def _check_nvdec_caps(path, gpu_id: int) -> None:
@@ -211,6 +214,7 @@ class NvdecDecoder:
         self._path = str(path)
         self._gpu_id = self.device.index or 0
         self._stream = torch.cuda.Stream(device=self.device)
+        self._ready = torch.cuda.Event()          # the pending batch's conversion (and download) done
         _check_nvdec_caps(path, self._gpu_id)
         with torch.cuda.device(self.device):
             self.full_range = _opencv_range(path, self._gpu_id)
@@ -269,19 +273,34 @@ class NvdecDecoder:
                 keep.append(frame)
             else:
                 if keep:
-                    with torch.cuda.device(self.device), torch.cuda.stream(self._stream):
-                        self._pending = [nv12_to_bgr(torch.from_dlpack(frame), self.full_range) for frame in keep]
+                    self._convert(keep)
                     return True
+
+    def _convert(self, frames: List[Any]) -> None:
+        """Convert a batch in one pass (a dozen kernels for the batch, not per frame: the reader
+        thread holds the GIL while it launches them) and, with ``host``, download it in one
+        asynchronous copy to pinned memory; ``_ready`` marks when the batch can be read."""
+        with torch.cuda.device(self.device), torch.cuda.stream(self._stream):
+            nv12 = torch.stack([torch.from_dlpack(frame) for frame in frames])
+            bgr = nv12_to_bgr(nv12, self.full_range)
+            if self.host:
+                pinned = torch.empty(bgr.shape, dtype=torch.uint8, pin_memory=True)
+                pinned.copy_(bgr, non_blocking=True)
+                bgr = pinned
+            self._ready = torch.cuda.Event()
+            self._ready.record(self._stream)
+        self._pending = list(bgr.unbind(0))
 
     def read(self) -> Tuple[bool, Optional[Image]]:
         if not self._pending and not self._refill():
             return False, None
         frame = self._pending.pop(0)
         self.next_index += 1
-        current = torch.cuda.current_stream(self.device)
-        current.wait_stream(self._stream)
         if self.host:
-            return True, frame.cpu().numpy()
+            self._ready.synchronize()
+            return True, frame.numpy()
+        current = torch.cuda.current_stream(self.device)
+        current.wait_event(self._ready)
         frame.record_stream(current)
         return True, frame
 
@@ -325,21 +344,22 @@ class OpenCVDecoder:
     def _seek_to(self, start_frame: int, tail: Sequence[np.ndarray]) -> bool:
         """Seek early and read forward until the decoded pictures equal ``tail`` (the frames just
         before ``start_frame``), leaving the capture on ``start_frame``.  False (with the capture
-        reopened at the first frame) when they do not show up within the margin."""
-        margin = _SYNC_MARGIN_FRAMES + int(_SYNC_MARGIN_SHARE * start_frame)
+        reopened at the first frame) when they do not show up within the widest margin."""
         first = start_frame - len(tail)
-        self._capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, first - margin))
-        matched = 0
-        for _ in range(2 * margin + len(tail)):
-            ok, frame = self._capture.read()
-            if not ok:
-                break
-            if np.array_equal(frame, tail[matched]):
-                matched += 1
-            else:
-                matched = 1 if np.array_equal(frame, tail[0]) else 0
-            if matched == len(tail):
-                return True
+        for share in _SYNC_MARGIN_SHARES:
+            margin = _SYNC_MARGIN_FRAMES + int(share * start_frame)
+            self._capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, first - margin))
+            matched = 0
+            for _ in range(2 * margin + len(tail)):
+                ok, frame = self._capture.read()
+                if not ok:
+                    break
+                if np.array_equal(frame, tail[matched]):
+                    matched += 1
+                else:
+                    matched = 1 if np.array_equal(frame, tail[0]) else 0
+                if matched == len(tail):
+                    return True
         self._capture.release()
         self._capture = self._open()
         return False
