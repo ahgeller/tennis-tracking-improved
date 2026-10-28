@@ -74,6 +74,10 @@ def _bare_detector(cfg=None) -> GridTrackNetBallDetector:
     detector.model = StandInModel(lambda batch: batch)
     detector._frame_tensor = lambda frame, device: torch.zeros((1, 3))
     detector._decode = lambda output, width, height, conf: [((10.0, 20.0), 0.9)] * (int(output.shape[0]) * 5)
+    detector.engine = None
+    detector._resizers = {}
+    detector._remote = None
+    detector.on_publish = None
     detector.precomputed = None
     detector._ready_upto = 0
     detector._done = False
@@ -192,7 +196,7 @@ def _grid_detector(model, window_step, publications):
     def frame_tensor(frame, device):
         return torch.full((3, 1, 1), float(frame[0, 0, 0]))
     cfg = Config(device="0", conf=0.25, gridtracknet_window_step=window_step)
-    return CpuGridTrackNet(cfg, model=model, decode=ball_detectors.decode_predictions, frame_tensor=frame_tensor,
+    return CpuGridTrackNet(cfg, model=model, decode=None, frame_tensor=frame_tensor,
                            on_publish=publications.append)
 
 
@@ -266,3 +270,106 @@ def test_unit_streams_cut_a_unit_every_step_frames_and_cover_the_tail(step):
         assert trailing is None
     else:
         assert trailing is not None and trailing[1] == list(range(12, 17))
+
+
+class StaticBatchEngine(GridStandIn):
+    """GridStandIn as an engine of a static batch: it refuses any other batch size."""
+
+    def __init__(self, batch):
+        super().__init__()
+        self.batch = batch
+        self.stream = None
+
+    def answer(self, batch):
+        assert batch.shape[0] == self.batch
+        return super().answer(batch)
+
+
+@pytest.mark.parametrize("step, stride, count", [(1, 2, 25), (5, 1, 23), (5, 2, 31), (2, 1, 14)])
+def test_a_static_batch_engine_answers_what_the_pytorch_model_answers(step, stride, count):
+    """The engine path pads its last call with copies of the last unit and splits trailing windows
+    that overflow a call: every frame gets the answer the PyTorch path gives, on the device-side
+    peaks (no host decoder) for both the averaged and the one-unit-per-frame prepass."""
+    answers = []
+    for engine in (None, StaticBatchEngine(3)):
+        published = []
+        detector = _grid_detector(GridStandIn(), step, published)
+        detector.engine = engine
+        with patch.object(cv2, "VideoCapture", side_effect=lambda _: Capture(count)), \
+             patch.object(torch.cuda, "synchronize"):
+            answers.append(detector.detect_clip(Path("s.mp4"), _FPS_FOR_STRIDE[stride], 1920, 1080, count))
+        assert published == sorted(published) and published[-1] == count
+    assert answers[0] == answers[1] and sum(map(bool, answers[0])) > count // 2
+
+
+class FakeRemote:
+    """A ``RemotePrepass`` that answers from a script on a thread: rows in two runs, then the end."""
+
+    def __init__(self, rows, error=None):
+        self.rows, self.error, self.closed = rows, error, False
+
+    def run(self, video_path, fps, width, height, total, on_rows, on_end):
+        def feed():
+            half = len(self.rows) // 2
+            on_rows(0, self.rows[:half])
+            on_rows(half, self.rows[half:])
+            on_end(self.error)
+        threading.Thread(target=feed).start()
+
+    def close(self):
+        self.closed = True
+
+
+def _remote_detector(remote):
+    detector = _bare_detector(Config(device="0", gridtracknet_prepass_background=True, gridtracknet_prepass_process=True))
+    detector.on_publish = None
+    detector._remote = remote
+    return detector
+
+
+def test_a_prepass_process_answers_through_the_same_cache():
+    rows = [[] if index % 3 else [([1.0, 2.0, 3.0, 4.0], 0.5)] for index in range(7)]
+    detector = _remote_detector(FakeRemote(rows))
+    assert detector.detect_clip(Path("clip.mp4"), 30.0, 1920, 1080, total=7) == rows
+    detector.prepare_video(Path("clip.mp4"), 30.0, 1920, 1080, total=7, background=True)
+    assert detector.detections_at(6) == rows[6]
+    with pytest.raises(IndexError):
+        detector.detections_at(7)
+    remote = detector._remote
+    detector.close()
+    assert remote.closed and detector._remote is None
+
+
+def test_a_prepass_process_failure_reaches_the_consumer():
+    detector = _remote_detector(FakeRemote([[]] * 4, error=RuntimeError("the prepass process failed: boom")))
+    with pytest.raises(RuntimeError, match="prepass failed"):
+        detector.detect_clip(Path("clip.mp4"), 30.0, 1920, 1080, total=4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="decodes into pinned memory for a CUDA upload")
+def test_the_pinned_reader_gives_cv2s_frames_on_the_device(tmp_path):
+    """More frames than the reader has buffers, so every buffer is decoded into again after its
+    upload: each frame on the device is the one cv2 reads."""
+    path = tmp_path / "clip.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (96, 64))
+    rng = np.random.default_rng(3)
+    for _ in range(9):
+        writer.write(rng.integers(0, 256, (64, 96, 3), dtype=np.uint8))
+    writer.release()
+    device = torch.device("cuda")
+    reader = ball_detectors.open_frames(path, device)
+    assert isinstance(reader, ball_detectors.PinnedCapture)
+    expected = cv2.VideoCapture(str(path))
+    got = []
+    while True:
+        ok, frame = reader.read()
+        if not ok:
+            break
+        assert isinstance(frame, torch.Tensor) and frame.device.type == "cuda"
+        got.append(frame.clone())
+    reader.release()
+    for frame in got:
+        ok, host = expected.read()
+        assert ok and np.array_equal(frame.cpu().numpy(), host)
+    assert not expected.read()[0] and len(got) == 9
+    expected.release()
