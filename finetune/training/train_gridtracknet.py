@@ -72,7 +72,21 @@ GridTrackNet, a ``.pt`` for HeatmapNet; another is refused in one line). With ``
 its weights are written into). ``config.json`` records ``arch``, which a ``--resume`` without
 ``--arch`` continues with (one naming another architecture is refused), and an ``--all-clips``
 run inherits its selection run's architecture (``read_selection_run``), so a HeatmapNet winner
-can be fine-tuned on every clip, and later on new clips, from its ``.pt``.
+can be fine-tuned on every clip, and later on new clips, from its ``.pt``. Any architecture
+``ball_models`` lists trains here; the loss is ``loop.loss_of`` its id.
+
+Three further parts of the recipe, each off by default (``audit/records/opt_training.md`` has
+the evidence for their settings):
+
+- ``--distill``: knowledge distillation from ``--teacher`` (the tracker's model by default), the
+  teacher's soft heat maps and offsets learned beside the labels, optionally its features
+  (``--mgd-weight``), with its answers computed on every batch or cached (``--teacher-maps``);
+  see ``distill.py``. ``config.json`` records it as ``distill``;
+- ``--pseudo DIR``: pseudo-labelled clips (``pseudo_labels.py``) join the training units as
+  ``--pseudo-share`` of every epoch's draws, their uncertain frames left out of the labelled
+  loss; recorded as ``pseudo``;
+- ``--augment copypaste``: a second, real, motion-blurred ball pasted along a real path
+  (``copy_paste.py``).
 """
 
 from __future__ import annotations
@@ -102,9 +116,12 @@ from finetune.data.detector_metrics import DetectorMetrics
 from finetune.data.fileio import atomic_binary, atomic_csv, copy_atomic, write_atomic
 from finetune.data import workspace as ws
 from finetune.training.clips import Clip, ClipSelection, find_clips, resolve_val_clips, validation_split
+from finetune.training.copy_paste import BANK_NAME, build_banks
 from finetune.training.dataset import (AUGMENTATIONS, Augmenter, UnitDataset, make_sampler, make_target, photometric_augment,
                                        unit_weights, weighted_sampler)
-from finetune.training.frame_cache import build_units, prepare_data
+from finetune.training.distill import (DISTILL_LOSSES, TEACHER_DIR, TEACHER_MAPS, DistillConfig, Distiller,
+                                       build_teacher_maps)
+from finetune.training.frame_cache import TrainingUnit, build_units, prepare_data, prepare_pseudo
 from finetune.training.loop import (HALF_MAX, build_optimizer, check_finite, evaluate_loss, fresh_model, gridtracknet_loss,
                                     heatmap_loss, largest_running_variance, save_weights, train_epoch)
 from finetune.training.metrics import FALSE_ALARM_CONF, epoch_score, false_alarm_units, promotion_improves, score_weights
@@ -115,7 +132,8 @@ RESULTS_COLUMNS = ("epoch", "train_loss", "val_loss", "seconds", "score_seconds"
 CHECKPOINT = "checkpoint.pt"
 EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz (or .pt), unless --no-keep-epochs
 RECIPE_FIELDS = ("arch", "augment", "oversample", "oversample_absent", "oversample_false_alarms",
-                 "epoch_units", "batch_size", "lr", "seed", "holdout", "validation_clips")      # what read_selection_run copies
+                 "epoch_units", "batch_size", "lr", "seed", "holdout", "validation_clips",
+                 "distill", "pseudo")      # what read_selection_run copies
 HEAT_RECIPE = 3            # the heat-map losses' and optimizer's version, see run_config; 1 was heat1's (never recorded)
 VARIANCE_WARNING_SHARE = 0.1   # of HALF_MAX: the running variance above which an epoch warns (held convolutions never should)
 RUN_OUTCOMES = ("epochs", "false_alarm_units")     # the config.json fields a --resume may differ in, see same_run
@@ -144,9 +162,12 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
     Kaiming norm by ``loop.hold_conv_scale``; 2 decayed them instead, which held at ``--lr 0.3`` and
     not at 1.0) and None for GridTrackNet, whose recipe has not changed; ``same_run`` refuses to
     continue a run recorded under another, so heat1 (recipe 1, before the field existed) and heat2
-    and heat3 (recipe 2) are not resumed as this one."""
-    arch = args.arch or GRIDTRACKNET
+    and heat3 (recipe 2) are not resumed as this one. ``distill`` and ``pseudo`` are None for a run
+    without them, so a run recorded before they existed resumes as one."""
+    arch, distilled = args.arch or GRIDTRACKNET, distill_config(args)
     return {"arch": arch, "heat_recipe": None if arch == GRIDTRACKNET else HEAT_RECIPE,
+            "distill": None if distilled is None else distilled.record(),
+            "pseudo": None if not args.pseudo else {"dir": str(args.pseudo), "share": args.pseudo_share},
             "clips": names,
             "validation_clips": val_clips, "holdout": args.holdout,
             "val_clips": args.val_clips,
@@ -158,6 +179,27 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
             "lr_schedule": lr_schedule or [{"epoch": 1, "lr": args.lr}],
             "seed": args.seed, "score_every": args.score_every,
             "from_scratch": args.from_scratch, "weights": str(args.weights)}
+
+
+def distill_config(args: argparse.Namespace) -> Optional[DistillConfig]:
+    """The run's distillation (``--distill`` and its options), None without it."""
+    if not getattr(args, "distill", False):
+        return None
+    return DistillConfig(str(args.teacher), args.distill_loss, args.distill_weight, args.teacher_maps, args.mgd_weight)
+
+
+def mix_pseudo(weights: List[float], pseudo: int, share: float, epoch_units: Optional[int]
+               ) -> Tuple[List[float], int]:
+    """The sampling weights of the labelled units (`weights`) followed by `pseudo` pseudo-labelled
+    ones, each pseudo unit weighted alike so that together they are `share` of the draws, and the
+    epoch's unit count: `epoch_units`, or by default every labelled unit's expected draw count
+    kept as it was without them (the labelled units divided by 1 - `share`). A share outside
+    (0, 1) is a ValueError."""
+    if not 0.0 < share < 1.0:
+        raise ValueError(f"--pseudo-share is the pseudo-labelled share of the draws, between 0 and 1, not {share:g}")
+    each = sum(weights) * share / (1.0 - share) / pseudo
+    units = epoch_units or round(len(weights) / (1.0 - share))
+    return [*weights, *([each] * pseudo)], units
 
 
 def arch_of_config(config: dict) -> str:
@@ -219,20 +261,23 @@ START = Checkpoint(0, 0, None, 0, math.inf)
 
 
 def write_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
-                     scaler: torch.amp.GradScaler, progress: Checkpoint) -> None:
+                     scaler: torch.amp.GradScaler, progress: Checkpoint, distiller: Optional[torch.nn.Module] = None) -> None:
     """Record `progress` with the model, optimizer, GradScaler and torch RNG states at `path`, through
-    a temporary file beside it, so an interruption leaves the previous checkpoint or this one whole."""
+    a temporary file beside it, so an interruption leaves the previous checkpoint or this one whole;
+    a distilled run's `distiller` (its MGD adapters, ``distill.Distiller``) is recorded too."""
     state = {**progress._asdict(), "best_metrics": None if progress.best_metrics is None else progress.best_metrics._asdict(),
              "model": model.state_dict(), "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
              "torch_rng": torch.get_rng_state()}
+    if distiller is not None:
+        state["distiller"] = distiller.state_dict()
     with atomic_binary(path) as handle:
         torch.save(state, handle)
 
 
 def read_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
-                    scaler: torch.amp.GradScaler) -> Checkpoint:
-    """Load the states ``write_checkpoint`` recorded at `path` into `model`, `optimizer`, `scaler`
-    and torch's RNG, and return the progress they belong to. A missing or unreadable file, or one
+                    scaler: torch.amp.GradScaler, distiller: Optional[torch.nn.Module] = None) -> Checkpoint:
+    """Load the states ``write_checkpoint`` recorded at `path` into `model`, `optimizer`, `scaler`,
+    the `distiller` of a distilled run and torch's RNG, and return the progress they belong to. A missing or unreadable file, or one
     without the fields ``write_checkpoint`` records, is a ValueError, the one ``--resume`` reports."""
     try:
         state = torch.load(path, map_location="cpu", weights_only=True)
@@ -240,6 +285,8 @@ def read_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.O
         raise ValueError(f"--resume needs a readable {CHECKPOINT} in {path.parent} ({error})") from error
     try:
         model.load_state_dict(state["model"])
+        if distiller is not None:
+            distiller.load_state_dict(state["distiller"])
         optimizer.load_state_dict(state["optimizer"])
         if state["scaler"]:             # a disabled (CPU) scaler saves nothing, and an enabled one refuses nothing
             scaler.load_state_dict(state["scaler"])
@@ -350,7 +397,8 @@ def metrics_record(metrics: DetectorMetrics) -> dict:
 
 def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoader, val_loader: Optional[DataLoader],
         optimizer: torch.optim.Optimizer, scaler: torch.amp.GradScaler, device: torch.device,
-        score: Optional[Callable[[Path], DetectorMetrics]], progress: Checkpoint = START) -> Selection:
+        score: Optional[Callable[[Path], DetectorMetrics]], progress: Checkpoint = START,
+        distiller: Optional[Distiller] = None) -> Selection:
     """Run the epochs after `progress` (``START``, or the checkpoint ``--resume`` read; one past
     ``--epochs`` is a ValueError, one at it leaves nothing to run). After each one ``last.npz`` is
     written (every file here carries the architecture's suffix, ``.pt`` for a HeatmapNet), ``results.csv`` gets its row and ``checkpoint.pt`` is rewritten; on a scored epoch
@@ -369,7 +417,8 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
 
     Each epoch seeds torch with ``--seed`` plus its number before drawing its batches, so the
     sampler's draws and the loader workers' seeds are the epoch's own, not the run's history's,
-    and a resumed run draws the batches the uninterrupted one would have. The augmentation draws
+    and a resumed run draws the batches the uninterrupted one would have. A distilled run passes its `distiller` to every
+    step (``loop.train_epoch``) and into the checkpoint. The augmentation draws
     are not exactly those: a persistent worker's ``Augmenter`` streams on from the seed it got
     when the loader first ran, and a resumed run starts its workers afresh."""
     if progress.epoch > args.epochs:
@@ -391,7 +440,8 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
     for epoch in range(progress.epoch + 1, args.epochs + 1):
         started = time.perf_counter()
         torch.manual_seed(args.seed + epoch)
-        train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch, args.epochs, args.max_train_steps)
+        train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch, args.epochs, args.max_train_steps,
+                                 distiller)
         check_finite(model)
         name, variance = largest_running_variance(model)
         if variance > HALF_MAX * VARIANCE_WARNING_SHARE:
@@ -416,7 +466,7 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
         with results.open("a", encoding="utf-8", newline="") as handle:    # one line per epoch, appended
             csv.writer(handle).writerow(results_row(epoch, train_loss, val_loss, seconds, score_seconds, metrics))
         write_checkpoint(args.run_dir / CHECKPOINT, model, optimizer, scaler,
-                         Checkpoint(epoch, best_epoch, best_metrics, best_loss_epoch, best_loss))
+                         Checkpoint(epoch, best_epoch, best_metrics, best_loss_epoch, best_loss), distiller)
         validated = "" if val_loss is None else f" val={val_loss:.6f}"
         scored = (f" | held-out recall={metrics.recall:.3f} wrong={metrics.wrong:.3f} falseAlarm={metrics.false_alarm:.3f}"
                   f" score={epoch_score(metrics):+.3f} ({score_seconds / 60:.1f} min) | best epoch {best_epoch}"
@@ -548,6 +598,9 @@ def train(args: argparse.Namespace) -> None:
     manifest = prepare_data(clips, args.data_dir, val_clips, args.rebuild_data, args.prep_workers)
     if not args.all_clips and not manifest["val"]:
         raise ValueError("Need labelled clips in both the training and validation split")
+    pseudo_units: List[TrainingUnit] = []
+    if args.pseudo:          # training only: a pseudo-label is never a held-out answer
+        pseudo_units = prepare_pseudo(args.pseudo, args.data_dir, args.rebuild_data, args.prep_workers)
     if args.prepare_only:
         print("[data] cache ready; --prepare-only stops here")
         return
@@ -563,8 +616,21 @@ def train(args: argparse.Namespace) -> None:
               f"weights fired on at conf>={FALSE_ALARM_CONF:.2f}: "
               f"sampled x{args.oversample_false_alarms:g}")
     weights = unit_weights(train_units, oversample, args.oversample_absent, args.oversample_false_alarms, flagged)
-    sampler = weighted_sampler(weights, args.epoch_units)
-    train_loader = DataLoader(UnitDataset(args.data_dir, train_units, augment=True, augmentations=args.augment, arch=args.arch),
+    epoch_units = args.epoch_units
+    if pseudo_units:
+        weights, epoch_units = mix_pseudo(weights, len(pseudo_units), args.pseudo_share, epoch_units)
+        print(f"[data] {len(pseudo_units)} pseudo-labelled units drawn as {args.pseudo_share:.0%} of every epoch's "
+              f"{epoch_units} units")
+    sampler = weighted_sampler(weights, epoch_units)
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    banks = build_banks(train_units, args.data_dir, args.run_dir / BANK_NAME) if "copypaste" in args.augment else None
+    config = distill_config(args)
+    maps_dir = None
+    if config is not None and config.maps == "cache":
+        maps_dir = args.teacher_maps_dir or args.data_dir / TEACHER_DIR
+        build_teacher_maps(Path(config.teacher), args.data_dir, [*train_units, *pseudo_units], device, maps_dir)
+    train_loader = DataLoader(UnitDataset(args.data_dir, [*train_units, *pseudo_units], augment=True,
+                                          augmentations=args.augment, arch=args.arch, banks=banks, teacher_maps=maps_dir),
                               batch_size=args.batch_size,
                               shuffle=sampler is None, sampler=sampler, num_workers=args.workers,
                               pin_memory=device.type == "cuda", persistent_workers=args.workers > 0)
@@ -578,13 +644,16 @@ def train(args: argparse.Namespace) -> None:
         model = load_ball_model(args.weights, device).float()
         print(f"[train] fine-tuning {args.arch} from {args.weights}")
     model.train()
-    optimizer = build_optimizer(model, args.lr)
+    distiller = None if config is None else Distiller(config, model, device)
+    if config is not None:
+        print(f"[train] distilling from {config.teacher}: {config.loss} x{config.weight:g}, teacher maps {config.maps}"
+              + (f", MGD x{config.mgd_weight:g}" if config.mgd_weight else ""))
+    optimizer = build_optimizer(model, args.lr, () if distiller is None else tuple(distiller.parameters()))
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
-    args.run_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = args.run_dir / CHECKPOINT
     progress, schedule = START, None
     if args.resume:
-        progress = read_checkpoint(checkpoint, model, optimizer, scaler)
+        progress = read_checkpoint(checkpoint, model, optimizer, scaler, distiller)
         print(f"[train] resuming {args.run_dir} after epoch {progress.epoch} of {args.epochs}"
               + (": the epochs are done, only the winner is left to pick" if progress.epoch == args.epochs else ""))
         schedule = lr_schedule_of(resumed)
@@ -600,11 +669,12 @@ def train(args: argparse.Namespace) -> None:
           + ("nothing held out (--all-clips)" if args.all_clips else f"val={val_clips} score every {args.score_every}")
           + (f" oversample={oversample}" if oversample else ""))
     if args.all_clips:
-        record_recipe_result(args, fit(args, model, train_loader, None, optimizer, scaler, device, None, progress), selection_run)
+        record_recipe_result(args, fit(args, model, train_loader, None, optimizer, scaler, device, None, progress,
+                                       distiller), selection_run)
         return
     val_only = [entry for entry in clips if entry[0] in val_clips]
     selection = fit(args, model, train_loader, val_loader, optimizer, scaler, device,
-                    lambda weights: score_weights(weights, val_only, device), progress)
+                    lambda weights: score_weights(weights, val_only, device), progress, distiller)
     pick_winner(args, clips, val_clips, selection, device)
 
 
@@ -711,7 +781,30 @@ def build_parser() -> argparse.ArgumentParser:
                         help="The augmentations to draw, any of: basic (flip + small gain, the default), strong (flip + "
                              "gamma/contrast/colour cast/noise/blur instead of the gain), translate (one shift of up to "
                              "20 px at 768x432 for all five frames), reverse (time reversed), compress (JPEG re-encode "
-                             "and occasional blur)")
+                             "and occasional blur), copypaste (a second real ball pasted along a real path with motion "
+                             "blur, half the units; its banks are cut into --run-dir once)")
+    distill = parser.add_argument_group("distillation (finetune/training/distill.py)")
+    distill.add_argument("--distill", action="store_true",
+                         help="Learn the --teacher's soft heat maps and offsets beside the labels")
+    distill.add_argument("--teacher", type=Path, default=layout.repo_weights,
+                         help="The teacher's weights (default: the tracker's model); any architecture on the student's grid")
+    distill.add_argument("--distill-loss", choices=DISTILL_LOSSES, default="qfl",
+                         help="qfl (quality focal loss, the default) or mse (Fast Pose Distillation's)")
+    distill.add_argument("--distill-weight", type=float, default=1.0, help="The distillation loss's weight (default 1)")
+    distill.add_argument("--teacher-maps", choices=TEACHER_MAPS, default="online",
+                         help="online: the teacher answers every augmented batch (the default); cache: its dense answers "
+                              "are precomputed once per frame and carried through the augmentation")
+    distill.add_argument("--teacher-maps-dir", type=Path, metavar="DIR",
+                         help=f"Where --teacher-maps cache keeps them (default: --data-dir/{TEACHER_DIR})")
+    distill.add_argument("--mgd-weight", type=float, default=0.0,
+                         help="Masked Generative Distillation of the decoder features at this weight (0: off; the "
+                              "paper's detection setting is 2e-5); needs --teacher-maps online")
+    pseudo = parser.add_argument_group("pseudo-labels (finetune/training/pseudo_labels.py)")
+    pseudo.add_argument("--pseudo", type=Path, metavar="DIR",
+                        help="Also train on the pseudo-labelled videos in DIR (videos/ and labels/, ft.py pseudo label "
+                             "makes them); training only, never held out")
+    pseudo.add_argument("--pseudo-share", type=float, default=0.3,
+                        help="Their share of every epoch's draws (default 0.3)")
     parser.add_argument("--oversample", nargs="*", metavar="SOURCE=WEIGHT",
                         help="Relative sampling weight per source, e.g. custom=6 grid=1 tracknetv2=0.5 (0 drops it from training)")
     parser.add_argument("--oversample-absent", type=float, default=1.0, metavar="K",

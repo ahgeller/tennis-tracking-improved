@@ -91,6 +91,7 @@ WASB (Tarashima et al., BMVC 2023, https://github.com/nttcom/WASB-SBDT, MIT, 188
 
 - Mendeley "Tennis Shot Side-View and Top-View" https://data.mendeley.com/datasets/75m8vz7jr2 - GoPro 1080p60, top-view camera 1.21 m behind the baseline at 5.15 m height, 472 clips (clay + indoor), landing points only. CC BY 4.0.
 - CalTennis https://huggingface.co/datasets/demalenk/caltennis - 104 GB, 11M frames, 2–6 synced phones at 1.65 m, 1080p60, faces blurred. CC BY-NC 4.0.
+- How to use them: `ft.py pseudo add|label|status` (`finetune/training/pseudo_labels.py`) keeps only the frames the teacher pipeline is sure of, and the trainer mixes them in with `--pseudo`; the download commands are in `finetune/COLAB_QUICKSTART.md` section 4.
 - GridTrackNet repo `Sample Video's/` - 6 unlabelled amateur/pro clips (already under `gridtracknet_finetuning/GridTrackNet_upstream`).
 
 ### 2.6 Popular tennis-analysis repos and what data they use (none add labels)

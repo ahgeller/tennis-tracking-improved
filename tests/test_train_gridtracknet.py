@@ -223,6 +223,53 @@ def test_config_json_versions_the_heat_recipe_and_same_run_refuses_an_older_one(
     assert "heat_recipe" not in training.RECIPE_FIELDS           # an all-clips run follows the arch's current recipe
 
 
+def test_config_json_records_distillation_and_pseudo_labels_and_an_older_run_still_resumes(tmp_path):
+    parser = training.build_parser()
+    plain = training.run_config(parser.parse_args(["--arch", "heatmap_s4", "--from-scratch"]), ["a"], ["a"], {})
+    assert plain["distill"] is None and plain["pseudo"] is None
+    training.same_run({key: value for key, value in plain.items() if key not in ("distill", "pseudo")}, plain)
+    distilled = training.run_config(parser.parse_args(
+        ["--arch", "heatmap_s4", "--from-scratch", "--distill", "--teacher", "t.pt", "--distill-loss", "mse",
+         "--mgd-weight", "2e-5", "--pseudo", str(tmp_path), "--pseudo-share", "0.25"]), ["a"], ["a"], {})
+    assert distilled["distill"] == {"teacher": "t.pt", "loss": "mse", "weight": 1.0, "maps": "online", "mgd_weight": 2e-5}
+    assert distilled["pseudo"] == {"dir": str(tmp_path), "share": 0.25}
+    with pytest.raises(ValueError, match="config.json has distill=None"):
+        training.same_run(plain, distilled)
+    assert {"distill", "pseudo"} <= set(training.RECIPE_FIELDS)
+
+
+def test_mix_pseudo_gives_the_pseudo_units_their_share_and_keeps_the_labelled_draws():
+    weights, units = training.mix_pseudo([1.0, 1.0, 2.0], 8, 0.25, None)
+    assert weights[:3] == [1.0, 1.0, 2.0] and sum(weights[3:]) == pytest.approx(0.25 * sum(weights))
+    assert len(set(weights[3:])) == 1 and units == 4
+    assert training.mix_pseudo([1.0] * 6, 2, 0.5, 100)[1] == 100
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        training.mix_pseudo([1.0], 1, 1.0, None)
+
+
+def test_a_distilled_runs_checkpoint_carries_the_mgd_adapters(tmp_path):
+    from finetune.training.distill import DistillConfig, Distiller
+    from finetune.training.loop import build_optimizer
+    teacher = tmp_path / "teacher.pt"
+    save_model(fresh_model(torch.device("cpu"), "heatmap_s4"), teacher)
+    student = fresh_model(torch.device("cpu"), "heatmap_s4")
+    distiller = Distiller(DistillConfig(str(teacher), mgd_weight=2e-5), student, torch.device("cpu"))
+    optimizer = build_optimizer(student, 1.0, tuple(distiller.parameters()))
+    assert len(optimizer.param_groups[0]["params"]) == len(list(student.parameters())) + len(list(distiller.parameters()))
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    with torch.no_grad():
+        next(distiller.parameters()).fill_(0.5)
+    training.write_checkpoint(tmp_path / "checkpoint.pt", student, optimizer, scaler, training.START, distiller)
+    again = Distiller(DistillConfig(str(teacher), mgd_weight=2e-5), student, torch.device("cpu"))
+    training.read_checkpoint(tmp_path / "checkpoint.pt", student, build_optimizer(student, 1.0, tuple(again.parameters())),
+                             scaler, again)
+    assert float(next(again.parameters()).detach().mean()) == 0.5
+    training.write_checkpoint(tmp_path / "plain.pt", student, build_optimizer(student, 1.0), scaler, training.START)
+    with pytest.raises(ValueError, match="not a checkpoint this trainer wrote"):
+        training.read_checkpoint(tmp_path / "plain.pt", student, build_optimizer(student, 1.0, tuple(again.parameters())),
+                                 scaler, again)
+
+
 def test_a_heatmap_run_writes_every_file_with_the_pt_suffix(tmp_path, capsys):
     """fit on a HeatmapNet: last/best/best_loss and epochs/epoch_NNN are .pt records the tracker's
     loader reads, and no .npz appears."""
@@ -580,7 +627,8 @@ def test_new_augmentations_draw_after_the_old_ones_so_old_runs_reproduce(tmp_pat
         again, target_again = after[0]
         assert torch.equal(images, again) and torch.equal(target, target_again)
     assert before.rng.draws.random() == after.rng.draws.random()         # the streams are in step
-    everything = UnitDataset(tmp_path, [unit], augment=True, augmentations=set(training.AUGMENTATIONS))
+    # copypaste needs its banks; tests/test_copy_paste.py runs it on a unit of its own
+    everything = UnitDataset(tmp_path, [unit], augment=True, augmentations=set(training.AUGMENTATIONS) - {"copypaste"})
     everything.rng = Augmenter(5)
     images, target = everything[0]
     assert images.shape == (15, training.HEIGHT, training.WIDTH) and target.shape == (15, training.GRID_ROWS, training.GRID_COLS)

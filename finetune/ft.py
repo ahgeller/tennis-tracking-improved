@@ -14,11 +14,12 @@ interactive menu that walks through everything below. The commands remain for sc
     python finetune/ft.py hints train                retrain the network that places the label tool's suggestions
     python finetune/ft.py hints list | use <version> its versions (all kept) and which one the tool uses
     python finetune/ft.py hints sheet <clip> [a b]   a zoomed PNG of where two versions disagree, to judge by eye
+    python finetune/ft.py pseudo add D:\\caltennis\\*.mp4  unlabelled videos for pseudo-labels (pseudo label, pseudo status)
     python finetune/ft.py colab-zip                  the one zip the Colab notebook unpacks (videos, labels, records, weights, code)
 
 Runs itself under the training venv automatically (``finetune/interpreter.py``), so plain
 ``python`` works from any shell (``.\\finetune.ps1 <command>`` does the same from PowerShell).
-The commands that run another script - import, add, prelabel, label, eval, train and hints -
+The commands that run another script - import, add, prelabel, label, eval, train, hints and pseudo -
 pass the arguments they do not declare straight through to it (``ft.py train --epochs 3 --lr
 0.3``); every other command refuses an argument it does not know, so a mistyped option or a
 clip name given without ``--clips`` is an error, not silently ignored. The commands that work
@@ -165,6 +166,10 @@ def cmd_add(args: argparse.Namespace) -> int:
                       pretrack_arguments=args.rest)[1]
 
 
+def cmd_pseudo(args: argparse.Namespace) -> int:
+    return run_script("training/pseudo_labels.py", args.rest)
+
+
 def cmd_prelabel(args: argparse.Namespace) -> int:
     return run_script("training/pretrack.py", args.rest)
 
@@ -302,6 +307,9 @@ def run_cli(argv: List[str]) -> int:
     p.set_defaults(func=cmd_train, forwards=True)
     p = subparsers.add_parser("hints", help="hints.py: train | list | use <version> | sheet <clip> (its arguments pass through)")
     p.set_defaults(func=cmd_hints, forwards=True)
+    p = subparsers.add_parser("pseudo", help="pseudo_labels.py: add <videos> | label | status, the teacher's labels for "
+                                            "unlabelled video (its arguments pass through)")
+    p.set_defaults(func=cmd_pseudo, forwards=True)
     p = subparsers.add_parser("promote", help="copy the winning weights over the tracker's model (with backup)")
     p.add_argument("--weights", help="which weights to promote (default: finetune/models/ball_best.pt); the suffix must be the tracker's")
     p.set_defaults(func=cmd_promote)

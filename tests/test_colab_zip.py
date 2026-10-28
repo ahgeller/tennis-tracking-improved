@@ -45,8 +45,11 @@ def test_the_zip_holds_every_section_the_notebook_unpacks(workspace_dir, tmp_pat
                                             "serve_ball.csv.draft", "rally_bounces.csv", "rally_ball.csv.before_halfpixel_fix")}
     assert {f"{TOP}/clips.csv", f"{TOP}/review_status.json", f"{TOP}/holdouts.json"} <= names
     assert f"{TOP}/exclude.txt" not in names                      # optional and absent: skipped, said so
-    assert {n for n in names if n.startswith(f"{TOP}/code/")} == {f"{TOP}/code/{name}" for name in staged_files()}
-    assert len(names) == 2 + 6 + 3 + 1 + len(staged_files())
+    assert {n for n in names if n.startswith(f"{TOP}/code/")} == \
+        {f"{TOP}/code/{name}" for name in staged_files()} | {f"{TOP}/code/code_manifest.json"}
+    with zipfile.ZipFile(out) as archive:
+        assert json.loads(archive.read(f"{TOP}/code/code_manifest.json")) == staged_files()
+    assert len(names) == 2 + 6 + 3 + 1 + len(staged_files()) + 1
     assert not list(out.parent.glob("*.tmp"))
     out_text = capsys.readouterr().out
     assert "[skip] no exclude.txt" in out_text
@@ -82,3 +85,19 @@ def test_code_only_holds_the_records_and_the_code_and_nothing_heavy(workspace_di
     assert names >= {f"{TOP}/code/{name}" for name in staged_files()}
     assert not any(name.startswith((f"{TOP}/videos/", f"{TOP}/labels/", f"{TOP}/models/")) for name in names)
     assert "next: upload it to MyDrive/tennis_finetune/ as tennis_finetune_code.zip" in capsys.readouterr().out
+
+
+def test_the_pseudo_labelled_clips_go_in_with_their_labels_and_an_unlabelled_one_does_not(workspace_dir, tmp_path):
+    fill_workspace(workspace_dir)
+    pseudo = workspace_dir / "pseudo"
+    (pseudo / "videos").mkdir(parents=True)
+    (pseudo / "labels").mkdir()
+    (pseudo / "videos" / "court5_N.mp4").write_bytes(b"video")
+    (pseudo / "videos" / "court5_S.mp4").write_bytes(b"not labelled yet")
+    (pseudo / "labels" / "court5_N_pseudo.csv").write_text("frame,ball_x,ball_y,state\n", encoding="utf-8")
+    (pseudo / "labels" / "court5_N_pipeline.json").write_text("{}", encoding="utf-8")
+    out = tmp_path / "colab.zip"
+    assert ft.run_cli(["colab-zip", "--out", str(out)]) == 0
+    with zipfile.ZipFile(out) as archive:
+        names = {name for name in archive.namelist() if name.startswith(f"{TOP}/pseudo/")}
+    assert names == {f"{TOP}/pseudo/videos/court5_N.mp4", f"{TOP}/pseudo/labels/court5_N_pseudo.csv"}
