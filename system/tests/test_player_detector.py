@@ -9,7 +9,9 @@ import pytest
 import torch
 
 from tennis_tracker.config import Config
-from tennis_tracker.engines.player_detector import PlayerDetector, PlayerPending, _load_bytetrack
+from tennis_tracker.engines.player_detector import (
+    PlayerDetector, PlayerPending, _load_bytetrack, interpolate_player_boxes,
+)
 
 
 def test_load_bytetrack_reports_why_boxmot_is_missing():
@@ -90,3 +92,28 @@ def test_decode_thresholds_and_suppresses_a_raw_head_in_either_layout(channel_ma
 def test_pending_defaults_to_a_coasting_frame():
     pending = PlayerPending(np.zeros((2, 2, 3), np.uint8), 3, 2, 2, None)
     assert pending.outputs is None and pending.input_tensor is None
+
+
+def test_a_disabled_detector_tracks_every_frame_so_nothing_is_interpolated():
+    detector = PlayerDetector(Config(player_model_path=None, player_detect_interval=4))
+    assert all(detector.tracks_frame(index) for index in range(6))
+
+
+def test_interpolation_moves_tracked_players_linearly_across_skipped_frames():
+    a, b = {1: [0.0, 0.0, 10.0, 20.0], 2: [50.0, 50.0, 60.0, 70.0]}, {1: [4.0, 8.0, 14.0, 28.0], 3: [9.0, 9.0, 9.0, 9.0]}
+    boxes = [{}, a, {}, {}, {}, b, {}]
+    tracked = [False, True, False, False, False, True, False]
+    out = interpolate_player_boxes(boxes, tracked)
+    assert out[0] == a and out[6] == b                       # held beyond the ends
+    assert out[2][1] == [1.0, 2.0, 11.0, 22.0]               # a quarter of the way
+    assert out[3][1] == [2.0, 4.0, 12.0, 24.0]
+    # Player 2 is lost and player 3 found inside the gap: each on its own nearer side.
+    assert 2 in out[2] and 2 in out[3] and 3 not in out[3]
+    assert 2 not in out[4] and out[4][3] == [9.0, 9.0, 9.0, 9.0]
+    assert out[1] == a and out[5] == b and boxes[2] == {}    # tracked frames kept, input untouched
+
+
+def test_interpolation_with_every_frame_tracked_or_none_tracked():
+    boxes = [{1: [0.0, 0.0, 1.0, 1.0]}, {1: [2.0, 2.0, 3.0, 3.0]}]
+    assert interpolate_player_boxes(boxes, [True, True]) == boxes
+    assert interpolate_player_boxes(boxes, [False, False]) == [{}, {}]

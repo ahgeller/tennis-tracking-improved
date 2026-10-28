@@ -6,11 +6,13 @@ import functools
 import math
 import time
 from dataclasses import dataclass
-from typing import Dict, List, NamedTuple, Optional, Protocol, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Protocol, Sequence, Tuple, Union
+
 import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from ball_in_play_selector import PackedMask
 
 from .court.court_geometry import build_court_side_guides
 from .frame_window import FrameWindow, GpuFrame
@@ -55,7 +57,6 @@ _TINY_BLOB_MAX_ASPECT, _SMALL_BLOB_MAX_ASPECT = 4.5, 3.5
 _BOOST_DISC_MAX_RADIUS_PX = 12            # the disc drawn for a blob never balloons past the ball
 # Probe-style frame delta: saturation differences count this much more than value.
 _PROBE_S_DIFF_SCALE = 1.25
-_BGR_TO_GRAY = (0.114, 0.587, 0.299)      # OpenCV's luma weights, BGR order
 
 
 @functools.lru_cache(maxsize=None)
@@ -93,9 +94,12 @@ def filter_boost_mask(raw_motion: np.ndarray, min_area: int, max_area: int, cfg:
 
     Components outside ``[min_area, max_area]`` px are dropped; ball-sized ones
     bypass the aspect test (small balls blur into short streaks), larger ones
-    must pass ``cfg.blob_max_aspect``.  One connected-components pass; with
-    ``buffers`` the result is written into ``buffers.boost_mask_u8``.  The
-    result is all zero when nothing survives.
+    must pass ``cfg.blob_max_aspect``.  Any nonzero pixel is motion.  One
+    connected-components pass, over the bounding box of the set pixels only
+    (motion is sparse, and the pass costs in proportion to the area it scans;
+    the components, their stats and the rounded disc centres are the same);
+    with ``buffers`` the result is written into ``buffers.boost_mask_u8``.
+    The result is all zero when nothing survives.
     """
     img_h, img_w = raw_motion.shape[:2]
     if buffers is not None:
@@ -103,7 +107,8 @@ def filter_boost_mask(raw_motion: np.ndarray, min_area: int, max_area: int, cfg:
         result.fill(0)
     else:
         result = np.zeros((img_h, img_w), dtype=np.uint8)
-    if not np.any(raw_motion):
+    off_x, off_y, box_w, box_h = cv2.boundingRect(raw_motion)
+    if box_w == 0 or box_h == 0:
         return result
 
     img_diag = math.hypot(float(img_w), float(img_h))
@@ -112,8 +117,11 @@ def filter_boost_mask(raw_motion: np.ndarray, min_area: int, max_area: int, cfg:
     if cfg.blob_preserve_tiny:
         ball_bypass_max_area = max(ball_bypass_max_area, cfg.blob_tiny_max_area)
 
-    # Single CC call - the major bottleneck
-    num, _labels, stats, centroids = cv2.connectedComponentsWithStats(raw_motion, connectivity=8)
+    # A centroid in the box plus the box's offset rounds to the same pixel as the frame's centroid:
+    # both are an integer sum over the area, and they could only round apart within an ulp of .5,
+    # which a ratio with that denominator is either exactly on or at least 1 / (2 * area) away from.
+    num, _labels, stats, centroids = cv2.connectedComponentsWithStats(
+        raw_motion[off_y:off_y + box_h, off_x:off_x + box_w], connectivity=8)
     for i in range(1, num):
         area = int(stats[i, cv2.CC_STAT_AREA])
         if area < min_area or area > max_area:
@@ -129,8 +137,8 @@ def filter_boost_mask(raw_motion: np.ndarray, min_area: int, max_area: int, cfg:
             continue
         # A disc at the centroid; its radius is capped so motion blur and
         # shadows cannot balloon the boost far beyond the ball.
-        cx = int(centroids[i][0] + 0.5)
-        cy = int(centroids[i][1] + 0.5)
+        cx = int(centroids[i][0] + off_x + 0.5)
+        cy = int(centroids[i][1] + off_y + 0.5)
         radius = min(int(math.sqrt(area / math.pi) + 0.5), _BOOST_DISC_MAX_RADIUS_PX)
         cv2.circle(result, (cx, cy), max(radius, 1), 255, -1)
     return result
@@ -299,89 +307,108 @@ def _dilate_motion_cuda(raw_motion: torch.Tensor, dilate_k: int) -> torch.Tensor
         return mm.squeeze() > 0.5
     return raw_motion
 
-def _motion_probe_delta_cuda(prev_frame_t: torch.Tensor, curr_frame_t: torch.Tensor,
-                             prev_v_t: torch.Tensor, prev_s_t: torch.Tensor,
-                             curr_v_t: torch.Tensor, curr_s_t: torch.Tensor) -> torch.Tensor:
-    """Probe-style frame delta (max of gray, V and scaled S differences, 3x3 blurred) in 0-255 units."""
-    wb, wg, wr = _BGR_TO_GRAY
-    prev_gray = prev_frame_t[0] * wb + prev_frame_t[1] * wg + prev_frame_t[2] * wr
-    curr_gray = curr_frame_t[0] * wb + curr_frame_t[1] * wg + curr_frame_t[2] * wr
-    gray_diff = torch.abs(curr_gray - prev_gray) * 255.0
-    v_diff = torch.abs(curr_v_t - prev_v_t) * 255.0
-    s_diff = torch.abs(curr_s_t - prev_s_t) * (255.0 * _PROBE_S_DIFF_SCALE)
-    delta = torch.maximum(gray_diff, torch.maximum(v_diff, s_diff))
-    return F.avg_pool2d(delta.unsqueeze(0).unsqueeze(0), 3, stride=1, padding=1).squeeze(0).squeeze(0)
+@functools.lru_cache(maxsize=None)
+def _probe_scale(device: torch.device) -> torch.Tensor:
+    """Per-plane factors of the probe delta: gray and value differences in 0-255 units,
+    saturation differences weighted ``_PROBE_S_DIFF_SCALE`` more."""
+    return torch.tensor([255.0, 255.0, 255.0 * _PROBE_S_DIFF_SCALE], dtype=torch.float32,
+                        device=device).view(3, 1, 1)
+
+
+def _probe_delta(earlier: torch.Tensor, later: torch.Tensor) -> torch.Tensor:
+    """Probe-style delta of two frames' ``(3, h, w)`` motion planes (``GpuFrame.planes``): the
+    largest of the gray, value and scaled saturation differences, in 0-255 units, unblurred.
+
+    Per element this is the arithmetic of the original per-plane form
+    (``abs(later - earlier) * 255`` and ``* 318.75``, then the maximum), so it is bit-identical.
+    """
+    delta = later - earlier
+    delta.abs_()
+    delta.mul_(_probe_scale(delta.device))
+    return torch.amax(delta, dim=0)
+
+
+def _blur3(delta: torch.Tensor) -> torch.Tensor:
+    """3x3 box blur with zero padding at the edges of ``delta`` (counted in the mean)."""
+    return F.avg_pool2d(delta[None, None], 3, stride=1, padding=1)[0, 0]
 
 
 class BackgroundModel:
-    """Running mean and variance of the S and V planes, on CUDA.
+    """Running mean and variance of the V and S planes, on CUDA.
 
-    A pixel counts as motion when its squared distance from the mean exceeds
-    ``motion_thresh^2 + motion_k_std^2 * variance`` (see
-    ``preprocess_frame_cuda``).  Static pixels adapt at ``background_alpha``;
-    pixels that were motion on the previous frame at ``motion_freeze_alpha``.
-    Call ``update`` once per frame before preprocessing it and
-    ``remember_motion`` with that frame's raw mask afterwards.
+    ``mean`` and ``var`` are ``(2, H, W)``: value, then saturation (one
+    tensor for both planes halves the kernel launches of a frame, and the
+    arithmetic per element is unchanged).  A pixel counts as motion when its
+    squared distance from the mean exceeds ``motion_thresh^2 +
+    motion_k_std^2 * variance`` (``foreground``).  Static pixels adapt at
+    ``background_alpha``; pixels that were motion on the previous frame at
+    ``motion_freeze_alpha``.  Call ``update`` once per frame before
+    preprocessing it; ``preprocess_frame_cuda`` then calls
+    ``remember_motion`` with that frame's cleaned raw mask.
     """
 
     def __init__(self, cfg: MotionSettings, device: torch.device) -> None:
         self.cfg = cfg
         self.device = device
-        self.mean_v: Optional[torch.Tensor] = None
-        self.mean_s: Optional[torch.Tensor] = None
-        self.var_v: Optional[torch.Tensor] = None
-        self.var_s: Optional[torch.Tensor] = None
-        self._prev_motion: Optional[torch.Tensor] = None    # bool, last frame's raw motion
-        self._prev_motion_buffer: Optional[torch.Tensor] = None   # the ROI-uploaded mask lives here
+        self.mean: Optional[torch.Tensor] = None
+        self.var: Optional[torch.Tensor] = None
+        self._prev_motion: Optional[torch.Tensor] = None    # bool, last frame's cleaned raw motion
 
     @property
     def ready(self) -> bool:
-        return self.mean_v is not None
+        return self.mean is not None
+
+    @property
+    def mean_v(self) -> torch.Tensor:
+        assert self.mean is not None
+        return self.mean[0]
+
+    @property
+    def var_v(self) -> torch.Tensor:
+        assert self.var is not None
+        return self.var[0]
 
     @torch.no_grad()
-    def update(self, curr_v: torch.Tensor, curr_s: torch.Tensor) -> None:
-        """Fold the current frame's V and S planes into the model."""
+    def update(self, curr_vs: torch.Tensor) -> None:
+        """Fold the current frame's ``(2, H, W)`` value and saturation planes into the model."""
         if not self.ready:
-            self.mean_v = curr_v.clone()
-            self.mean_s = curr_s.clone()
+            self.mean = curr_vs.clone()
             thr = self.cfg.motion_thresh / 255.0
-            self.var_v = torch.full_like(self.mean_v, thr ** 2)
-            self.var_s = torch.full_like(self.mean_s, thr ** 2)
+            self.var = torch.full_like(self.mean, thr ** 2)
             return
-        v_diff_sq = (curr_v - self.mean_v) ** 2
-        s_diff_sq = (curr_s - self.mean_s) ** 2
+        assert self.mean is not None and self.var is not None
+        diff_sq = curr_vs - self.mean
+        diff_sq.mul_(diff_sq)                       # ``x ** 2`` is computed as ``x * x``
+        alpha: Union[float, torch.Tensor]
         if self._prev_motion is not None:
             alpha = torch.where(self._prev_motion, self.cfg.motion_freeze_alpha, self.cfg.background_alpha)
         else:
             alpha = self.cfg.background_alpha
-        self.var_v.mul_(1.0 - alpha).add_(alpha * v_diff_sq)
-        self.var_s.mul_(1.0 - alpha).add_(alpha * s_diff_sq)
-        self.mean_v.mul_(1.0 - alpha).add_(curr_v * alpha)
-        self.mean_s.mul_(1.0 - alpha).add_(curr_s * alpha)
+        keep = 1.0 - alpha
+        self.var.mul_(keep).add_(alpha * diff_sq)
+        self.mean.mul_(keep).add_(curr_vs * alpha)
 
-    def remember_motion(self, raw_motion_u8: Optional[np.ndarray],
-                        roi: Optional[Tuple[int, int, int, int]] = None) -> None:
-        """Keep this frame's raw motion on the GPU for the next update's slow-adaptation mask.
+    @torch.no_grad()
+    def foreground(self, curr: GpuFrame, box: Roi) -> torch.Tensor:
+        """The boolean foreground of ``curr`` inside ``box`` (``(x1, y1, x2, y2)``), box-sized."""
+        assert self.mean is not None and self.var is not None
+        cfg = self.cfg
+        x1, y1, x2, y2 = box
+        diff_sq = curr.vs[:, y1:y2, x1:x2] - self.mean[:, y1:y2, x1:x2]
+        diff_sq.mul_(diff_sq)
+        thresh_sq = self.var[:, y1:y2, x1:x2] * (cfg.motion_k_std ** 2)
+        thresh_sq.add_((cfg.motion_thresh / 255.0) ** 2)
+        thresh_sq[1].mul_(_S_THRESHOLD_SCALE)
+        over = diff_sq > thresh_sq
+        fg = over[0] | over[1]
+        fg &= curr.v[y1:y2, x1:x2] > (cfg.motion_v_min / 255.0)
+        return fg
 
-        ``roi`` is the ``(x1, y1, x2, y2)`` rectangle outside which the mask is known to be zero
-        (the union of the frame's motion ROIs); only that part is uploaded, into a buffer that
-        is zeroed first, so a frame costs one small copy instead of a 2 MB one.  Without it the
-        whole mask is uploaded.
-        """
-        if raw_motion_u8 is None:
-            self._prev_motion = None
-            return
-        if roi is None:
-            self._prev_motion = torch.from_numpy(raw_motion_u8).to(self.device) > 0
-            return
-        x1, y1, x2, y2 = roi
-        if self._prev_motion_buffer is None or self._prev_motion_buffer.shape != raw_motion_u8.shape:
-            self._prev_motion_buffer = torch.zeros(raw_motion_u8.shape, dtype=torch.bool, device=self.device)
-        else:
-            self._prev_motion_buffer.zero_()
-        crop = np.ascontiguousarray(raw_motion_u8[y1:y2, x1:x2])
-        self._prev_motion_buffer[y1:y2, x1:x2] = torch.from_numpy(crop).to(self.device) > 0
-        self._prev_motion = self._prev_motion_buffer
+    def remember_motion(self, raw_motion: Optional[torch.Tensor]) -> None:
+        """Keep this frame's cleaned raw motion (a boolean frame-sized tensor, or None when there
+        is none yet) for the next update's slow-adaptation mask.  The tensor is used as it is,
+        not copied: the caller hands over a fresh one each frame."""
+        self._prev_motion = raw_motion
 
 
 @dataclass(frozen=True)
@@ -411,16 +438,25 @@ class PreprocessResult(NamedTuple):
     ``detector_frame``: the CPU BGR detector input when ``request.cpu``: the
     enhanced frame, or the source frame when nothing was applied to it; None
     otherwise.  ``detector_frame_cuda``: the enhanced frame as an HWC uint8
-    CUDA tensor when ``request.cuda``, else None.  ``raw_motion``: the gated
-    raw-motion mask (full-frame uint8 {0, 255}); None until the background
-    model is ready.  ``boost_mask``: a disc per ball-sized blob of the gated
-    motion; None when no blob survived.
+    CUDA tensor when ``request.cuda``, else None.  ``masks``: the frame's
+    motion masks on their way to the host (``MotionMasks``); None until the
+    background model is ready.  ``raw_motion`` and ``boost_mask`` wait for
+    them and return them as full-frame arrays: the cleaned gated raw-motion
+    mask (uint8 {0, 255}) and a disc per ball-sized blob of it (None when no
+    blob survived).
     """
 
     detector_frame: Optional[np.ndarray]
     detector_frame_cuda: Optional[torch.Tensor]
-    raw_motion: Optional[np.ndarray]
-    boost_mask: Optional[np.ndarray]
+    masks: Optional["MotionMasks"]
+
+    @property
+    def raw_motion(self) -> Optional[np.ndarray]:
+        return self.masks.raw_u8() if self.masks is not None else None
+
+    @property
+    def boost_mask(self) -> Optional[np.ndarray]:
+        return self.masks.selector_boost_u8() if self.masks is not None else None
 
 
 Roi = Tuple[int, int, int, int]
@@ -433,172 +469,249 @@ _WHITE_MIN_V = 170.0 / 255.0
 _BOOST_HUE = 30.0 / 179.0
 
 
+def _union_box(boxes: Sequence[Roi]) -> Roi:
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def _motion_boxes(curr: GpuFrame, rois: Optional[List[Roi]]) -> List[Roi]:
+    """The boxes motion is computed in: the ROIs, or the whole frame as one box."""
+    if rois is not None:
+        return list(rois)
+    h, w = int(curr.v.shape[0]), int(curr.v.shape[1])
+    return [(0, 0, w, h)]
+
+
 def _raw_motion_cuda(window: FrameWindow, background: BackgroundModel, cfg: MotionSettings,
-                     rois: Optional[List[Roi]]) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+                     rois: Optional[List[Roi]], want_ungated: bool = True
+                     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """``(gated, ungated)`` boolean raw-motion masks for the current frame.
 
-    ``ungated`` is the background-model foreground; ``gated`` additionally
-    passes the frame-to-frame temporal test when it is enabled and a previous
-    frame exists.  Both are None until the background model is ready; they are
-    the same tensor when the gate did not run.
+    ``ungated`` is the background-model foreground inside the ROIs (the whole
+    frame without them); ``gated`` additionally passes the frame-to-frame
+    temporal test when it is enabled and a previous frame exists.  Both are
+    None until the background model is ready; they are the same tensor when
+    the gate did not run, and ``ungated`` is None when it is not wanted and
+    the gate ran.
+
+    The foreground and the two probe deltas are computed once, in the box that
+    holds every ROI; each ROI then blurs its own part of the deltas, with zero
+    padding at the ROI's edges as when each ROI was computed on its own, so
+    the masks are the same bit for bit.
     """
     if not background.ready:
         return None, None
     curr = window.curr_gpu
-    curr_v, curr_s = curr.v, curr.s
-    thr_sq = (cfg.motion_thresh / 255.0) ** 2
-    k_sq = cfg.motion_k_std ** 2
-    v_min = cfg.motion_v_min / 255.0
-
-    def foreground(y1: int, y2: int, x1: int, x2: int) -> torch.Tensor:
-        v_diff_sq = (curr_v[y1:y2, x1:x2] - background.mean_v[y1:y2, x1:x2]) ** 2
-        s_diff_sq = (curr_s[y1:y2, x1:x2] - background.mean_s[y1:y2, x1:x2]) ** 2
-        v_thresh_sq = thr_sq + background.var_v[y1:y2, x1:x2] * k_sq
-        s_thresh_sq = (thr_sq + background.var_s[y1:y2, x1:x2] * k_sq) * _S_THRESHOLD_SCALE
-        return ((v_diff_sq > v_thresh_sq) | (s_diff_sq > s_thresh_sq)) & (curr_v[y1:y2, x1:x2] > v_min)
-
-    if rois is not None:
-        raw_motion = torch.zeros_like(curr_v, dtype=torch.bool)
-        for rx1, ry1, rx2, ry2 in rois:
-            raw_motion[ry1:ry2, rx1:rx2] = raw_motion[ry1:ry2, rx1:rx2] | foreground(ry1, ry2, rx1, rx2)
-    else:
-        raw_motion = foreground(0, int(curr_v.shape[0]), 0, int(curr_v.shape[1]))
-
-    prev = window.prev_gpu
-    if not (cfg.motion_raw_temporal_gate and prev is not None):
-        return raw_motion, raw_motion
-    hi = cfg.motion_raw_temporal_hi
-    lo = cfg.motion_raw_temporal_lo
-    very_hi = cfg.motion_raw_temporal_very_hi
-    nxt = window.next_gpu
-
-    def temporal(y1: int, y2: int, x1: int, x2: int) -> torch.Tensor:
-        d_prev = _motion_probe_delta_cuda(
-            prev.chw[:, y1:y2, x1:x2], curr.chw[:, y1:y2, x1:x2],
-            prev.v[y1:y2, x1:x2], prev.s[y1:y2, x1:x2],
-            curr_v[y1:y2, x1:x2], curr_s[y1:y2, x1:x2],
-        )
-        if nxt is None:
-            return d_prev >= hi
-        d_next = _motion_probe_delta_cuda(
-            curr.chw[:, y1:y2, x1:x2], nxt.chw[:, y1:y2, x1:x2],
-            curr_v[y1:y2, x1:x2], curr_s[y1:y2, x1:x2],
-            nxt.v[y1:y2, x1:x2], nxt.s[y1:y2, x1:x2],
-        )
-        return (
-            ((d_prev >= hi) & (d_next >= lo)) |
-            ((d_next >= hi) & (d_prev >= lo)) |
-            (d_prev >= very_hi)
-        )
-
-    if rois is not None:
-        temporal_motion = torch.zeros_like(raw_motion)
-        for rx1, ry1, rx2, ry2 in rois:
-            temporal_motion[ry1:ry2, rx1:rx2] = temporal_motion[ry1:ry2, rx1:rx2] | temporal(ry1, ry2, rx1, rx2)
-    else:
-        temporal_motion = temporal(0, int(curr_v.shape[0]), 0, int(curr_v.shape[1]))
-    # Ungated motion drives the detector-input boost (recall: helps the detector
-    # recover misses). Gated motion drives the selector and the static dimming
-    # (precision: rejects false positives).
-    return raw_motion & temporal_motion, raw_motion
+    assert curr is not None
+    h, w = int(curr.v.shape[0]), int(curr.v.shape[1])
+    boxes = _motion_boxes(curr, rois)
+    ux1, uy1, ux2, uy2 = _union_box(boxes)
+    fg = background.foreground(curr, (ux1, uy1, ux2, uy2))
+    prev, nxt = window.prev_gpu, window.next_gpu
+    gate = cfg.motion_raw_temporal_gate and prev is not None
+    ungated: Optional[torch.Tensor] = None
+    if want_ungated or not gate:
+        ungated = torch.zeros((h, w), dtype=torch.bool, device=fg.device)
+        for x1, y1, x2, y2 in boxes:
+            ungated[y1:y2, x1:x2] = fg[y1 - uy1:y2 - uy1, x1 - ux1:x2 - ux1]
+    if not gate:
+        return ungated, ungated
+    assert prev is not None
+    union_planes = (slice(None), slice(uy1, uy2), slice(ux1, ux2))
+    d_prev = _probe_delta(prev.planes[union_planes], curr.planes[union_planes])
+    d_next = _probe_delta(curr.planes[union_planes], nxt.planes[union_planes]) if nxt is not None else None
+    hi, lo, very_hi = cfg.motion_raw_temporal_hi, cfg.motion_raw_temporal_lo, cfg.motion_raw_temporal_very_hi
+    gated = torch.zeros((h, w), dtype=torch.bool, device=fg.device)
+    for x1, y1, x2, y2 in boxes:
+        part = (slice(y1 - uy1, y2 - uy1), slice(x1 - ux1, x2 - ux1))
+        dp = _blur3(d_prev[part])
+        if d_next is None:
+            temporal = dp >= hi
+        else:
+            dn = _blur3(d_next[part])
+            temporal = ((dp >= hi) & (dn >= lo)) | ((dn >= hi) & (dp >= lo)) | (dp >= very_hi)
+        # Ungated motion drives the detector-input boost (recall: helps the detector
+        # recover misses). Gated motion drives the selector and the static dimming
+        # (precision: rejects false positives).
+        gated[y1:y2, x1:x2] |= fg[part] & temporal
+    return gated, ungated
 
 
-class _BoostMasks(NamedTuple):
-    raw_u8: Optional[np.ndarray]
-    selector_boost_u8: Optional[np.ndarray]    # narrow, from the gated mask; None when empty
-    detector_boost_u8: Optional[np.ndarray]    # wide, from the ungated mask (or the narrow one); None when empty
-    has_blobs: bool
+def _morph_max(mask_f: torch.Tensor, size: int) -> torch.Tensor:
+    """``cv2.dilate`` of a 0/1 float mask by a ``size`` x ``size`` box with OpenCV's default
+    anchor (``size // 2``) and border (outside the mask counts as unset)."""
+    a = size // 2
+    padded = F.pad(mask_f[None, None], (a, size - 1 - a, a, size - 1 - a))
+    return F.max_pool2d(padded, size, stride=1)[0, 0]
 
 
-def _nonempty(mask_u8: np.ndarray) -> Optional[np.ndarray]:
-    """``mask_u8`` when it has a set pixel, else None.  ``cv2.countNonZero`` is one SIMD pass;
-    NumPy's ``any`` took 0.6 ms per 1080p mask, two to three times a frame."""
-    return mask_u8 if cv2.countNonZero(mask_u8) else None
+def _clean_raw_motion_cuda(mask: torch.Tensor, cfg: MotionSettings) -> torch.Tensor:
+    """``_clean_raw_motion_mask`` on the GPU: the same closing and opening, pixel for pixel.
+
+    Erosion is ``1 - dilate(1 - mask)``, which counts the outside as set, as
+    OpenCV's erode does.  Returns ``mask`` itself when neither applies.
+    """
+    close_size, open_size = cfg.motion_raw_close_size, cfg.motion_raw_open_size
+    if close_size <= 1 and open_size <= 1:
+        return mask
+    out = mask.to(torch.float32)
+    if close_size > 1:
+        out = 1.0 - _morph_max(1.0 - _morph_max(out, close_size), close_size)
+    if open_size > 1:
+        out = _morph_max(1.0 - _morph_max(1.0 - out, open_size), open_size)
+    return out > 0.5
 
 
-class _MaskReader:
-    """Brings raw-motion masks to the CPU and keeps their ball-sized components, charging the
-    time each step took to ``perf`` (when timing is on)."""
+class MotionMasks:
+    """One frame's motion masks on their way to the host, and what the CPU makes of them.
 
-    def __init__(self, cfg: MotionSettings, perf: Optional[Dict[str, float]]) -> None:
+    ``preprocess_frame_cuda`` cleans the gated mask on the GPU box by box,
+    then copies each box's cleaned mask (and, for the detector boost, its
+    ungated mask) into one pinned host buffer behind a CUDA event, so pass 1
+    never waits for the copy while it preprocesses: the frame's evidence is
+    read when the frame is committed, a frame later.  The first accessor
+    waits for the copy and keeps the ball-sized components of each box
+    (``filter_boost_mask``, box by box as before), assembled in the box that
+    holds them all.
+
+    ``roi_mode``: the boxes are motion ROIs, and the packed masks store their
+    union box; otherwise the single box is the frame and the packed masks
+    store the bounding box of their set pixels (``PackedMask.pack``).
+    """
+
+    def __init__(self, shape: Tuple[int, int], boxes: List[Roi], roi_mode: bool, raw: List[torch.Tensor],
+                 wide: Optional[List[torch.Tensor]], cfg: MotionSettings, perf: Optional[Dict[str, float]]) -> None:
+        self.height, self.width = shape
+        self.boxes = boxes
+        self.roi_mode = roi_mode
         self.cfg = cfg
         self.perf = perf
-        self.min_area, self.max_area = cfg.boost_min_blob_area, cfg.boost_max_blob_area
+        self.union = _union_box(boxes)
+        crops = raw + (wide or [])
+        device = crops[0].device
+        total = sum(int(c.numel()) for c in crops)
+        self._host = torch.empty(total, dtype=torch.uint8, pin_memory=device.type == "cuda")
+        self._views: List[np.ndarray] = []
+        offset = 0
+        for crop in crops:
+            n = int(crop.numel())
+            dst = self._host[offset:offset + n].view(tuple(crop.shape))
+            dst.copy_(crop.view(torch.uint8), non_blocking=device.type == "cuda")
+            self._views.append(dst.numpy())
+            offset += n
+        self._wide_distinct = wide is not None
+        self._event: Optional[torch.cuda.Event] = None
+        if device.type == "cuda":
+            self._event = torch.cuda.Event(blocking=False)
+            self._event.record(torch.cuda.current_stream(device=device))
+        self._resolved = False
+        self._raw: np.ndarray = np.empty((0, 0), np.uint8)       # 0/1, union-box sized
+        self._narrow: Optional[np.ndarray] = None                  # 0/255 discs, union-box sized
+        self._wide: Optional[np.ndarray] = None
 
-    def download(self, tensor: torch.Tensor) -> np.ndarray:
-        perf = self.perf
-        t_d2h = time.perf_counter() if perf is not None else 0.0
-        out = tensor.contiguous().byte().cpu().numpy() * 255
-        if perf is not None:
-            perf["pre_cuda_raw_d2h"] = perf.get("pre_cuda_raw_d2h", 0.0) + (time.perf_counter() - t_d2h)
+
+    def _resolve(self) -> None:
+        if self._resolved:
+            return
+        self._resolved = True
+        t_start = time.perf_counter()
+        if self._event is not None:
+            self._event.synchronize()
+        if self.perf is not None:
+            self.perf["pre_cuda_raw_d2h"] = self.perf.get("pre_cuda_raw_d2h", 0.0) + (time.perf_counter() - t_start)
+        ux1, uy1, ux2, uy2 = self.union
+        size = (uy2 - uy1, ux2 - ux1)
+        raw = np.zeros(size, np.uint8)
+        narrow = np.zeros(size, np.uint8)
+        wide = np.zeros(size, np.uint8) if self._wide_distinct else None
+        cfg, n_boxes = self.cfg, len(self.boxes)
+        min_area, max_area = cfg.boost_min_blob_area, cfg.boost_max_blob_area
+        cc_seconds = 0.0
+        for index, (x1, y1, x2, y2) in enumerate(self.boxes):
+            part = (slice(y1 - uy1, y2 - uy1), slice(x1 - ux1, x2 - ux1))
+            crop = self._views[index]
+            np.maximum(raw[part], crop, out=raw[part])
+            if cv2.countNonZero(crop):
+                t0 = time.perf_counter()
+                np.maximum(narrow[part], filter_boost_mask(crop, min_area, max_area, cfg), out=narrow[part])
+                cc_seconds += time.perf_counter() - t0
+            if wide is not None:
+                wide_crop = self._views[n_boxes + index]
+                if cv2.countNonZero(wide_crop):
+                    np.maximum(wide[part], filter_boost_mask(wide_crop, min_area, max_area, cfg), out=wide[part])
+        self._raw = raw
+        self._narrow = narrow if cv2.countNonZero(narrow) else None
+        self._wide = (wide if cv2.countNonZero(wide) else None) if wide is not None else self._narrow
+        if self.perf is not None:
+            self.perf["pre_cuda_cc_filter"] = self.perf.get("pre_cuda_cc_filter", 0.0) + cc_seconds
+            self.perf["pre_cuda_total"] = self.perf.get("pre_cuda_total", 0.0) + (time.perf_counter() - t_start)
+
+    def _full(self, union_mask: np.ndarray, scale: int = 1) -> np.ndarray:
+        out = np.zeros((self.height, self.width), np.uint8)
+        ux1, uy1, ux2, uy2 = self.union
+        out[uy1:uy2, ux1:ux2] = union_mask * scale if scale != 1 else union_mask
         return out
 
-    def components(self, mask_u8: np.ndarray, timed: bool) -> np.ndarray:
-        perf = self.perf
-        t_cc = time.perf_counter() if (perf is not None and timed) else 0.0
-        out = filter_boost_mask(mask_u8, self.min_area, self.max_area, self.cfg)
-        if perf is not None and timed:
-            perf["pre_cuda_cc_filter"] = perf.get("pre_cuda_cc_filter", 0.0) + (time.perf_counter() - t_cc)
-        return out
+    def _pack(self, union_mask: Optional[np.ndarray]) -> Optional[PackedMask]:
+        if union_mask is None:
+            return None
+        if not self.roi_mode:
+            return PackedMask.pack(union_mask)         # the single box is the frame
+        if not cv2.countNonZero(union_mask):
+            return None
+        x1, y1, x2, y2 = self.union
+        return PackedMask(np.packbits(union_mask.reshape(-1) > 0), self.height, self.width, x1, y1, x2, y2)
+
+    @property
+    def has_blobs(self) -> bool:
+        self._resolve()
+        return self._narrow is not None or self._wide is not None
+
+    def packed_raw(self) -> Optional[PackedMask]:
+        """The cleaned gated raw-motion mask, packed (None when it has no set pixel)."""
+        self._resolve()
+        return self._pack(self._raw)
+
+    def packed_boost(self) -> Optional[PackedMask]:
+        """The selector's boost mask (discs on the gated motion's ball-sized blobs), packed."""
+        self._resolve()
+        return self._pack(self._narrow)
+
+    def raw_u8(self) -> np.ndarray:
+        """The cleaned gated raw-motion mask as a full-frame uint8 {0, 255} array."""
+        self._resolve()
+        return self._full(self._raw, 255)
+
+    def selector_boost_u8(self) -> Optional[np.ndarray]:
+        """The selector's boost mask as a full-frame uint8 array; None when no blob survived."""
+        self._resolve()
+        return self._full(self._narrow) if self._narrow is not None else None
+
+    def detector_boost_u8(self) -> Optional[np.ndarray]:
+        """The detector-input boost mask (from the ungated motion when it was downloaded, else the
+        selector's), full-frame; None when no blob survived."""
+        self._resolve()
+        source = self._wide if self._wide is not None else self._narrow
+        return self._full(source) if source is not None else None
 
 
-def _boost_masks(raw_motion: Optional[torch.Tensor], raw_motion_ungated: Optional[torch.Tensor],
-                 cfg: MotionSettings, rois: Optional[List[Roi]], wide_boost: bool,
-                 perf: Optional[Dict[str, float]]) -> _BoostMasks:
-    """Download the raw mask(s) and keep only ball-sized components.
-
-    Two boost masks have different roles: the narrow one from the gated mask
-    feeds the selector's motion-blob picker (precision), the wide one from the
-    ungated mask drives the detector-input brightening (recall: when the
-    temporal gate would suppress a real ball blob, the wider mask still
-    highlights it so the detector can find it).
-    """
-    if raw_motion is None:
-        return _BoostMasks(None, None, None, False)
-    boost_source = raw_motion_ungated if wide_boost and raw_motion_ungated is not None else raw_motion
-    wide_source = boost_source if boost_source is not raw_motion else None
-    reader = _MaskReader(cfg, perf)
-    if rois is not None:
-        raw_u8, narrow, wide = _roi_boost_masks(raw_motion, wide_source, rois, cfg, reader)
+def _queue_masks(gated: torch.Tensor, wide_source: Optional[torch.Tensor], rois: Optional[List[Roi]],
+                 curr: GpuFrame, background: BackgroundModel, cfg: MotionSettings,
+                 perf: Optional[Dict[str, float]]) -> MotionMasks:
+    """Clean the gated mask box by box on the GPU, keep the cleaned frame as the background's
+    slow-adaptation mask and start the boxes' copies to the host."""
+    boxes = _motion_boxes(curr, rois)
+    cleaned = [_clean_raw_motion_cuda(gated[y1:y2, x1:x2], cfg) for x1, y1, x2, y2 in boxes]
+    h, w = int(gated.shape[0]), int(gated.shape[1])
+    if rois is None:
+        remembered = cleaned[0]                     # the one box is the frame
     else:
-        raw_u8, narrow, wide = _fullframe_boost_masks(raw_motion, wide_source, cfg, reader)
-    return _BoostMasks(raw_u8, narrow, wide, narrow is not None or wide is not None)
-
-
-def _fullframe_boost_masks(raw_motion: torch.Tensor, wide_source: Optional[torch.Tensor], cfg: MotionSettings,
-                           reader: _MaskReader) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
-    """The raw, narrow and wide masks of a whole frame (``wide_source`` None: the wide mask is
-    the narrow one)."""
-    raw_u8 = _clean_raw_motion_mask(reader.download(raw_motion), cfg)
-    wide_src = reader.download(wide_source) if wide_source is not None else None
-    narrow = _nonempty(reader.components(raw_u8, timed=True))
-    wide = _nonempty(reader.components(wide_src, timed=False)) if wide_source is not None else narrow
-    return raw_u8, narrow, wide
-
-
-def _roi_boost_masks(raw_motion: torch.Tensor, wide_source: Optional[torch.Tensor], rois: List[Roi], cfg: MotionSettings,
-                     reader: _MaskReader) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
-    """The raw, narrow and wide masks assembled ROI by ROI (``wide_source`` None: the wide mask
-    is the narrow one), each ROI downloaded and filtered on its own."""
-    wide_distinct = wide_source is not None
-    h_u8, w_u8 = int(raw_motion.shape[0]), int(raw_motion.shape[1])
-    raw_u8 = np.zeros((h_u8, w_u8), dtype=np.uint8)
-    narrow_u8 = np.zeros((h_u8, w_u8), dtype=np.uint8)
-    wide_u8 = np.zeros((h_u8, w_u8), dtype=np.uint8) if wide_distinct else None
-    for rx1, ry1, rx2, ry2 in rois:
-        raw_roi = reader.download(raw_motion[ry1:ry2, rx1:rx2])
-        wide_roi = reader.download(wide_source[ry1:ry2, rx1:rx2]) if wide_distinct else None
-        raw_roi = _clean_raw_motion_mask(raw_roi, cfg)
-        np.maximum(raw_u8[ry1:ry2, rx1:rx2], raw_roi, out=raw_u8[ry1:ry2, rx1:rx2])
-        if raw_roi.max() > 0:
-            np.maximum(narrow_u8[ry1:ry2, rx1:rx2], reader.components(raw_roi, timed=True),
-                       out=narrow_u8[ry1:ry2, rx1:rx2])
-        if wide_distinct and wide_roi.max() > 0:
-            np.maximum(wide_u8[ry1:ry2, rx1:rx2], reader.components(wide_roi, timed=False),
-                       out=wide_u8[ry1:ry2, rx1:rx2])
-    narrow = _nonempty(narrow_u8)
-    wide = _nonempty(wide_u8) if wide_distinct else narrow
-    return raw_u8, narrow, wide
+        remembered = torch.zeros((h, w), dtype=torch.bool, device=gated.device)
+        for (x1, y1, x2, y2), mask in zip(boxes, cleaned):
+            remembered[y1:y2, x1:x2] |= mask
+    background.remember_motion(remembered)
+    wide = [wide_source[y1:y2, x1:x2] for x1, y1, x2, y2 in boxes] if wide_source is not None else None
+    return MotionMasks((h, w), boxes, rois is not None, cleaned, wide, cfg, perf)
 
 
 def _bgr_u8_hwc(t_chw: torch.Tensor) -> torch.Tensor:
@@ -661,19 +774,19 @@ def _enhance_bgr(t_chw: torch.Tensor, curr_v: torch.Tensor, curr_s: torch.Tensor
     return _hsv_to_bgr_cuda(h_t, s_t, v_t)
 
 
-def _enhanced_frame(curr: GpuFrame, raw_motion: Optional[torch.Tensor], masks: _BoostMasks,
+def _enhanced_frame(curr: GpuFrame, raw_motion: Optional[torch.Tensor], masks: Optional[MotionMasks],
                     protect_mask: Optional[torch.Tensor], cfg: MotionSettings,
                     request: DetectorInputRequest) -> Optional[torch.Tensor]:
     """The detector input as HWC uint8 on CUDA: boosted where a ball-sized blob was found, else at
-    most the static background dimmed; None when the source frame is to be used as it is."""
+    most the static background dimmed; None when the source frame is to be used as it is.  Needs
+    the boost masks now, so it waits for ``masks``."""
     t = curr.chw
-    if not masks.has_blobs:
+    if masks is None or not masks.has_blobs:
         # No ball-sized blob: at most dim the static background.
         if raw_motion is not None and request.dim_static:
             return _dim_static_bgr(t, raw_motion, protect_mask, cfg)
         return _bgr_u8_hwc(t) if request.cuda else None
-    boost_src = masks.detector_boost_u8 if masks.detector_boost_u8 is not None else masks.selector_boost_u8
-    return _enhance_bgr(t, curr.v, curr.s, raw_motion, boost_src, protect_mask, cfg)
+    return _enhance_bgr(t, curr.v, curr.s, raw_motion, masks.detector_boost_u8(), protect_mask, cfg)
 
 
 @torch.no_grad()
@@ -686,27 +799,35 @@ def preprocess_frame_cuda(window: FrameWindow, background: BackgroundModel, cfg:
 
     ``rois`` limits the motion computation to those ``(x1, y1, x2, y2)``
     regions (None = the whole frame); ``protect_mask`` is a boolean CUDA mask
-    of pixels that are never dimmed or boosted (the court-side mask).
-    ``perf`` accumulates ``pre_cuda_total`` / ``pre_cuda_raw_d2h`` /
-    ``pre_cuda_cc_filter`` seconds when given.
+    of pixels that are never dimmed or boosted (the court-side mask).  The
+    frame's cleaned raw mask becomes the background's slow-adaptation mask
+    (``BackgroundModel.remember_motion``).  The masks reach the host
+    asynchronously (``MotionMasks``) unless the detector input needs them now.
+    ``perf`` accumulates ``pre_cuda_total`` (all of the motion work, the
+    host side of the masks included), ``pre_cuda_raw_d2h`` (waiting for the
+    masks' copy) and ``pre_cuda_cc_filter`` (their connected components)
+    seconds when given.
     """
     perf_t0 = time.perf_counter() if perf is not None else 0.0
     frame = window.curr
     curr = window.curr_gpu
+    assert curr is not None
 
-    raw_motion, raw_motion_ungated = _raw_motion_cuda(window, background, cfg, rois)
-    masks = _boost_masks(raw_motion, raw_motion_ungated, cfg, rois, request.wide_boost, perf)
+    raw_motion, raw_motion_ungated = _raw_motion_cuda(window, background, cfg, rois, want_ungated=request.wide_boost)
+    masks: Optional[MotionMasks] = None
+    if raw_motion is None:
+        background.remember_motion(None)
+    else:
+        wide_source = (raw_motion_ungated if request.wide_boost and raw_motion_ungated is not None
+                       and raw_motion_ungated is not raw_motion else None)
+        masks = _queue_masks(raw_motion, wide_source, rois, curr, background, cfg, perf)
+    if perf is not None:
+        perf["pre_cuda_total"] = perf.get("pre_cuda_total", 0.0) + (time.perf_counter() - perf_t0)
 
     enhanced: Optional[torch.Tensor] = None       # HWC uint8 on CUDA, None = the source frame
     if request.cpu or request.cuda:
         enhanced = _enhanced_frame(curr, raw_motion, masks, protect_mask, cfg, request)
-
     if enhanced is None:
-        result = PreprocessResult(frame if request.cpu else None, None, masks.raw_u8, masks.selector_boost_u8)
-    else:
-        result = PreprocessResult(enhanced.cpu().numpy() if request.cpu else None,
-                                  enhanced if request.cuda else None,
-                                  masks.raw_u8, masks.selector_boost_u8)
-    if perf is not None:
-        perf["pre_cuda_total"] = perf.get("pre_cuda_total", 0.0) + (time.perf_counter() - perf_t0)
-    return result
+        return PreprocessResult(frame if request.cpu else None, None, masks)
+    return PreprocessResult(enhanced.cpu().numpy() if request.cpu else None,
+                            enhanced if request.cuda else None, masks)

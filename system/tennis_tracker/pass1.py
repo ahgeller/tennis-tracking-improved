@@ -8,10 +8,11 @@ preprocessing of frame N+1; a frame is committed when its detections arrive.
 """
 from __future__ import annotations
 
+import collections
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -20,10 +21,11 @@ from ball_in_play_selector import PackedMask, RawDetection
 from .court.court_geometry import court_keypoints_key
 from .court.court_scene import PlayerBoxes
 from .engines.ball_detectors import FrameInput
-from .engines.player_detector import PlayerPending
+from .engines.player_detector import PlayerPending, interpolate_player_boxes
 from .frame_window import FrameWindow
 from .motion import (
-    BackgroundModel, DetectorInputRequest, PreprocessResult, build_court_side_protect_mask, preprocess_frame_cuda,
+    BackgroundModel, DetectorInputRequest, MotionMasks, PreprocessResult, build_court_side_protect_mask,
+    preprocess_frame_cuda,
 )
 from .run_context import RunContext
 from .roi_tracking import ROIMotionTracker
@@ -68,14 +70,13 @@ class Pass1Result:
 
 @dataclass
 class FrameRecord:
-    """A frame's evidence, held until its ball detections arrive."""
+    """A frame's evidence, held until its ball detections arrive.  The motion masks are still on
+    their way to the host (``MotionMasks``) and the player boxes are read at commit time, after
+    the frame's player inference has been finished."""
 
     frame_index: int
-    raw_motion_u8: Optional[np.ndarray]
-    boost_mask_u8: Optional[np.ndarray]
-    pack_roi: Optional[Box]                  # rectangle the masks are packed in
+    masks: Optional[MotionMasks]
     rois: Optional[List[Box]]
-    player_boxes: PlayerBoxes
     court_keypoints: Optional[List[float]]
     detector_frame: Optional[np.ndarray]
     detector_frame_cuda: Optional[torch.Tensor]
@@ -94,10 +95,8 @@ class _Preprocessed:
 
     detector_frame: Optional[np.ndarray]
     detector_frame_cuda: Optional[torch.Tensor] = None
-    raw_motion_u8: Optional[np.ndarray] = None
-    boost_mask_u8: Optional[np.ndarray] = None
+    masks: Optional[MotionMasks] = None
     rois_visual: Optional[List[Box]] = None
-    pack_roi: Optional[Box] = None
     det_pending: Any = None
 
     @property
@@ -177,11 +176,6 @@ def _new_frame_cache(ctx: RunContext) -> Optional[FrameCache]:
     return None
 
 
-def _union_box(rois: List[Box]) -> Box:
-    return (min(r[0] for r in rois), min(r[1] for r in rois),
-            max(r[2] for r in rois), max(r[3] for r in rois))
-
-
 def _same_box(a: Box, b: Box) -> bool:
     return all(abs(int(a[i]) - int(b[i])) <= _ROI_MATCH_TOLERANCE_PX for i in range(4))
 
@@ -220,6 +214,8 @@ class _Pass1Collector:
         self._frame_cache = _new_frame_cache(ctx)
         self.result = Pass1Result(cached_frames=self._frame_cache.frames if self._frame_cache is not None else None)
         self._progress_frame, self._progress_elapsed = 0, 0.0   # where the last progress line was
+        self._player_pending: Deque[PlayerPending] = collections.deque()   # launched, not yet finished
+        self._players_tracked: List[bool] = []    # per committed frame: did the player tracker run on it
 
     # -- per-frame steps -------------------------------------------------------
 
@@ -269,23 +265,22 @@ class _Pass1Collector:
         return self._protect_mask_cuda
 
     def _preprocess(self, frame_index: int, court_kps: Optional[List[float]],
-                    detect_this_frame: bool) -> Tuple[PreprocessResult, Optional[List[Box]], Optional[Box]]:
+                    detect_this_frame: bool) -> Tuple[PreprocessResult, Optional[List[Box]]]:
         """Motion masks and detector input for the current frame.
 
-        Returns ``(preprocess_result, visual_rois, pack_roi)``.
+        Returns ``(preprocess_result, visual_rois)``.  The court-side protect mask only shapes
+        the detector input, so it is built only for a frame that asks for one.
         """
-        protect_mask_cuda = self._protect_mask_for(court_kps)
+        request = self._detector_input_request(detect_this_frame)
+        protect_mask_cuda = self._protect_mask_for(court_kps) if (request.cpu or request.cuda) else None
         rois, rois_visual = self.roi_tracker.next_rois(frame_index)
         if rois:
-            pack_roi = _union_box(rois)
             self.result.roi_frames += len(rois)
         else:
-            pack_roi = None
             self.result.fullframe_frames += 1
-        pre = preprocess_frame_cuda(self.window, self.background, self.cfg,
-                                    request=self._detector_input_request(detect_this_frame),
+        pre = preprocess_frame_cuda(self.window, self.background, self.cfg, request=request,
                                     rois=rois, protect_mask=protect_mask_cuda, perf=self.pre_cuda_perf)
-        return pre, rois_visual, pack_roi
+        return pre, rois_visual
 
     def _detector_input_request(self, detect_this_frame: bool) -> DetectorInputRequest:
         """Which detector inputs this frame's preprocessing must build.
@@ -308,14 +303,29 @@ class _Pass1Collector:
 
     # -- committing frames ------------------------------------------------------
 
+    def _finish_players(self, through_frame: int) -> None:
+        """Finish the player inferences launched for frames up to ``through_frame``, in order.
+
+        A frame's player inference is launched in its own iteration and finished in the next,
+        just before the frame is committed, so the GPU has a whole frame of other work to run it
+        behind instead of the loop waiting for it; ByteTrack still sees every frame in order, and
+        a frame's boxes are the tracker's state after its own frame, as before.
+        """
+        while self._player_pending and self._player_pending[0].frame_index <= through_frame:
+            t0 = self.timing.start()
+            self.player_detector.detect_async_finish(self._player_pending.popleft())
+            self.timing.add("pass1_aux_wait", t0)
+
     def _commit(self, record: FrameRecord, dets: List[RawDetection]) -> None:
         """Append the frame's evidence; retire the ROIs of tracks that just timed out."""
+        self._finish_players(record.frame_index)
         t0 = self.timing.start()
         out = self.result
         dropped_ghost_rois = self.roi_tracker.update_from_dets(dets, record.frame_index)
         out.detections.append(dets)
-        out.boost_masks.append(PackedMask.pack(record.boost_mask_u8, roi=record.pack_roi))
-        out.raw_motions.append(PackedMask.pack(record.raw_motion_u8, roi=record.pack_roi))
+        masks = record.masks
+        out.boost_masks.append(masks.packed_boost() if masks is not None else None)
+        out.raw_motions.append(masks.packed_raw() if masks is not None else None)
         # A track that timed out never had the ball: its coasting ROIs on
         # earlier frames are moved from the visual ROI list to the ghost list,
         # and erase_ghost_rois() clears their motion in one batch after pass 1.
@@ -331,7 +341,9 @@ class _Pass1Collector:
             out.rois[ghost_frame] = kept if kept else None
         out.rois.append(record.rois)
         out.ghost_rois.append([])
-        out.player_boxes.append(record.player_boxes)
+        # A frame the player tracker skips (cfg.player_detect_interval) is filled after the loop.
+        out.player_boxes.append(self.player_detector.player_boxes_by_slot())
+        self._players_tracked.append(self.player_detector.tracks_frame(record.frame_index))
         out.court_keypoints.append(record.court_keypoints)
         if self.detector_input_writer is not None:
             # Stream the detector input straight to its writer rather than keep it.
@@ -355,20 +367,16 @@ class _Pass1Collector:
         """Preprocess the frame and start its ball inference as soon as the input is ready, so
         it overlaps the CPU work that follows. Returns ``prev_pending`` unchanged, or None when a
         backend without output slots had to finish the previous frame first."""
-        pre, rois_visual, pack_roi = self._preprocess(frame_index, court_kps, detect_this_frame)
+        pre, rois_visual = self._preprocess(frame_index, court_kps, detect_this_frame)
         out = _Preprocessed(
             detector_frame=frame if self.detector.uses_raw_frames else pre.detector_frame,
             detector_frame_cuda=pre.detector_frame_cuda,
-            raw_motion_u8=pre.raw_motion, boost_mask_u8=pre.boost_mask,
-            rois_visual=rois_visual, pack_roi=pack_roi)
+            masks=pre.masks, rois_visual=rois_visual)
         if detect_this_frame:
             if prev_pending is not None and not self.can_overlap_ball_inference:
                 self._finish_pending(prev_pending)
                 prev_pending = None
             out.det_pending = self.detector.detect_async_start(out.detector_input, frame_index=frame_index)
-        post_t0 = self.timing.start()
-        self.background.remember_motion(out.raw_motion_u8, roi=out.pack_roi)
-        self.timing.add("pass1_pre_postmask", post_t0)
         return out, prev_pending
 
     def _queue_detection(self, record: FrameRecord, pre: _Preprocessed,
@@ -409,20 +417,16 @@ class _Pass1Collector:
             if self._frame_cache is not None:
                 self._frame_cache.add(frame)
             if cfg.enable_preprocess:
-                self.background.update(window.curr_gpu.v, window.curr_gpu.s)
+                self.background.update(window.curr_gpu.vs)
             detect_this_frame = self._should_detect(frame_index)
             court_kps, player_pending = self._aux_detect(frame_index, frame, detect_this_frame)
+            if player_pending is not None:
+                self._player_pending.append(player_pending)
 
             pre_t0 = timing.start()
             pre = _Preprocessed(detector_frame=frame)
             if cfg.enable_preprocess:
                 pre, prev_pending = self._preprocess_frame(frame_index, frame, court_kps, detect_this_frame, prev_pending)
-            if player_pending is not None:
-                # The wait for the player engine and its result's trip to the host, apart from the
-                # launch, so the timing report shows how much of a frame pass 1 spends waiting.
-                aux_t0 = timing.start()
-                self.player_detector.detect_async_finish(player_pending)
-                timing.add("pass1_aux_wait", aux_t0)
             timing.add("pass1_preprocess", pre_t0)
 
             if prev_pending is not None:
@@ -430,11 +434,8 @@ class _Pass1Collector:
 
             record = FrameRecord(
                 frame_index=frame_index,
-                raw_motion_u8=pre.raw_motion_u8,
-                boost_mask_u8=pre.boost_mask_u8,
-                pack_roi=pre.pack_roi,
+                masks=pre.masks,
                 rois=pre.rois_visual if pre.rois_visual is not None else self.roi_tracker.last_rois,
-                player_boxes=self.player_detector.player_boxes_by_slot(),
                 court_keypoints=court_kps,
                 detector_frame=pre.detector_frame,
                 detector_frame_cuda=pre.detector_frame_cuda,
@@ -449,6 +450,9 @@ class _Pass1Collector:
 
         if pending is not None:
             self._finish_pending(pending)
+        self._finish_players(frame_index)
+        if not all(self._players_tracked):
+            self.result.player_boxes = interpolate_player_boxes(self.result.player_boxes, self._players_tracked)
         return self.result
 
 

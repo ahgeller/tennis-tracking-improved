@@ -13,15 +13,27 @@ from typing import NamedTuple, Optional
 import numpy as np
 import torch
 
-from .video_io import PinnedFrameUploader, cuda_frame_to_chw_f32, cuda_vs_tensors
+from .video_io import PinnedFrameUploader, cuda_frame_planes, cuda_frame_to_chw_f32
 
 
 class GpuFrame(NamedTuple):
-    """One frame on CUDA: CHW float32 in [0, 1] plus its HSV value and saturation planes."""
+    """One frame on CUDA: CHW float32 BGR in [0, 1] and its motion planes.
+
+    ``planes`` is ``(3, H, W)``: gray, HSV value, HSV saturation
+    (``video_io.cuda_frame_planes``); ``v``, ``s`` and ``vs`` (value and
+    saturation as one ``(2, H, W)`` view) are views of it.
+    """
 
     chw: torch.Tensor
+    planes: torch.Tensor
     v: torch.Tensor
     s: torch.Tensor
+    vs: torch.Tensor
+
+    @classmethod
+    def of(cls, chw: torch.Tensor) -> "GpuFrame":
+        planes = cuda_frame_planes(chw)
+        return cls(chw, planes, planes[1], planes[2], planes[1:3])
 
 
 class FrameWindow:
@@ -55,9 +67,7 @@ class FrameWindow:
     def _to_gpu(self, frame: Optional[np.ndarray]) -> Optional[GpuFrame]:
         if frame is None or not self.upload:
             return None
-        chw = cuda_frame_to_chw_f32(frame, self.device, uploader=self.uploader)
-        v, s = cuda_vs_tensors(None, self.device, gpu_tensor=chw)
-        return GpuFrame(chw, v, s)
+        return GpuFrame.of(cuda_frame_to_chw_f32(frame, self.device, uploader=self.uploader))
 
     def slide(self, incoming: Optional[np.ndarray]) -> None:
         """Make ``next`` the current frame and ``incoming`` the next one (None at the end)."""

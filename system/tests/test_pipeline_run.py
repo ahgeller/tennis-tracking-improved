@@ -288,6 +288,9 @@ class FakePlayerDetector:
     def player_boxes_by_slot(self) -> Dict[int, List[float]]:
         return dict(self.slots)
 
+    def tracks_frame(self, frame_index: int) -> bool:
+        return True
+
 
 def frame_digest(frame: np.ndarray) -> str:
     h = hashlib.blake2b(digest_size=16)

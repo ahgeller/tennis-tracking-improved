@@ -53,11 +53,9 @@ class Config:
     # Player & court detection
     player_model_path: Optional[str] = str(PLAYER_ENGINE)
     court_model_path: Optional[str] = str(COURT_ENGINE)
-    # Players move a few px per frame at 60 fps and ByteTrack coasts the boxes
-    # between inferences, while _is_near_player dilates them by margin plus
-    # twice the box height -- far more than one frame of staleness. Measured
-    # on the UCSD clip: det frames identical at every interval tried, 19 of
-    # 3674 frames differ, all in near-player fill vetoes.
+    # Above 1, the player engine and ByteTrack run on every Nth frame only and pass 1
+    # interpolates the boxes between (PlayerDetector). Kept at 1: N=3 cut pass 1 by about
+    # 1.2 ms/frame but lost one of 27 labelled landing hits (audit/records/opt_pass1.md).
     player_detect_interval: int = 1
     court_detect_interval: int = 400
     court_conf: float = 0.10
