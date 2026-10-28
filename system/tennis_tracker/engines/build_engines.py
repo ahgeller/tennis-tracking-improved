@@ -287,12 +287,37 @@ def _parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Skip court ONNX/engine build",
     )
+    p.add_argument(
+        "--prepass-weights",
+        help="Build only the five-frame prepass model's cached engine for these .pt/.npz weights "
+             "(ball_trt; the tracker otherwise builds it on first use) and print its path",
+    )
+    p.add_argument("--prepass-batch", type=int, default=None,
+                   help="Units per call of the prepass engine (default: Config.ball_engine_batch)")
     p.set_defaults(half=True, require_fp16=True, strict_fp16_io=False, include_court=True)
     return p
 
 
+def _build_prepass_engine(weights: Path, batch: int, device: str) -> int:
+    """Build (or find) the prepass ball model's cached engine, as the tracker would on first use."""
+    import torch
+
+    from ..ball_models import load_ball_model
+    from ..config import Config
+    from .ball_trt import ensure_ball_engine
+
+    cfg = Config()
+    target = torch.device(f"cuda:{device}")
+    model = load_ball_model(weights, target)
+    path = ensure_ball_engine(weights, model, int(batch or cfg.ball_engine_batch), Path(cfg.ball_engine_dir), target)
+    print(f"[done] prepass engine: {path}")
+    return 0
+
+
 def main() -> int:
     args = _parser().parse_args()
+    if args.prepass_weights:
+        return _build_prepass_engine(Path(args.prepass_weights), args.prepass_batch, str(args.device))
 
     targets = [
         ExportTarget("ball", Path(args.ball_pt), int(args.imgsz_ball)),

@@ -4,9 +4,10 @@ single-frame TensorRT engine.
 Both sit behind ``BallDetectorBackend``: ``GridTrackNetBallDetector`` (the default, a
 five-frame temporal model run as a whole-clip prepass; ``_prepass`` keeps source-frame
 indices and temporal order; the model is whichever ``ball_models.load_ball_model`` builds
-for ``Config.model_path``, GridTrackNet for ``.npz`` and HeatmapNet for ``.pt``) and the
-single-frame Ultralytics TensorRT engine (``Config.model_path`` ending in ``.engine``),
-driven through ``TensorRTRuntimeSession`` from ``engine_session``.
+for ``Config.model_path``, GridTrackNet for ``.npz`` and HeatmapNet for ``.pt``, run as a
+cached TensorRT engine from ``ball_trt`` or as the PyTorch model) and the single-frame
+Ultralytics TensorRT engine (``Config.model_path`` ending in ``.engine``), driven through
+``TensorRTRuntimeSession`` from ``engine_session``.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import cv2
 import numpy as np
@@ -24,18 +25,19 @@ import torch
 from ball_in_play_selector import RawDetection
 
 from ..config import Config
+from .ball_gpu import HeatRing, ModelResize, Readback, grid_peaks, peak_points
 from .engine_boxes import OutputMode, decode_engine_boxes, engine_output_mode
 from .engine_session import TensorRTRuntimeSession
 from ..ball_models import load_ball_model
 from ..frame_rate import require_phase_stride
-from ..gridtracknet import HEIGHT, WIDTH, GridPoint, decode_grid, decode_predictions, frame_tensor
+from ..gridtracknet import FRAMES_PER_UNIT, HEIGHT, WIDTH, GridPoint
 
 # A BGR HWC uint8 frame, either a host array or a CUDA tensor of the same layout.
 FrameInput = Union[np.ndarray, torch.Tensor]
 # The prepass's pieces: one frame's input tensor with its source index, and a five-frame unit
-# (the frames' tensors concatenated) with the source indices it covers.
+# (the frames' tensors, in order) with the source indices it covers.
 _PrepassFrame = Tuple[torch.Tensor, int]
-_PrepassUnit = Tuple[torch.Tensor, List[int]]
+_PrepassUnit = Tuple[List[torch.Tensor], List[int]]
 
 _BALL_NMS_IOU = 0.45
 # GridTrackNet gives a point; the box handed to the selector is this fraction
@@ -43,8 +45,33 @@ _BALL_NMS_IOU = 0.45
 _BOX_RADIUS_FRAC = 0.003
 _MIN_BOX_RADIUS_PX = 2.0
 _REFERENCE_HEIGHT_PX = 1080.0
-_UNITS_PER_INFERENCE = 4
+_UNITS_PER_INFERENCE = 4            # units per call of the PyTorch model
+# Inference calls whose peaks may still be on their way to the host before the prepass waits for
+# the oldest: enough that the device never idles while the host reads the next frames.
+_READBACKS_IN_FLIGHT = 3
 _DEFAULT_NAMES: Dict[int, str] = {0: "ball"}
+RUNTIMES = ("tensorrt", "torch")
+
+
+class FrameReader:
+    """What the prepass reads a clip through: ``read()`` returns ``(ok, frame)`` like
+    ``cv2.VideoCapture.read``, the frame a BGR HWC uint8 host array or a CUDA tensor of that
+    layout, and ``release()`` frees the decoder. ``open_frames`` is the one place a reader is
+    made, so another decoder (NVDEC) replaces ``cv2.VideoCapture`` there alone."""
+
+    def read(self) -> Tuple[bool, Optional[FrameInput]]:
+        raise NotImplementedError
+
+    def release(self) -> None:
+        raise NotImplementedError
+
+
+def open_frames(video_path: Path) -> Any:
+    """A ``FrameReader`` over `video_path`; one that cannot be opened is a RuntimeError."""
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise RuntimeError(f"Could not open input video for GridTrackNet: {video_path}")
+    return capture
 
 
 class BallDetectorBackend:
@@ -91,19 +118,39 @@ class CachedDetections:
     detections: List[RawDetection]
 
 
+@dataclass
+class _Flush:
+    """One flush of the prepass, waiting for its peaks to reach the host: the frames below ``upto``
+    are final once it is applied. ``frames`` are the averaged frames ``peaks`` answers, one row
+    each; ``units`` (the one-unit-per-frame prepass) are the units it answers, five rows each."""
+
+    upto: int
+    peaks: Optional[Readback] = None
+    frames: Sequence[int] = ()
+    units: Sequence[Sequence[int]] = ()
+    points: Optional[List[GridPoint]] = None      # decoded on the host already (``_decode``)
+
+
 class GridTrackNetBallDetector(BallDetectorBackend):
     """Run the five-frame model at its native 30-FPS cadence.
 
     The model is GridTrackNet or HeatmapNet by ``weights_path``
     (``ball_models.load_ball_model``); both take the same 15-channel unit and
     answer in the same layout, so everything here reads the model's own
-    ``INPUT_CHANNELS`` and grid and nothing asks which it holds. Units are
-    batched four to an inference call.
+    ``INPUT_CHANNELS`` and grid and nothing asks which it holds. It runs as a
+    TensorRT FP16 engine (``ball_trt``, ``Config.ball_prepass_runtime``
+    "tensorrt", batches of ``Config.ball_engine_batch`` units, the last one
+    padded) or as the PyTorch model (four units a call).
 
     ``Config.gridtracknet_window_step`` below 5 (the default is 1) starts a
     unit every that many frames of a phase instead of every 5, so a frame is
     answered by up to five overlapping units, and the answers a frame gets are
-    averaged grid by grid before it is decoded once (``_HeatAverage``).
+    averaged grid by grid before it is decoded once (``ball_gpu.HeatRing``).
+
+    Every frame is resized to the model's input on the GPU (``ball_gpu.ModelResize``,
+    the bytes OpenCV's resize gives) and each frame's peak is found there, so
+    only four floats a frame come back, through pinned memory a few calls
+    behind the device.
 
     ``prepare_video`` decodes the whole clip once (by default on a worker
     thread, see ``Config.gridtracknet_prepass_background``) and caches one
@@ -125,9 +172,13 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             raise RuntimeError("GridTrackNet requires CUDA-enabled torch.")
         self.cfg = cfg
         self.device = torch.device(f"cuda:{cfg.device}")
-        self._decode = decode_predictions
-        self._frame_tensor = frame_tensor
-        self.model = load_ball_model(Path(weights_path), self.device)
+        self._frame_tensor: Callable[[FrameInput, torch.device], torch.Tensor] = self._model_input
+        # The one-unit-per-frame prepass finds each frame's peak on the device; a decoder set here,
+        # ``gridtracknet.decode_predictions``'s signature, decodes the model's output on the host
+        # instead (the tests' seam for stand-in models that answer no grid).
+        self._decode: Optional[Callable[[torch.Tensor, int, int, float], List[GridPoint]]] = None
+        self._resizers: Dict[Tuple[int, int], ModelResize] = {}
+        self.model: Any = load_ball_model(Path(weights_path), self.device)
         window_step = self.window_step()
         # One entry per decoded source frame, appended by the prepass.
         self.precomputed: Optional[List[List[RawDetection]]] = None
@@ -138,12 +189,34 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         self._ready = threading.Condition()
         self._worker: Optional[threading.Thread] = None
         self._worker_error: Optional[BaseException] = None
-        with torch.inference_mode():
-            self.model(torch.zeros((1, self.model.INPUT_CHANNELS, HEIGHT, WIDTH), device=self.device, dtype=torch.float16))
-        torch.cuda.synchronize(self.device)
+        self.engine = self._open_engine(Path(weights_path))
+        if self.engine is None:         # the PyTorch model runs: let cuDNN pick its kernels now
+            channels = int(getattr(self.model, "INPUT_CHANNELS"))
+            with torch.inference_mode():
+                self.model(torch.zeros((1, channels, HEIGHT, WIDTH), device=self.device, dtype=torch.float16))
+            torch.cuda.synchronize(self.device)
         windows = "" if window_step == 5 else f", a unit every {window_step} frame(s)"
-        print(f"[detector] {self.model.ARCH} FP16, {self.model.GRID_COLS}x{self.model.GRID_ROWS} grid "
+        runtime = f"TensorRT FP16, {self.engine.batch} units a call" if self.engine is not None else "FP16"
+        print(f"[detector] {self.model.ARCH} {runtime}, {self.model.GRID_COLS}x{self.model.GRID_ROWS} grid "
               f"(confidence={cfg.conf:.2f}, device={self.device}{windows})")
+
+    def _open_engine(self, weights: Path) -> Any:
+        """The cached TensorRT engine for `weights` (``ball_trt``) when ``Config.ball_prepass_runtime``
+        asks for one and the device is a GPU, else None (the PyTorch model runs). A runtime that is
+        neither is a ValueError; an engine TensorRT cannot provide is reported and None returned."""
+        runtime = self.cfg.ball_prepass_runtime
+        if runtime not in RUNTIMES:
+            raise ValueError(f"ball_prepass_runtime must be one of {RUNTIMES}, not {runtime!r}")
+        if runtime != "tensorrt" or self.device.type != "cuda":
+            return None
+        try:
+            from .ball_trt import BallEngine, ensure_ball_engine
+            path = ensure_ball_engine(weights, self.model, int(self.cfg.ball_engine_batch),
+                                      Path(self.cfg.ball_engine_dir), self.device)
+            return BallEngine(path, self.model, self.device)
+        except (RuntimeError, OSError, ImportError) as error:
+            print(f"[detector] TensorRT engine unavailable, running the PyTorch model ({error})")
+            return None
 
     def window_step(self) -> int:
         """The frames of a phase between the prepass's unit starts: ``Config.gridtracknet_window_step``,
@@ -162,6 +235,22 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         except ValueError as error:
             raise RuntimeError(str(error)) from error
 
+    def _model_input(self, frame: FrameInput, device: torch.device) -> torch.Tensor:
+        """One BGR HWC uint8 frame (host array or CUDA tensor) as the model's (3, HEIGHT, WIDTH) RGB
+        FP16 input on `device`: a host frame goes up as uint8 through pinned memory without waiting,
+        and ``ModelResize`` resizes it there."""
+        if isinstance(frame, torch.Tensor):
+            source = frame.to(device)
+        else:
+            source = torch.from_numpy(np.ascontiguousarray(frame))
+            if device.type == "cuda":
+                source = source.pin_memory().to(device, non_blocking=True)
+        size = (int(source.shape[1]), int(source.shape[0]))
+        resize = self._resizers.get(size)
+        if resize is None:
+            resize = self._resizers[size] = ModelResize(size[0], size[1], WIDTH, HEIGHT, device)
+        return resize(source)
+
     def prepare_video(self, video_path: Path, fps: float, width: int, height: int, total: int,
                       background: Optional[bool] = None) -> None:
         """Decode the video once and cache one detection per decoded frame.
@@ -175,16 +264,15 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         whose failure raises from here.
         """
         source_stride = self.source_stride_for(fps)
-        capture = cv2.VideoCapture(str(video_path))
-        if not capture.isOpened():
-            raise RuntimeError(f"Could not open input video for GridTrackNet: {video_path}")
-        self.precomputed = []
+        capture = open_frames(video_path)
+        cached: List[List[RawDetection]] = []
+        self.precomputed = cached
         self._ready_upto = 0
         self._done = False
         self._worker_error = None
         if background is None:
             background = self.cfg.gridtracknet_prepass_background
-        args = (capture, source_stride, width, height, int(total))
+        args = (capture, cached, source_stride, width, height, int(total))
         if background:
             self._worker = threading.Thread(target=self._prepass, args=args, daemon=True, name="gridtracknet-prepass")
             self._worker.start()
@@ -211,10 +299,18 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             raise error
         raise RuntimeError("GridTrackNet prepass failed") from error
 
-    def _prepass(self, capture: cv2.VideoCapture, source_stride: int, width: int, height: int,
+    def _work_stream(self) -> Any:
+        """The CUDA stream the prepass works on: the engine's (so its output is read in order without
+        a wait), else a stream of its own on the worker thread so it overlaps pass 1 on the default
+        stream; None, the current stream, in the foreground or off the GPU."""
+        if self.device.type != "cuda":
+            return None
+        if self.engine is not None:
+            return self.engine.stream
+        return torch.cuda.Stream(device=self.device) if self._worker is not None else None
+
+    def _prepass(self, capture: Any, cached: List[List[RawDetection]], source_stride: int, width: int, height: int,
                  total_hint: int) -> None:
-        cached = self.precomputed
-        finalized = set()
         # One independent stream of five-frame units per phase. The model wants 30 FPS
         # spacing, so at 60 FPS the odd frames form a second, equally valid unit stream;
         # running only phase 0 leaves every odd frame unobserved. ``_UnitStream`` cuts a
@@ -222,40 +318,99 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         window_step = self.window_step()
         streams = [_UnitStream(window_step) for _ in range(source_stride)]
         batches: List[_PrepassUnit] = []
-        average = _HeatAverage() if window_step != 5 else None
+        engine = self.engine
+        network = engine if engine is not None else self.model
+        batch_units = engine.batch if engine is not None else _UNITS_PER_INFERENCE
+        averaging = window_step != 5
+        # The frames summed in the ring and not yet decoded, with the number of units that covered each.
+        covered: Dict[int, int] = {}
+        ring: Optional[HeatRing] = None
+        finalized: Set[int] = set()
+        in_flight: Deque[_Flush] = deque()
         frame_index = inference_calls = detected = 0
+        grid = (0, 0)
         started = time.perf_counter()
         y_offset = self.cfg.gridtracknet_y_offset_px * height / _REFERENCE_HEIGHT_PX
         radius = max(_MIN_BOX_RADIUS_PX, _BOX_RADIUS_FRAC * np.hypot(width, height))
 
+        def store(index: int, found: GridPoint) -> None:
+            nonlocal detected
+            point, confidence = found
+            if point is None:
+                return
+            x, y = point[0], point[1] + y_offset
+            cached[index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
+            detected += 1
+
+        def apply(flush: _Flush) -> None:
+            # The peaks become points on the host; with overlapping units each decoded frame is
+            # final, otherwise the first unit to answer a source frame finalises it and a later
+            # overlapping unit (the clip's trailing window) is ignored.
+            points = flush.points
+            if flush.peaks is not None:
+                rows, cols = grid
+                points = peak_points(flush.peaks.wait(), rows, cols, width, height, self.cfg.conf)
+            if points is not None:
+                if averaging:
+                    for index, found in zip(flush.frames, points):
+                        store(index, found)
+                else:
+                    for unit_index, indices in enumerate(flush.units):
+                        for index, found in zip(indices, points[unit_index * FRAMES_PER_UNIT:]):
+                            if index not in finalized:
+                                finalized.add(index)
+                                store(index, found)
+            self._publish(flush.upto)
+
+        def drain(everything: bool = False) -> None:
+            while in_flight and (everything or len(in_flight) > _READBACKS_IN_FLIGHT or in_flight[0].peaks is None
+                                 or in_flight[0].peaks.ready()):
+                apply(in_flight.popleft())
+
         def flush(final: bool = False) -> None:
-            nonlocal inference_calls, detected
+            nonlocal inference_calls, ring, grid
             # Every frame below the oldest unit not yet cut is final (a mid-clip call cannot be
             # sure of later frames: the next unit may still cover them).
             pending_min = min((stream.pending_start for stream in streams if stream.pending_start is not None),
                               default=frame_index + 1)
-            upto = len(cached) if final else min(pending_min, frame_index + 1)
+            upto = frame_index if final else min(pending_min, frame_index + 1)
+            record = _Flush(upto)
             if batches:
-                with torch.inference_mode():
-                    output = self.model(torch.stack([item[0] for item in batches]))
-                    if average is None:
-                        decoded = self._decode(output, width, height, self.cfg.conf)
-                    else:
-                        average.add(output, [indices for _, indices in batches])
-                if average is None:
-                    detected += _store_decoded(batches, decoded, finalized, cached, y_offset, radius)
+                units = [indices for _, indices in batches]
+                frames = [tensor for tensors, _ in batches for tensor in tensors]
+                if engine is not None:          # a static batch: pad with the last unit
+                    frames += batches[-1][0] * (batch_units - len(batches))
+                stacked = torch.cat(frames).view(len(frames) // FRAMES_PER_UNIT, -1, *frames[0].shape[1:])
+                output = network(stacked)
+                grid = (int(output.shape[-2]), int(output.shape[-1]))
+                if averaging:
+                    if ring is None:
+                        ring = HeatRing(_ring_slots(batch_units, window_step, source_stride), *grid, output.device)
+                    for indices in units:
+                        for index in indices:
+                            covered[index] = covered.get(index, 0) + 1
+                    ring.check_span(min(covered), frame_index)
+                    ring.add(output, units)
+                elif self._decode is not None:
+                    record.points, record.units = self._decode(output[:len(units)], width, height, self.cfg.conf), units
+                else:
+                    record.peaks = Readback(grid_peaks(output[:len(units)].reshape(-1, 3, *grid)))
+                    record.units = units
                 inference_calls += 1
                 batches.clear()
-            if average is not None:
-                detected += average.decode_below(upto, width, height, self.cfg.conf, cached, y_offset, radius)
-            self._publish(upto)
+            if ring is not None:
+                ready = sorted(index for index in covered if index < upto)
+                if ready:
+                    for index in ready:
+                        del covered[index]
+                    record.peaks, record.frames = Readback(ring.take(ready)), ready
+            in_flight.append(record)
+            drain(everything=final)
 
         try:
-            # All of the worker's CUDA work lives on its own stream so it overlaps
-            # pass 1 on the default stream instead of serialising behind it.
-            stream = torch.cuda.Stream(device=self.device) if self._worker is not None else None
+            stream = self._work_stream()
             stream_scope = torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext()
-            with stream_scope:
+            with stream_scope, torch.inference_mode():
                 while True:
                     ok, frame = capture.read()
                     if not ok:
@@ -264,14 +419,19 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                     unit = streams[frame_index % source_stride].push((self._frame_tensor(frame, self.device), frame_index))
                     if unit is not None:
                         batches.append(unit)
-                        if len(batches) == _UNITS_PER_INFERENCE:
+                        if len(batches) == batch_units:
                             flush()
                     frame_index += 1
                 batches.extend(window for window in (stream.trailing_window() for stream in streams) if window is not None)
+                while engine is not None and len(batches) > batch_units:    # trailing windows past a static batch
+                    rest = batches[batch_units:]
+                    del batches[batch_units:]
+                    flush()
+                    batches.extend(rest)
                 flush(final=True)
                 if stream is not None:
                     stream.synchronize()
-                else:
+                elif self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
         except BaseException as error:  # surfaced to the consumer by _raise_if_failed
             self._worker_error = error
@@ -313,7 +473,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         A prepass that fails raises instead of returning partial results.
         """
         self.prepare_video(video_path, fps, width, height, total, background=False)
-        return list(self.precomputed)
+        return list(self.precomputed or [])
 
     def detections_at(self, index: int) -> List[RawDetection]:
         """Detections for source frame ``index``, waiting for the prepass if it
@@ -343,25 +503,12 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         return pending.detections
 
 
-def _store_decoded(batches: List[_PrepassUnit], decoded: List[GridPoint], finalized: Set[int],
-                   cached: List[List[RawDetection]], y_offset: float, radius: float) -> int:
-    """Write one inference call's decoded points into the prepass cache, in batch order; the
-    first unit to answer for a source frame finalises it, a later overlapping unit is ignored.
-    A point becomes a box of `radius` around it, moved down by `y_offset`. Returns the number of
-    frames given a detection."""
-    detected = 0
-    for batch_index, (_, indices) in enumerate(batches):
-        start = batch_index * 5
-        for source_index, (point, confidence) in zip(indices, decoded[start:start + 5]):
-            if source_index in finalized:
-                continue
-            finalized.add(source_index)
-            if point is None:
-                continue
-            x, y = point[0], point[1] + y_offset
-            cached[source_index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
-            detected += 1
-    return detected
+def _ring_slots(batch_units: int, window_step: int, source_stride: int) -> int:
+    """Slots enough for ``HeatRing`` to hold every frame the prepass has summed and not decoded:
+    the frames one call's units start across (``batch_units`` units, a unit every ``window_step``
+    frames of a phase, so ``batch_units * window_step`` source frames whatever the phases) and one
+    unit's length on either side, doubled for headroom; ``HeatRing.check_span`` guards it."""
+    return 2 * (batch_units * window_step + 2 * FRAMES_PER_UNIT * source_stride)
 
 
 class _UnitStream:
@@ -401,46 +548,8 @@ class _UnitStream:
 
 
 def _window(frames: Deque[_PrepassFrame]) -> _PrepassUnit:
-    return torch.cat([value for value, _ in frames]), [index for _, index in frames]
+    return [value for value, _ in frames], [index for _, index in frames]
 
-
-class _HeatAverage:
-    """A frame's answers from every unit that covers it, summed grid by grid (the model's
-    ``(3, rows, cols)`` per frame, in float32) until the frame is final, then decoded once
-    (``decode_grid``) from the mean."""
-
-    def __init__(self):
-        self.sums: Dict[int, torch.Tensor] = {}
-        self.counts: Dict[int, int] = {}
-
-    def add(self, output: torch.Tensor, indices: List[List[int]]) -> None:
-        grids = output.float().reshape(output.shape[0], 5, 3, output.shape[-2], output.shape[-1])
-        for row, unit in enumerate(indices):
-            for position, index in enumerate(unit):
-                if index in self.sums:
-                    self.sums[index] += grids[row, position]
-                    self.counts[index] += 1
-                else:
-                    self.sums[index] = grids[row, position].clone()
-                    self.counts[index] = 1
-
-    def decode_below(self, upto: int, width: int, height: int, threshold: float, cached: List[List[RawDetection]],
-                     y_offset: float, radius: float) -> int:
-        """Decode every accumulated frame below `upto` into `cached` and drop it; returns how many
-        were given a detection."""
-        ready = sorted(index for index in self.sums if index < upto)
-        if not ready:
-            return 0
-        means = torch.stack([self.sums.pop(index) / self.counts.pop(index) for index in ready]).cpu().numpy()
-        detected = 0
-        for index, grids in zip(ready, means):
-            point, confidence = decode_grid(grids, width, height, threshold)
-            if point is None:
-                continue
-            x, y = point[0], point[1] + y_offset
-            cached[index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
-            detected += 1
-        return detected
 
 
 def decode_ball_predictions(
@@ -538,8 +647,8 @@ class TensorRTRuntimeBallDetector(BallDetectorBackend):
             t, scale = self.session.preprocess_cuda_hwc_frame(frame_bgr)
             if t is None:
                 frame_bgr = frame_bgr.detach().cpu().numpy()
-        if t is None:
-            t, scale = self.session.preprocess_frame(frame_bgr)
+        if t is None or scale is None:
+            t, scale = self.session.preprocess_frame(np.asarray(frame_bgr))
         outputs = self.session.forward_tensor(t, out_slot=out_slot)
         return TensorRTBallPending(outputs, scale, self.session.completion_event(), t, frame_size)
 

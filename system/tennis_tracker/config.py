@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from tennis_tracker.paths import COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE
+from tennis_tracker.paths import COURT_ENGINE, BALL_WEIGHTS, MODELS, PLAYER_ENGINE
 
 
 @dataclass
@@ -29,6 +29,13 @@ class Config:
     # pipeline 0.178 to 0.164 at 0.898 to 0.906, for 1.5x the prepass time); 5 answers every frame
     # from one unit, the prepass as it was before.
     gridtracknet_window_step: int = 1
+    # What runs the prepass's network: "tensorrt", an FP16 engine built from the weights on first
+    # use and cached in ball_engine_dir (engines/ball_trt.py; 0.6 ms a unit against 2.4 to 4.7 ms
+    # eager on the RTX 5080 laptop), or "torch", the FP16 PyTorch model. TensorRT falls back to
+    # torch, with a message, when it is not installed or cannot build the model.
+    ball_prepass_runtime: str = "tensorrt"
+    ball_engine_batch: int = 8          # units per engine call (the batch sweep in audit/records/opt_ball_prepass.md)
+    ball_engine_dir: str = str(MODELS / "engine_cache")
 
     # TensorRT
     trt_async_execute: bool = True

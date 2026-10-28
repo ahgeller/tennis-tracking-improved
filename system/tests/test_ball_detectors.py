@@ -74,6 +74,8 @@ def _bare_detector(cfg=None) -> GridTrackNetBallDetector:
     detector.model = StandInModel(lambda batch: batch)
     detector._frame_tensor = lambda frame, device: torch.zeros((1, 3))
     detector._decode = lambda output, width, height, conf: [((10.0, 20.0), 0.9)] * (int(output.shape[0]) * 5)
+    detector.engine = None
+    detector._resizers = {}
     detector.precomputed = None
     detector._ready_upto = 0
     detector._done = False
@@ -192,7 +194,7 @@ def _grid_detector(model, window_step, publications):
     def frame_tensor(frame, device):
         return torch.full((3, 1, 1), float(frame[0, 0, 0]))
     cfg = Config(device="0", conf=0.25, gridtracknet_window_step=window_step)
-    return CpuGridTrackNet(cfg, model=model, decode=ball_detectors.decode_predictions, frame_tensor=frame_tensor,
+    return CpuGridTrackNet(cfg, model=model, decode=None, frame_tensor=frame_tensor,
                            on_publish=publications.append)
 
 
@@ -266,3 +268,33 @@ def test_unit_streams_cut_a_unit_every_step_frames_and_cover_the_tail(step):
         assert trailing is None
     else:
         assert trailing is not None and trailing[1] == list(range(12, 17))
+
+
+class StaticBatchEngine(GridStandIn):
+    """GridStandIn as an engine of a static batch: it refuses any other batch size."""
+
+    def __init__(self, batch):
+        super().__init__()
+        self.batch = batch
+        self.stream = None
+
+    def answer(self, batch):
+        assert batch.shape[0] == self.batch
+        return super().answer(batch)
+
+
+@pytest.mark.parametrize("step, stride, count", [(1, 2, 25), (5, 1, 23), (5, 2, 31), (2, 1, 14)])
+def test_a_static_batch_engine_answers_what_the_pytorch_model_answers(step, stride, count):
+    """The engine path pads its last call with copies of the last unit and splits trailing windows
+    that overflow a call: every frame gets the answer the PyTorch path gives, on the device-side
+    peaks (no host decoder) for both the averaged and the one-unit-per-frame prepass."""
+    answers = []
+    for engine in (None, StaticBatchEngine(3)):
+        published = []
+        detector = _grid_detector(GridStandIn(), step, published)
+        detector.engine = engine
+        with patch.object(cv2, "VideoCapture", side_effect=lambda _: Capture(count)), \
+             patch.object(torch.cuda, "synchronize"):
+            answers.append(detector.detect_clip(Path("s.mp4"), _FPS_FOR_STRIDE[stride], 1920, 1080, count))
+        assert published == sorted(published) and published[-1] == count
+    assert answers[0] == answers[1] and sum(map(bool, answers[0])) > count // 2
