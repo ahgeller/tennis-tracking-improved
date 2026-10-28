@@ -26,6 +26,8 @@ boxmot==16.0.11           # ByteTrack player tracking; required whenever a playe
 catboost==1.2.10          # --court: bounce model models/ctb_regr_bounce.cbm
 scipy                     # smoothed raw-motion trails in the motion-debug video
 psutil                    # sizes the automatic pass-2 frame cache (without it that cache is off)
+PyNvVideoCodec==2.2.3     # NVDEC decoding (tennis_tracker/video_decode.py); without it OpenCV decodes.
+                          # Needs NVIDIA driver 576.52+ on Blackwell (RTX 50xx).
 
 # --- Tools, install when needed -------------------------------------------------
 # ultralytics==8.4.51     # tennis_tracker.engines.build_engines: YOLO .pt -> ONNX export only

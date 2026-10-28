@@ -5,7 +5,7 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
-from typing import List, Optional, Protocol, Tuple, Union
+from typing import Any, List, Optional, Protocol, Tuple, Union
 
 import cv2
 import numpy as np
@@ -319,6 +319,14 @@ def _close_pipes(proc: subprocess.Popen) -> None:
             pipe.close()
 
 
+class FrameCapture(Protocol):
+    """What ``ThreadedFrameReader`` reads from: ``cv2.VideoCapture`` or a ``video_decode`` decoder."""
+
+    def read(self) -> Tuple[bool, Any]: ...
+
+    def release(self) -> None: ...
+
+
 class ThreadedFrameReader:
     """Prefetch frames in a background thread to overlap decode with GPU work.
 
@@ -331,7 +339,7 @@ class ThreadedFrameReader:
     from aborts the process.
     """
 
-    def __init__(self, cap: cv2.VideoCapture, prefetch: int = 4):
+    def __init__(self, cap: FrameCapture, prefetch: int = 4):
         self._cap = cap
         self._q: queue.Queue = queue.Queue(maxsize=prefetch)
         self._done = False

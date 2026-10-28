@@ -96,4 +96,7 @@ def fake_cuda(monkeypatch):
     monkeypatch.setattr(torch.cuda, "Event", _NoOpEvent)
     monkeypatch.setattr(torch.cuda, "stream", lambda stream=None: contextlib.nullcontext())
     monkeypatch.setattr(torch.backends.cudnn, "benchmark", False)
+    # A fake CUDA device has no video decoder: every clip decodes through OpenCV.
+    from tennis_tracker import video_decode
+    monkeypatch.setattr(video_decode, "nvc", None)
     return real_device
