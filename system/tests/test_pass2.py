@@ -182,13 +182,13 @@ def test_frames_before_the_first_court_detection_are_drawn_without_a_court_model
     # The ground model used to start from the clip's last keypoints, so the opening frames of a
     # panning clip drew the net line and the minimap with the end-of-clip homography.
     has_model = []
-    draw = pass2.CourtLayer.draw
+    draw_court_layer = pass2.draw_court_layer
 
-    def recording(self, targets, court_kps, ground_model, model_key):
+    def recording(targets, cfg, court_kps, ground_model, court_polygon):
         has_model.append(ground_model is not None)
-        draw(self, targets, court_kps, ground_model, model_key)
+        draw_court_layer(targets, cfg, court_kps, ground_model, court_polygon)
 
-    monkeypatch.setattr(pass2.CourtLayer, "draw", recording)
+    monkeypatch.setattr(pass2, "draw_court_layer", recording)
     monkeypatch.setattr(FakeCourtDetector, "first_detection", 5)
     result = run_pipeline(tmp_path, monkeypatch, clip, **FULL_OVERRIDES)
     assert len(has_model) == result["raw_json"]["video"]["total_frames"]

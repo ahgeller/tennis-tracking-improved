@@ -43,41 +43,29 @@ def draw_court_side_guides(frame: np.ndarray, court_keypoints: Optional[Sequence
     return frame
 
 
-def homography_net_line(ground_model: Optional[GroundModel], width: int,
-                        height: int) -> Optional[Tuple[Point, Point]]:
-    """The net line's ends (unit-court v = 0.5 through the court-plane homography) in a
-    ``width`` x ``height`` frame, or None when there is no model or the line is under 2 px."""
-    if ground_model is None:
-        return None
+def draw_homography_net_line(frame: np.ndarray, ground_model: Optional[GroundModel]) -> None:
+    """Draw the net line (unit-court v = 0.5) through the court-plane homography."""
+    if frame is None or ground_model is None:
+        return
     H = ground_model.get("H_c2i")
     if H is None:
-        return None
+        return
     p_l = homography_apply(H, 0.0, 0.5)
     p_r = homography_apply(H, 1.0, 0.5)
     if p_l is None or p_r is None:
-        return None
-    x1 = int(np.clip(round(p_l[0]), 0, width - 1))
-    y1 = int(np.clip(round(p_l[1]), 0, height - 1))
-    x2 = int(np.clip(round(p_r[0]), 0, width - 1))
-    y2 = int(np.clip(round(p_r[1]), 0, height - 1))
-    if abs(x2 - x1) + abs(y2 - y1) < 2:
-        return None
-    return (x1, y1), (x2, y2)
-
-
-def draw_net_line(frame: np.ndarray, ends: Tuple[Point, Point]) -> None:
-    """The net line between ``ends``: a dark outline under a bright green line, for visibility."""
-    cv2.line(frame, ends[0], ends[1], COLOR_OUTLINE, 4, cv2.LINE_AA)
-    cv2.line(frame, ends[0], ends[1], COLOR_NET_LINE, 2, cv2.LINE_AA)
-
-
-def draw_homography_net_line(frame: np.ndarray, ground_model: Optional[GroundModel]) -> None:
-    """Draw the net line (unit-court v = 0.5) through the court-plane homography."""
-    if frame is None:
         return
-    ends = homography_net_line(ground_model, frame.shape[1], frame.shape[0])
-    if ends is not None:
-        draw_net_line(frame, ends)
+
+    h, w = frame.shape[:2]
+    x1 = int(np.clip(round(p_l[0]), 0, w - 1))
+    y1 = int(np.clip(round(p_l[1]), 0, h - 1))
+    x2 = int(np.clip(round(p_r[0]), 0, w - 1))
+    y2 = int(np.clip(round(p_r[1]), 0, h - 1))
+    if abs(x2 - x1) + abs(y2 - y1) < 2:
+        return
+
+    # Dark outline + bright green line for visibility.
+    cv2.line(frame, (x1, y1), (x2, y2), COLOR_OUTLINE, 4, cv2.LINE_AA)
+    cv2.line(frame, (x1, y1), (x2, y2), COLOR_NET_LINE, 2, cv2.LINE_AA)
 
 
 def _detected_court_point(kps: Sequence[float], index: int) -> Optional[Point]:
@@ -141,9 +129,4 @@ def draw_court_layer(targets: Iterable[np.ndarray], cfg: Config, court_kps: Opti
             draw_homography_net_line(img, ground_model)
     if court_polygon is not None:
         for img in targets:
-            draw_court_polygon(img, court_polygon)
-
-
-def draw_court_polygon(frame: np.ndarray, court_polygon: np.ndarray) -> None:
-    """The court polygon's 1 px grey outline."""
-    cv2.drawContours(frame, [court_polygon.astype(np.int32)], 0, COLOR_COURT_POLYGON, 1)
+            cv2.drawContours(img, [court_polygon.astype(np.int32)], 0, COLOR_COURT_POLYGON, 1)

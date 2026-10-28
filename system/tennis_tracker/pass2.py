@@ -23,7 +23,7 @@ from .motion import build_court_side_protect_mask
 from .render.motion_debug import draw_motion_masks, draw_selected_ball
 from .render.motion_trails import RawMotionTrails
 from .pass1 import Pass1Result
-from .render.court_layer import CourtLayer
+from .court.court_drawing import draw_court_layer
 from .render.rendering import (
     Canvas, MarkerSizer, SearchCentreSmoother, draw_hud, draw_motion_rois, draw_player_boxes, draw_raw_detections,
     draw_selected_result,
@@ -106,11 +106,6 @@ class _GroundModelCache:
         self._key: Optional[Tuple[int, ...]] = None     # court_keypoints_key of the model's keypoints
         self.model = None
 
-    @property
-    def key(self) -> Optional[Tuple[int, ...]]:
-        """What the current model was built from (``court_keypoints_key`` of its keypoints)."""
-        return self._key
-
     def update(self, court_kps: Optional[List[float]]):
         if court_kps and len(court_kps) >= MIN_KEYPOINT_VALUES:
             self.keypoints = court_kps
@@ -170,7 +165,6 @@ class _FrameRenderer:
         self.cfg, self.video, self.timing = cfg, video, ctx.timing
         self.pass1, self.selection, self.events, self.writers = pass1, selection, events, writers
         self.ground_model = _GroundModelCache()
-        self.court_layer = CourtLayer(cfg, video.height, video.width, selection.court_polygon)
         self.protect_masks = _ProtectMaskCache(video.height, video.width)
         self.sizer = MarkerSizer(cfg)
         self.search_smoother = SearchCentreSmoother()
@@ -193,7 +187,7 @@ class _FrameRenderer:
                         frame.copy() if self.writers.track_debug is not None else None)
         model = self.ground_model.update(court_kps)
 
-        self.court_layer.draw(canvas.both, court_kps, model, self.ground_model.key)
+        draw_court_layer(canvas.both, cfg, court_kps, model, selection.court_polygon)
         if cfg.draw_players:
             draw_player_boxes(canvas.both, pass1.player_boxes[fi])
         # Rejected proposals and ROIs belong only in the track-debug view.  Candidate tracks go
