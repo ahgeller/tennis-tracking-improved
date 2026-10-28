@@ -21,6 +21,8 @@ opencv-python==4.9.0.*    # tracker and evaluation
 # version that built them; rebuild with `python -m tennis_tracker.engines.build_engines` after upgrading.
 tensorrt==10.15.1.29      # player and court engine backends
 boxmot==16.0.11           # ByteTrack player tracking; required whenever a player engine is configured
+onnx==1.23.2              # exports the ball model for its cached TensorRT engine (without it the prepass runs PyTorch)
+ml_dtypes==0.5.4          # onnx dependency; 0.6 needs numpy 2, which breaks this cv2 build
 
 # --- Optional, used only by some features -------------------------------------
 catboost==1.2.10          # --court: bounce model models/ctb_regr_bounce.cbm

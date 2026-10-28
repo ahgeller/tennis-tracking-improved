@@ -36,10 +36,13 @@ class RemotePrepass:
 
     def __init__(self, weights: str, cfg: Config):
         authkey = secrets.token_bytes(16)
-        self._listener = Listener(authkey=authkey)
+        # A loopback socket: a Windows named pipe (the default family) refused the child's connection
+        # now and then (WaitNamedPipe: file not found while the listener's instance existed).
+        self._listener = Listener(("127.0.0.1", 0), family="AF_INET", authkey=authkey)
+        host, port = self._listener.address
         environment = dict(os.environ, **{_AUTHKEY_ENV: authkey.hex()})
         self._child = subprocess.Popen(
-            [sys.executable, "-u", "-m", "tennis_tracker.engines.ball_prepass_process", str(self._listener.address)],
+            [sys.executable, "-u", "-m", "tennis_tracker.engines.ball_prepass_process", f"{host}:{port}"],
             cwd=str(_ROOT), env=environment)
         self._weights, self._cfg = weights, cfg
         self._connection: Optional[Any] = None
@@ -97,7 +100,8 @@ def _serve(address: str) -> None:
     sending every newly final run of frames as it is published."""
     from .ball_detectors import GridTrackNetBallDetector
 
-    connection = Client(address, authkey=bytes.fromhex(os.environ[_AUTHKEY_ENV]))
+    host, port = address.rsplit(":", 1)
+    connection = Client((host, int(port)), family="AF_INET", authkey=bytes.fromhex(os.environ[_AUTHKEY_ENV]))
     weights, fields = connection.recv()
     cfg = replace(Config(**fields), gridtracknet_prepass_process=False, gridtracknet_prepass_background=False)
     detector = GridTrackNetBallDetector(weights, cfg)
