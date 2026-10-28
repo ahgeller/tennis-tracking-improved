@@ -79,7 +79,7 @@ def test_a_fine_tune_starts_from_its_own_architectures_weights_or_is_refused_in_
     assert args.arch == "heatmap_s4" and args.weights == tmp_path / "best.pt"
     torch.save({"arch": "yolo", "state_dict": {}}, tmp_path / "yolo.pt")
     args = parser.parse_args(["--arch", "heatmap_s4", "--weights", str(tmp_path / "yolo.pt")])
-    with pytest.raises(ValueError, match="names the architecture 'yolo', not one a .pt record holds \\(\\['heatmap_s4'\\]\\)"):
+    with pytest.raises(ValueError, match="names the architecture 'yolo', not one a .pt record holds \\(\\['heatmap_lite', 'heatmap_s4', 'stream_s4', 'wasb_5f'\\]\\)"):
         training.resolve_arch(args, None)
     args = parser.parse_args(["--weights", str(tmp_path / "ball.engine")])
     with pytest.raises(ValueError, match="end in .npz"):

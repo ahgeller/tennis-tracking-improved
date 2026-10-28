@@ -19,9 +19,10 @@ CPU = torch.device("cpu")
 
 
 def test_ids_classes_suffixes_and_the_contract_agree():
-    assert ARCHITECTURES == (GRIDTRACKNET, HEATMAP_S4) == ("gridtracknet", "heatmap_s4")
+    assert ARCHITECTURES[:2] == (GRIDTRACKNET, HEATMAP_S4) == ("gridtracknet", "heatmap_s4")
+    assert ARCHITECTURES[2:] == ("heatmap_lite", "stream_s4", "wasb_5f")
     assert model_class(GRIDTRACKNET) is GridTrackNet and model_class(HEATMAP_S4) is HeatmapNet
-    assert [weights_suffix(name) for name in ARCHITECTURES] == [".npz", ".pt"]
+    assert [weights_suffix(name) for name in ARCHITECTURES] == [".npz", ".pt", ".pt", ".pt", ".pt"]
     for name in ARCHITECTURES:
         assert model_class(name).ARCH == name
         for attribute in ("GRID_COLS", "GRID_ROWS", "INPUT_CHANNELS", "FRAMES_PER_UNIT"):
@@ -40,7 +41,7 @@ def test_arch_of_reads_the_suffix_of_an_npz_and_the_record_of_a_pt(tmp_path):
     for gone in ("yolo", "memory_s4", "heatmap_s2"):
         torch.save({"arch": gone, "state_dict": {}}, tmp_path / "other.pt")
         with pytest.raises(ValueError, match=f"names the architecture '{gone}', not one a .pt record holds "
-                                             "\\(\\['heatmap_s4'\\]\\)"):
+                                             "\\(\\['heatmap_lite', 'heatmap_s4', 'stream_s4', 'wasb_5f'\\]\\)"):
             arch_of(tmp_path / "other.pt")
     torch.save({"arch": GRIDTRACKNET, "state_dict": {}}, tmp_path / "grid.pt")       # an .npz architecture in a .pt
     with pytest.raises(ValueError, match="names the architecture 'gridtracknet', not one a .pt record holds"):

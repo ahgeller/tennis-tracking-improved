@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from tennis_tracker import heatmapnet
-from tennis_tracker.ball_models import GRIDTRACKNET, HEATMAP_S4, model_class, weights_suffix
+from tennis_tracker.ball_models import ARCHITECTURES, GRIDTRACKNET, model_class, weights_suffix
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
 
 PROGRESS_EVERY = 200       # training steps between progress lines
@@ -67,7 +67,8 @@ def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor
     return heat_loss + HEAT_OFFSET_WEIGHT * offset_loss
 
 
-LOSSES = {GRIDTRACKNET: gridtracknet_loss, HEATMAP_S4: heatmap_loss}
+# Every architecture but GridTrackNet answers on a heat-map grid and trains with the heat-map loss.
+LOSSES = {arch: gridtracknet_loss if arch == GRIDTRACKNET else heatmap_loss for arch in ARCHITECTURES}
 
 
 def unit_loss(model: torch.nn.Module, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
