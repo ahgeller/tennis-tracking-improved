@@ -66,37 +66,70 @@ def check_writable_video_path(path: Union[str, Path], label: str = "Video output
         raise ValueError(f"{label} {target} cannot be written: {nearest or target.anchor} is not a directory")
 
 
-class PinnedFrameUploader:
-    """Pinned host staging for faster/non-blocking H2D frame uploads."""
+_UPLOAD_SLOTS = 3
+# OpenCV's luma weights in BGR order: the gray plane the temporal motion gate compares.
+BGR_TO_GRAY = (0.114, 0.587, 0.299)
 
-    def __init__(self, h: int, w: int, device: torch.device):
+
+class PinnedFrameUploader:
+    """Uploads decoded BGR frames through pinned host buffers.
+
+    The frame goes to the GPU as it was decoded, HWC uint8: a quarter of the
+    bytes of the float32 frame the GPU works on, which ``hwc_u8_to_chw_f32``
+    then makes there.  The copy is asynchronous (``non_blocking`` from pinned
+    memory), so the host only waits when it is about to refill a pinned
+    buffer whose copy, ``_UPLOAD_SLOTS`` uploads ago, has not finished.
+    Converting on the host first, as ``.to(device, dtype=float32)`` from a
+    uint8 array does, cost 0.7 ms a 1080p frame on the CPU and turned the
+    copy into a synchronous one from pageable memory (the review's profile).
+    """
+
+    def __init__(self, h: int, w: int, device: torch.device, slots: int = _UPLOAD_SLOTS):
         self.h = int(h)
         self.w = int(w)
         self.device = device
         self._slot = 0
         self._pinned_u8 = [
             torch.empty((self.h, self.w, 3), dtype=torch.uint8, pin_memory=True)
-            for _ in range(2)
+            for _ in range(max(1, int(slots)))
         ]
         self._pinned_np = [t.numpy() for t in self._pinned_u8]
-        self._copy_done: List[Optional[torch.cuda.Event]] = [None, None]
+        self._copy_done: List[Optional[torch.cuda.Event]] = [None] * len(self._pinned_u8)
 
     @torch.no_grad()
-    def upload_chw_f32(self, frame_bgr: np.ndarray) -> torch.Tensor:
+    def upload_hwc_u8(self, frame_bgr: np.ndarray) -> torch.Tensor:
+        """``frame_bgr`` as an HWC uint8 tensor on the device; the copy may still be in flight
+        (it is ordered before any later work on the current stream)."""
         if frame_bgr.shape[0] != self.h or frame_bgr.shape[1] != self.w or frame_bgr.shape[2] != 3:
-            return torch.from_numpy(frame_bgr).to(
-                device=self.device, dtype=torch.float32
-            ).permute(2, 0, 1).contiguous() / 255.0
+            return torch.from_numpy(np.ascontiguousarray(frame_bgr)).to(device=self.device)
         slot = self._slot
         self._slot = (self._slot + 1) % len(self._pinned_u8)
-        if self._copy_done[slot] is not None:
-            self._copy_done[slot].synchronize()
+        done = self._copy_done[slot]
+        if done is not None:
+            done.synchronize()
         np.copyto(self._pinned_np[slot], frame_bgr)
-        t = self._pinned_u8[slot].to(device=self.device, dtype=torch.float32, non_blocking=True)
+        t = torch.empty((self.h, self.w, 3), dtype=torch.uint8, device=self.device)
+        t.copy_(self._pinned_u8[slot], non_blocking=True)
         done = torch.cuda.Event(blocking=False)
         done.record(torch.cuda.current_stream(device=self.device))
         self._copy_done[slot] = done
-        return t.permute(2, 0, 1).contiguous() / 255.0
+        return t
+
+    def upload_chw_f32(self, frame_bgr: np.ndarray) -> torch.Tensor:
+        return hwc_u8_to_chw_f32(self.upload_hwc_u8(frame_bgr))
+
+
+@torch.no_grad()
+def hwc_u8_to_chw_f32(frame_u8: torch.Tensor) -> torch.Tensor:
+    """An HWC uint8 frame as a contiguous CHW float32 tensor in [0, 1] on its own device.
+
+    One kernel converts and transposes; ``div_(255.0)`` is the same division the old
+    host-converted path did (``/ 255.0`` on the device), so the values are bit-identical.
+    """
+    h, w, c = (int(n) for n in frame_u8.shape)
+    out = torch.empty((c, h, w), dtype=torch.float32, device=frame_u8.device)
+    out.copy_(frame_u8.permute(2, 0, 1))
+    return out.div_(255.0)
 
 
 @torch.no_grad()
@@ -105,9 +138,30 @@ def cuda_frame_to_chw_f32(frame_bgr: np.ndarray, device: torch.device,
     """Upload one BGR frame once as CHW float32 in [0,1] on CUDA."""
     if uploader is not None:
         return uploader.upload_chw_f32(frame_bgr)
-    return torch.from_numpy(frame_bgr).to(
-        device=device, dtype=torch.float32
-    ).permute(2, 0, 1).contiguous() / 255.0
+    return hwc_u8_to_chw_f32(torch.from_numpy(np.ascontiguousarray(frame_bgr)).to(device=device))
+
+
+@torch.no_grad()
+def cuda_frame_planes(chw: torch.Tensor) -> torch.Tensor:
+    """The motion planes of a CHW BGR float frame in [0, 1]: one ``(3, H, W)`` tensor holding
+    gray (OpenCV's luma weights), HSV value and HSV saturation, in that order.
+
+    The arithmetic is the one the motion code always used, op for op (gray as
+    ``b*wb + g*wg + r*wr``, saturation as ``(max - min) / (max + 1e-6)`` where
+    ``max > 1e-6``), so every value is bit-identical; computing the gray plane
+    once per frame here replaces four recomputations in the temporal gate.
+    """
+    planes = torch.empty((3,) + tuple(chw.shape[1:]), dtype=chw.dtype, device=chw.device)
+    gray, maxc, sat = planes[0], planes[1], planes[2]
+    wb, wg, wr = BGR_TO_GRAY
+    torch.mul(chw[0], wb, out=gray)
+    gray.add_(chw[1] * wg)
+    gray.add_(chw[2] * wr)
+    torch.amax(chw, dim=0, out=maxc)
+    minc = torch.amin(chw, dim=0)
+    torch.div(maxc - minc, maxc + 1e-6, out=sat)
+    sat.masked_fill_(maxc <= 1e-6, 0.0)
+    return planes
 
 
 @torch.no_grad()
@@ -121,10 +175,8 @@ def cuda_vs_tensors(frame_bgr: Optional[np.ndarray], device: torch.device,
         if frame_bgr is None:
             raise ValueError("frame_bgr is required when gpu_tensor is None")
         t = cuda_frame_to_chw_f32(frame_bgr, device)
-    maxc = torch.max(t, dim=0).values
-    minc = torch.min(t, dim=0).values
-    s = torch.where(maxc > 1e-6, (maxc - minc) / (maxc + 1e-6), torch.zeros_like(maxc))
-    return maxc, s
+    planes = cuda_frame_planes(t)
+    return planes[1], planes[2]
 
 
 def ffmpeg_command(ffmpeg: str, encoder: str, w: int, h: int, fps: float, path: str,
