@@ -69,7 +69,8 @@ def test_heatmap_loss_is_finite_and_lower_for_the_right_answer_than_a_wrong_one(
     prediction = flat.clone().requires_grad_(True)
     heatmap_loss(prediction, target).backward()
     assert torch.isfinite(prediction.grad).all()
-    assert LOSSES == {"gridtracknet": gridtracknet_loss, "heatmap_s4": heatmap_loss}
+    assert LOSSES == {"gridtracknet": gridtracknet_loss, "heatmap_s4": heatmap_loss, "heatmap_lite": heatmap_loss,
+                      "stream_s4": heatmap_loss, "wasb_5f": heatmap_loss}
     model = fresh_model(torch.device("cpu"), heatmapnet.ARCH)
     assert unit_loss(model, right, target) == heatmap_loss(right, target)
     model.eval()

@@ -29,6 +29,7 @@ psutil                    # sizes the automatic pass-2 frame cache (without it t
 
 # --- Tools, install when needed -------------------------------------------------
 # ultralytics==8.4.51     # tennis_tracker.engines.build_engines: YOLO .pt -> ONNX export only
+# onnx==1.23.2            # tools/bench_ball_archs.py: ONNX export of the ball detectors (torch's exporter needs it)
 # pytest                  # python -m pytest -q and clean_tracker.py --self-test
 # filterpy                # not a dependency: the selector's Kalman filter is NumPy
 #                         # (ball_in_play_selector/physics.py); tests/test_ball_kalman.py

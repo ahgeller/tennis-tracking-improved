@@ -36,6 +36,15 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   `README.md` ("Keeping one network") says what to delete when an architecture loses,
   and that `memory_s4` and `heatmap_s2` were removed on 2026-10-26 after the held-out
   comparison (the ledger has the runs).
+- The fast candidates on the same contract (`.pt` records, all registered in
+  `ball_models`; untrained until the `train` branch runs them): `heatmap_lite.py`
+  (`heatmap_lite`, HeatmapNet slimmed), `streamnet.py` (`stream_s4`: a shared encoder per
+  frame transition, `encode_frame` once per frame and `decode` per unit from four cached
+  transitions, equal to the unit forward pass) and `wasbnet.py` (`wasb_5f`, WASB-SBDT's
+  small HRNet at stride 4). `repvgg.py` holds their RepVGG blocks and the fold to plain
+  convolutions: `ball_models.deployed(model)` is the inference form (export it, not the
+  trainable one `load_ball_model` returns). Measurements: `audit/records/opt_detector_archs.md`
+  on the `optimization` branch.
 - `tennis_tracker/engines/`: `ball_detectors.py`, the progressive GridTrackNet
   prepass and the single-frame TensorRT ball engine. At about 60 FPS, even and
   odd phases each run at about 30 FPS. Preserve source-frame indices and

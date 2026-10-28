@@ -1,8 +1,10 @@
 """The ball-detector architectures and the one front door to their weights.
 
-Two networks answer the five-frame ball question: ``gridtracknet.GridTrackNet`` (``.npz``
-weights, the upstream export) and ``heatmapnet.HeatmapNet`` (a ``.pt`` record carrying its
-``arch``). ``Config.model_path`` stays the one setting that chooses the network: ``arch_of`` reads
+Five networks answer the five-frame ball question: ``gridtracknet.GridTrackNet`` (``.npz``
+weights, the upstream export) and the heat-map networks on the 192x108 grid, each a ``.pt``
+record carrying its ``arch``: ``heatmapnet.HeatmapNet`` and the fast candidates of the
+optimization plan, ``heatmap_lite.HeatmapLite``, ``streamnet.StreamNet`` (whose encoder runs once
+per frame) and ``wasbnet.WasbNet``. ``Config.model_path`` stays the one setting that chooses the network: ``arch_of`` reads
 the architecture off the weights file (the suffix for an ``.npz``, the record's ``arch`` for a
 ``.pt``), ``load_ball_model`` dispatches on it and the trainer names its output files by the
 architecture's suffix (``WEIGHTS_SUFFIX``). Both classes carry the same attributes (``ARCH``,
@@ -18,14 +20,21 @@ from typing import Dict, Type
 import torch
 from torch import nn
 
-from . import gridtracknet, heatmapnet
+from . import gridtracknet, heatmap_lite, heatmapnet, streamnet, wasbnet
 
 GRIDTRACKNET = gridtracknet.ARCH
 HEATMAP_S4 = heatmapnet.ARCH
-ARCHITECTURES = (GRIDTRACKNET, HEATMAP_S4)
-MODEL_CLASSES: Dict[str, Type[nn.Module]] = {GRIDTRACKNET: gridtracknet.GridTrackNet, HEATMAP_S4: heatmapnet.HeatmapNet}
-WEIGHTS_SUFFIX: Dict[str, str] = {GRIDTRACKNET: ".npz", HEATMAP_S4: ".pt"}
-_MODULES = {GRIDTRACKNET: gridtracknet, HEATMAP_S4: heatmapnet}                 # each one's load_model
+HEATMAP_LITE = heatmap_lite.ARCH
+STREAM_S4 = streamnet.ARCH
+WASB_5F = wasbnet.ARCH
+ARCHITECTURES = (GRIDTRACKNET, HEATMAP_S4, HEATMAP_LITE, STREAM_S4, WASB_5F)
+MODEL_CLASSES: Dict[str, Type[nn.Module]] = {
+    GRIDTRACKNET: gridtracknet.GridTrackNet, HEATMAP_S4: heatmapnet.HeatmapNet, HEATMAP_LITE: heatmap_lite.HeatmapLite,
+    STREAM_S4: streamnet.StreamNet, WASB_5F: wasbnet.WasbNet}
+WEIGHTS_SUFFIX: Dict[str, str] = {GRIDTRACKNET: ".npz", HEATMAP_S4: ".pt", HEATMAP_LITE: ".pt", STREAM_S4: ".pt",
+                                  WASB_5F: ".pt"}
+_MODULES = {GRIDTRACKNET: gridtracknet, HEATMAP_S4: heatmapnet, HEATMAP_LITE: heatmap_lite,     # each one's load_model
+            STREAM_S4: streamnet, WASB_5F: wasbnet}
 _RECORD_SUFFIX = ".pt"             # the suffix of the architectures whose file names the architecture inside
 
 
@@ -38,7 +47,7 @@ def model_class(arch: str) -> Type[nn.Module]:
 
 def weights_suffix(arch: str) -> str:
     """The suffix an architecture's weights files carry: ``.npz`` for GridTrackNet, ``.pt`` for
-    HeatmapNet."""
+    the heat-map networks."""
     model_class(arch)
     return WEIGHTS_SUFFIX[arch]
 
@@ -61,5 +70,15 @@ def arch_of(weights: Path) -> str:
 
 def load_ball_model(weights: Path, device: torch.device) -> nn.Module:
     """The FP16 eval model on ``device`` for `weights`, built by its architecture's loader
-    (``arch_of``): ``gridtracknet.load_model`` or ``heatmapnet.load_model``."""
+    (``arch_of``): ``gridtracknet.load_model``, ``heatmapnet.load_model`` and so on. It is the
+    trainable form, which the trainer fine-tunes from; ``deployed`` gives the inference form."""
     return _MODULES[arch_of(weights)].load_model(Path(weights), device)
+
+
+def deployed(model: nn.Module) -> nn.Module:
+    """`model` in its inference form, in place: a network with a ``reparameterize`` (the RepVGG
+    and BatchNorm folds of ``repvgg.fuse_for_inference``) is fused, which answers the same to
+    rounding with fewer, plainer layers (what ONNX and TensorRT should be given); any other is
+    returned as it is. A fused network can no longer be trained or saved as a record."""
+    reparameterize = getattr(model, "reparameterize", None)
+    return reparameterize() if callable(reparameterize) else model
