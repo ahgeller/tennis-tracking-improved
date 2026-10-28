@@ -263,7 +263,7 @@ def test_a_distilled_runs_checkpoint_carries_the_mgd_adapters(tmp_path):
     again = Distiller(DistillConfig(str(teacher), mgd_weight=2e-5), student, torch.device("cpu"))
     training.read_checkpoint(tmp_path / "checkpoint.pt", student, build_optimizer(student, 1.0, tuple(again.parameters())),
                              scaler, again)
-    assert float(next(again.parameters()).mean()) == 0.5
+    assert float(next(again.parameters()).detach().mean()) == 0.5
     training.write_checkpoint(tmp_path / "plain.pt", student, build_optimizer(student, 1.0), scaler, training.START)
     with pytest.raises(ValueError, match="not a checkpoint this trainer wrote"):
         training.read_checkpoint(tmp_path / "plain.pt", student, build_optimizer(student, 1.0, tuple(again.parameters())),
