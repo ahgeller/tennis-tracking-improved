@@ -42,6 +42,9 @@ class Config:
     # Run the background prepass in a child process (engines/ball_prepass_process.py) instead of a
     # worker thread, so it never contends with pass 1 for the interpreter lock.
     gridtracknet_prepass_process: bool = False
+    # The prepass decodes with NVDEC (PyNvVideoCodec) where it opens the clip, and its frames stay on
+    # the GPU; else cv2 decodes into pinned memory. Both give the same bytes (video_decode.py).
+    ball_prepass_gpu_decode: bool = True
 
     # TensorRT
     trt_async_execute: bool = True
@@ -49,6 +52,11 @@ class Config:
     # Replay the per-frame player engine launch from a CUDA graph (see TensorRTRuntimeSession):
     # same kernels, 0.02 ms of CPU per frame instead of 1.9 ms. Needs trt_async_execute.
     trt_cuda_graph: bool = True
+    # Replay pass 1's fixed-shape per-frame GPU work (each frame's conversion and motion planes, the
+    # background update) from CUDA graphs: the same kernels, a fraction of the CPU launch cost
+    # (frame_window.GraphedFrameConversion). Off while the prepass runs on a worker thread, whose
+    # CUDA work would break a capture.
+    pass1_cuda_graphs: bool = True
 
     # Player & court detection
     player_model_path: Optional[str] = str(PLAYER_ENGINE)

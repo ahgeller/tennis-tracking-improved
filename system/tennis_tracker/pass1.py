@@ -194,7 +194,7 @@ class _Pass1Collector:
         self.player_detector = ctx.player_detector
         self.window = window
         self.detector_input_writer = detector_input_writer
-        self.background = BackgroundModel(self.cfg, ctx.device)
+        self.background = BackgroundModel(self.cfg, ctx.device, cuda_graphs=_use_cuda_graphs(self.cfg))
         self.roi_tracker = ROIMotionTracker(self.cfg, self.video.width, self.video.height, self.video.fps)
         self.pre_cuda_perf: Optional[Dict[str, float]] = (
             {"pre_cuda_total": 0.0, "pre_cuda_raw_d2h": 0.0, "pre_cuda_cc_filter": 0.0}
@@ -465,6 +465,14 @@ def _open_detector_input_writer(ctx: RunContext) -> Optional[VideoWriter]:
                        cfg, encoder=ctx.encoder)
 
 
+def _use_cuda_graphs(cfg) -> bool:
+    """Whether pass 1 replays its fixed-shape GPU work from CUDA graphs: ``cfg.pass1_cuda_graphs``,
+    unless the prepass runs on a worker thread of this process, whose CUDA work during a capture
+    would invalidate it (a prepass process has its own context)."""
+    threaded_prepass = cfg.gridtracknet_prepass_background and not cfg.gridtracknet_prepass_process
+    return bool(cfg.pass1_cuda_graphs) and not threaded_prepass
+
+
 def collect_pass1(ctx: RunContext) -> Pass1Result:
     """Decode the clip and collect per-frame evidence; raises RuntimeError on an empty clip."""
     cfg, timing = ctx.cfg, ctx.timing
@@ -475,7 +483,7 @@ def collect_pass1(ctx: RunContext) -> Pass1Result:
         reader.release()
         raise RuntimeError(f"No frames in video: {ctx.video.path}")
     second = reader.read()
-    window = FrameWindow(ctx.device, cfg.enable_preprocess, first, second)
+    window = FrameWindow(ctx.device, cfg.enable_preprocess, first, second, cuda_graphs=_use_cuda_graphs(cfg))
     timing.add("init_total", ctx.init_t0)
     pass1_t0 = timing.start()
     print("[pass 1] Collecting detections...")

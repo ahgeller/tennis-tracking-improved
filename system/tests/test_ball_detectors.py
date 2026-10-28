@@ -16,6 +16,7 @@ from tennis_tracker.engines.ball_detectors import (
     TensorRTRuntimeBallDetector,
 )
 from tennis_tracker.config import Config
+from tennis_tracker.cuda_kernels import KernelUnavailable
 from tests._helpers import Capture, CpuGridTrackNet, StandInModel
 
 
@@ -76,6 +77,8 @@ def _bare_detector(cfg=None) -> GridTrackNetBallDetector:
     detector._decode = lambda output, width, height, conf: [((10.0, 20.0), 0.9)] * (int(output.shape[0]) * 5)
     detector.engine = None
     detector._resizers = {}
+    detector._nv12_resizers = {}
+    detector._nv12_kernel = None
     detector._remote = None
     detector.on_publish = None
     detector.precomputed = None
@@ -373,3 +376,67 @@ def test_the_pinned_reader_gives_cv2s_frames_on_the_device(tmp_path):
         assert ok and np.array_equal(frame.cpu().numpy(), host)
     assert not expected.read()[0] and len(got) == 9
     expected.release()
+
+
+class FakeNvdec:
+    """Stands in for ``video_decode.NvdecDecoder``: records how it was opened, or refuses the clip."""
+
+    opened: list = []
+    refuse = False
+
+    def __init__(self, path, device=None, nv12=False):
+        if FakeNvdec.refuse:
+            raise RuntimeError("NVDEC does not decode clip.mp4")
+        FakeNvdec.opened.append((path, device, nv12))
+
+
+def test_the_prepass_reads_nvdec_pictures_and_falls_back_to_cv2(monkeypatch, capsys):
+    """With ``ball_prepass_gpu_decode`` the prepass opens NVDEC for NV12 pictures once the NV12
+    kernel loads; a kernel that cannot load, or a clip NVDEC refuses, is reported and cv2 reads
+    the clip; with the option off NVDEC is never tried."""
+    monkeypatch.setattr(ball_detectors.video_decode, "nvdec_available", lambda: True)
+    monkeypatch.setattr(ball_detectors.video_decode, "NvdecDecoder", FakeNvdec)
+    monkeypatch.setattr(ball_detectors, "open_frames", lambda path, device: "cv2 reader")
+    kernel = object()
+    loads = []
+    monkeypatch.setattr(ball_detectors, "load_nv12_kernel", lambda device, cache: loads.append(cache) or kernel)
+    FakeNvdec.opened, FakeNvdec.refuse = [], False
+    detector = _bare_detector(Config(device="0"))
+    detector.device = torch.device("cuda", 0)
+    assert isinstance(detector._open_frames(Path("clip.mp4")), FakeNvdec)
+    assert isinstance(detector._open_frames(Path("clip.mp4")), FakeNvdec)
+    assert FakeNvdec.opened == [(Path("clip.mp4"), detector.device, True)] * 2
+    assert detector._nv12_kernel is kernel and loads == [Path(detector.cfg.ball_engine_dir)]   # loaded once
+
+    FakeNvdec.refuse = True
+    assert detector._open_frames(Path("clip.mp4")) == "cv2 reader"
+    assert "NVDEC does not decode clip.mp4; the prepass decodes on the CPU" in capsys.readouterr().out
+
+    def unavailable(device, cache):
+        raise KernelUnavailable("cannot load the nvrtc library")
+
+    FakeNvdec.refuse = False
+    monkeypatch.setattr(ball_detectors, "load_nv12_kernel", unavailable)
+    detector._nv12_kernel = None
+    assert detector._open_frames(Path("clip.mp4")) == "cv2 reader"
+    assert "cannot load the nvrtc library; the prepass decodes on the CPU" in capsys.readouterr().out
+
+    FakeNvdec.opened = []
+    detector.cfg = Config(device="0", ball_prepass_gpu_decode=False)
+    assert detector._open_frames(Path("clip.mp4")) == "cv2 reader" and FakeNvdec.opened == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the NV12 kernel runs on a CUDA device")
+def test_an_nv12_picture_and_its_bgr_frame_give_the_same_model_input():
+    device = torch.device("cuda")
+    detector = _bare_detector()
+    try:
+        detector._nv12_kernel = ball_detectors.load_nv12_kernel(device, None)
+    except KernelUnavailable as error:
+        pytest.skip(f"no NVRTC here: {error}")
+    planes = torch.randint(0, 256, (1620, 1920), dtype=torch.uint8).to(device)
+    picture = ball_detectors.video_decode.Nv12Frame(planes, True)
+    bgr = ball_detectors.video_decode.nv12_to_bgr(planes, True)
+    from_nv12 = detector._model_input(picture, device)
+    assert torch.equal(from_nv12, detector._model_input(bgr, device))
+    assert torch.equal(from_nv12, detector._model_input(bgr.cpu().numpy(), device))
