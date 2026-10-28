@@ -117,6 +117,11 @@ class Config:
     aux_detect_on_detect_frames: bool = True
     aux_force_interval: int = 6
     frame_reader_prefetch: int = 8
+    # Pass 2 decodes past the frame cache with NVDEC (PyNvVideoCodec) where it opens the clip, else
+    # OpenCV (tennis_tracker/video_decode.py; both give the same pixels). Off: pass 2 wants host
+    # frames, and NVDEC's GPU work slowed its NVENC writes (pomona pass 2: 3.84 s with NVDEC,
+    # 3.62 s with OpenCV, median of 3 locked runs). NVDEC pays where the frames stay on the GPU.
+    gpu_decode: bool = False
 
     # ROI-based motion - only compute motion/CC near ball
     roi_motion_enabled: bool = True

@@ -21,23 +21,23 @@ import sys
 import time
 from pathlib import Path
 
-def _main_checkout() -> Path:
-    """The main working tree of this repository, which every git worktree of it shares: a lock
-    beside this script would be one lock per worktree, and agents in different worktrees would
-    time their runs over each other. A checkout's ``.git`` is a directory; a worktree's is a file
-    naming ``<main>/.git/worktrees/<name>``."""
+def _lock_path() -> Path:
+    """The lock beside the main checkout, shared by every worktree of the repository.
+
+    A path relative to this file would give each ``git worktree`` its own lock and so lock
+    nothing: the main checkout is the parent of the common git directory, which all
+    worktrees share.  Outside git the repository root beside this file is used.
+    """
     here = Path(__file__).resolve().parent.parent
-    marker = here / ".git"
-    if marker.is_file():
-        text = marker.read_text().strip()
-        if text.startswith("gitdir:"):
-            gitdir = Path(text.split(":", 1)[1].strip())
-            if gitdir.parent.name == "worktrees":
-                return gitdir.parent.parent.parent
-    return here
+    try:
+        common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=here,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return here / ".gpu_bench_lock"
+    return Path(common).parent / ".gpu_bench_lock"
 
 
-LOCK = _main_checkout() / ".gpu_bench_lock"
+LOCK = _lock_path()
 
 
 def acquire(stale_minutes: float, poll_seconds: float) -> None:

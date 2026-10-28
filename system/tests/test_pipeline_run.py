@@ -45,7 +45,7 @@ import cv2
 import numpy as np
 import pytest
 
-from tennis_tracker import pass1, pass2, pipeline, utils
+from tennis_tracker import pass1, pass2, pipeline, utils, video_decode
 from tennis_tracker.config import Config
 from tennis_tracker.court.court_geometry import LINE_PAIRS_14
 from tennis_tracker.engines.court_detector import CourtDetector
@@ -675,7 +675,7 @@ def test_pass2_reports_a_short_second_decode(tmp_path, monkeypatch, fake_cuda, c
     real_read = pass2._FrameSource.read
 
     def read(self, frame_index):
-        return (None, True) if frame_index >= short else real_read(self, frame_index)
+        return None if frame_index >= short else real_read(self, frame_index)
 
     monkeypatch.setattr(pass2._FrameSource, "read", read)
     result = run_pipeline(tmp_path, monkeypatch, clip, **FULL_OVERRIDES, cache_input_frames_pass2=False)
@@ -697,6 +697,6 @@ def test_pass2_refuses_a_clip_it_cannot_reopen(tmp_path, monkeypatch, fake_cuda,
 
     install_fakes(monkeypatch)
     cfg = make_config(tmp_path, clip, **FULL_OVERRIDES, cache_input_frames_pass2=False)
-    monkeypatch.setattr(pass2, "cv2", SimpleNamespace(VideoCapture=Unopenable))   # pass 1 keeps the real one
+    monkeypatch.setattr(video_decode, "cv2", SimpleNamespace(VideoCapture=Unopenable))   # pass 1 keeps the real one
     with pytest.raises(RuntimeError, match="reopen the input video for pass 2"):
         pipeline.run(cfg)
