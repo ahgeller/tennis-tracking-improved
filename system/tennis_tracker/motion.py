@@ -347,12 +347,18 @@ class BackgroundModel:
     ``remember_motion`` with that frame's cleaned raw mask.
     """
 
-    def __init__(self, cfg: MotionSettings, device: torch.device) -> None:
+    def __init__(self, cfg: MotionSettings, device: torch.device, cuda_graphs: bool = False) -> None:
         self.cfg = cfg
         self.device = device
         self.mean: Optional[torch.Tensor] = None
         self.var: Optional[torch.Tensor] = None
         self._prev_motion: Optional[torch.Tensor] = None    # bool, last frame's cleaned raw motion
+        # With CUDA graphs the steady-state update (a previous motion mask exists) is replayed from
+        # a graph per input address: the frame planes come from ``GraphedFrameConversion``'s few
+        # slots, and the motion mask is copied into one buffer the graphs read.
+        self.cuda_graphs = bool(cuda_graphs) and device.type == "cuda"
+        self._update_graphs: Dict[Tuple[int, Tuple[int, ...]], torch.cuda.CUDAGraph] = {}
+        self._motion_buffer: Optional[torch.Tensor] = None
 
     @property
     def ready(self) -> bool:
@@ -376,6 +382,33 @@ class BackgroundModel:
             thr = self.cfg.motion_thresh / 255.0
             self.var = torch.full_like(self.mean, thr ** 2)
             return
+        if self.cuda_graphs and self._prev_motion is not None and self._prev_motion is self._motion_buffer:
+            graph = self._update_graph(curr_vs)
+            if graph is not None:
+                graph.replay()
+                return
+        self._update(curr_vs)
+
+    def _update_graph(self, curr_vs: torch.Tensor) -> Optional[torch.cuda.CUDAGraph]:
+        """The recorded steady-state update reading `curr_vs`'s memory, captured on first use; None
+        (and graphs given up, with a note) when the capture fails."""
+        key = (curr_vs.data_ptr(), tuple(curr_vs.stride()))
+        graph = self._update_graphs.get(key)
+        if graph is None:
+            try:
+                graph = torch.cuda.CUDAGraph()
+                # Capturing records the kernels without running them, so the model is unchanged.
+                with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+                    self._update(curr_vs)
+            except RuntimeError as error:
+                print(f"[pass 1] CUDA graph capture failed; updating the background directly "
+                      f"({str(error).splitlines()[0]})")
+                self.cuda_graphs = False
+                return None
+            self._update_graphs[key] = graph
+        return graph
+
+    def _update(self, curr_vs: torch.Tensor) -> None:
         assert self.mean is not None and self.var is not None
         diff_sq = curr_vs - self.mean
         diff_sq.mul_(diff_sq)                       # ``x ** 2`` is computed as ``x * x``
@@ -407,7 +440,14 @@ class BackgroundModel:
     def remember_motion(self, raw_motion: Optional[torch.Tensor]) -> None:
         """Keep this frame's cleaned raw motion (a boolean frame-sized tensor, or None when there
         is none yet) for the next update's slow-adaptation mask.  The tensor is used as it is,
-        not copied: the caller hands over a fresh one each frame."""
+        not copied: the caller hands over a fresh one each frame; with CUDA graphs it is copied
+        into the one buffer the recorded updates read."""
+        if self.cuda_graphs and raw_motion is not None:
+            if self._motion_buffer is None or self._motion_buffer.shape != raw_motion.shape:
+                self._motion_buffer = torch.empty_like(raw_motion)
+                self._update_graphs.clear()
+            self._motion_buffer.copy_(raw_motion)
+            raw_motion = self._motion_buffer
         self._prev_motion = raw_motion
 
 

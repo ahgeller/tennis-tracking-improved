@@ -76,7 +76,8 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   reports. `run_context.py`: data the stages pass each other (`CourtEvents`:
   the bounces, candidates, kinematic bounces, contacts and legs found). `pass1.py`
   (with `frame_window.py`): decoding, background/motion state, ROI collection,
-  detector calls. `pass2.py`: rendering pass. `export.py`: `RunResult`, what a
+  detector calls; the fixed-shape per-frame GPU work (frame conversion, motion
+  planes, background update) replays from CUDA graphs (`Config.pass1_cuda_graphs`). `pass2.py`: rendering pass. `export.py`: `RunResult`, what a
   run returns, and the tracking JSON writer, whose `court_events` block carries
   every event with its provenance (`{}` when they were not computed).
   `tracking_schema.py`: the tracking JSON's shape (TypedDicts, typing only),

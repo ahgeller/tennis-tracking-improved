@@ -102,18 +102,24 @@ class PinnedFrameUploader:
         (it is ordered before any later work on the current stream)."""
         if frame_bgr.shape[0] != self.h or frame_bgr.shape[1] != self.w or frame_bgr.shape[2] != 3:
             return torch.from_numpy(np.ascontiguousarray(frame_bgr)).to(device=self.device)
+        t = torch.empty((self.h, self.w, 3), dtype=torch.uint8, device=self.device)
+        self.upload_into(frame_bgr, t)
+        return t
+
+    @torch.no_grad()
+    def upload_into(self, frame_bgr: np.ndarray, target: torch.Tensor) -> None:
+        """Copy ``frame_bgr`` (this uploader's size) into the HWC uint8 device tensor ``target``
+        through a pinned buffer; the copy is ordered on the current stream and may still be in flight."""
         slot = self._slot
         self._slot = (self._slot + 1) % len(self._pinned_u8)
         done = self._copy_done[slot]
         if done is not None:
             done.synchronize()
         np.copyto(self._pinned_np[slot], frame_bgr)
-        t = torch.empty((self.h, self.w, 3), dtype=torch.uint8, device=self.device)
-        t.copy_(self._pinned_u8[slot], non_blocking=True)
+        target.copy_(self._pinned_u8[slot], non_blocking=True)
         done = torch.cuda.Event(blocking=False)
         done.record(torch.cuda.current_stream(device=self.device))
         self._copy_done[slot] = done
-        return t
 
     def upload_chw_f32(self, frame_bgr: np.ndarray) -> torch.Tensor:
         return hwc_u8_to_chw_f32(self.upload_hwc_u8(frame_bgr))
