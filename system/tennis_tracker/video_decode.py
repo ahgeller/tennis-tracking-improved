@@ -53,6 +53,28 @@ except (ImportError, OSError):          # optional (OSError: its DLLs without a 
 # A decoded BGR frame: a CUDA tensor (NVDEC) or a host array (OpenCV, or NVDEC with ``host=True``).
 Image = Union[np.ndarray, torch.Tensor]
 
+
+@dataclass(frozen=True)
+class Nv12Frame:
+    """A picture as NVDEC decoded it, before any colour conversion (``NvdecDecoder(nv12=True)``):
+    ``planes`` is ``(H * 3 / 2, W)`` uint8 on the device (the Y plane over the interleaved UV
+    plane), and ``nv12_to_bgr(planes, full_range)`` is OpenCV's BGR picture of it."""
+
+    planes: torch.Tensor
+    full_range: bool
+
+    @property
+    def width(self) -> int:
+        return int(self.planes.shape[-1])
+
+    @property
+    def height(self) -> int:
+        return int(self.planes.shape[-2]) * 2 // 3
+
+
+# What a decoder's ``read`` hands out: a BGR picture, or with ``NvdecDecoder(nv12=True)`` an NV12 one.
+Decoded = Union[np.ndarray, torch.Tensor, Nv12Frame]
+
 BACKEND_NVDEC = "nvdec"
 BACKEND_OPENCV = "opencv"
 # Frames NVDEC's decode thread keeps ready ahead of the reader (PyNvVideoCodec recommends 8 to 16).
@@ -65,7 +87,7 @@ def nvdec_available() -> bool:
     return nvc is not None and torch.cuda.is_available()
 
 
-def _swscale_coefficients(full_range: bool) -> Dict[str, int]:
+def swscale_coefficients(full_range: bool) -> Dict[str, int]:
     """swscale's 16-bit YUV -> RGB coefficients for BT.601 (``SWS_CS_DEFAULT``) at default
     contrast, saturation and brightness, as ``ff_yuv2rgb_c_init_tables`` derives them: the
     ``ff_yuv2rgb_coeffs`` row in 16.16 fixed point, scaled 255/219 (luma, limited range) or
@@ -96,7 +118,7 @@ def nv12_to_bgr(nv12: torch.Tensor, full_range: bool) -> torch.Tensor:
     backend gives for them (swscale's x86 ``yuv2rgb``: samples shifted left 3, offsets taken off,
     ``pmulhw`` by the coefficients, chroma sums saturated to 16 bits, the result saturated to
     0..255; each chroma sample serves a 2x2 block)."""
-    c = _swscale_coefficients(full_range)
+    c = swscale_coefficients(full_range)
     batch = nv12.shape[:-2]
     height = nv12.shape[-2] * 2 // 3
     width = nv12.shape[-1]
@@ -191,17 +213,23 @@ class NvdecDecoder:
     end.  The tensors are fresh allocations on ``device``, written on this decoder's own CUDA
     stream and safe to keep: ``read`` makes the caller's current stream wait for them.  With
     ``host=True`` each frame is downloaded instead and ``read`` hands out a host array (pass 2
-    draws on it with OpenCV).  Raises ``RuntimeError`` when NVDEC cannot open the clip.
+    draws on it with OpenCV).  With ``nv12=True`` it hands out each picture unconverted, as an
+    ``Nv12Frame`` on the device, for a consumer that converts as it reads (the ball prepass converts
+    and resizes in one kernel, ``engines/ball_gpu.Nv12ModelResize``).  Raises ``RuntimeError`` when
+    NVDEC cannot open the clip.
     """
 
     backend = BACKEND_NVDEC
 
     def __init__(self, path, device: Optional[torch.device] = None, start_frame: int = 0, host: bool = False,
-                 buffer_frames: int = NVDEC_BUFFER_FRAMES) -> None:
+                 buffer_frames: int = NVDEC_BUFFER_FRAMES, nv12: bool = False) -> None:
         if not nvdec_available():
             raise RuntimeError("NVDEC needs PyNvVideoCodec and a CUDA device")
         self.device = device if device is not None else torch.device("cuda", torch.cuda.current_device())
         self.host = bool(host)
+        self.nv12 = bool(nv12)
+        if self.host and self.nv12:
+            raise ValueError("NvdecDecoder hands out NV12 pictures on the device only")
         self.next_index = int(start_frame)
         self._buffer = max(1, int(buffer_frames))
         self._pending: List[torch.Tensor] = []
@@ -273,9 +301,15 @@ class NvdecDecoder:
     def _convert(self, frames: List[Any]) -> None:
         """Convert a batch in one pass (a dozen kernels for the batch, not per frame: the reader
         thread holds the GIL while it launches them) and, with ``host``, download it in one
-        asynchronous copy to pinned memory; ``_ready`` marks when the batch can be read."""
+        asynchronous copy to pinned memory; ``_ready`` marks when the batch can be read.  With
+        ``nv12`` the batch is only copied out of the decoder's buffers, which it reuses."""
         with torch.cuda.device(self.device), torch.cuda.stream(self._stream):
             nv12 = torch.stack([torch.from_dlpack(frame) for frame in frames])
+            if self.nv12:
+                self._ready = torch.cuda.Event()
+                self._ready.record(self._stream)
+                self._pending = list(nv12.unbind(0))
+                return
             bgr = nv12_to_bgr(nv12, self.full_range)
             if self.host:
                 pinned = torch.empty(bgr.shape, dtype=torch.uint8, pin_memory=True)
@@ -285,7 +319,7 @@ class NvdecDecoder:
             self._ready.record(self._stream)
         self._pending = list(bgr.unbind(0))
 
-    def read(self) -> Tuple[bool, Optional[Image]]:
+    def read(self) -> Tuple[bool, Optional[Decoded]]:
         if not self._pending and not self._refill():
             return False, None
         frame = self._pending.pop(0)
@@ -296,7 +330,7 @@ class NvdecDecoder:
         current = torch.cuda.current_stream(self.device)
         current.wait_event(self._ready)
         frame.record_stream(current)
-        return True, frame
+        return True, Nv12Frame(frame, self.full_range) if self.nv12 else frame
 
     def release(self) -> None:
         self._pending = []
@@ -424,6 +458,8 @@ class SharedFrameSource:
                 ok, image = self.decoder.read()
                 if not ok or image is None:
                     return
+                if isinstance(image, Nv12Frame):
+                    raise TypeError("SharedFrameSource shares BGR pictures, not an NV12 decoder's")
                 ready = None
                 if isinstance(image, torch.Tensor) and image.is_cuda:
                     # A consumer on another stream (the prepass worker's) waits for this event.

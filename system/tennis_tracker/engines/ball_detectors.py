@@ -25,16 +25,20 @@ import torch
 from ball_in_play_selector import RawDetection
 
 from ..config import Config
-from .ball_gpu import HeatRing, ModelResize, Readback, grid_peaks, peak_points
+from .ball_gpu import HeatRing, ModelResize, Nv12ModelResize, Readback, grid_peaks, load_nv12_kernel, peak_points
 from .ball_prepass_process import RemotePrepass
 from .engine_boxes import OutputMode, decode_engine_boxes, engine_output_mode
 from .engine_session import TensorRTRuntimeSession
+from .. import video_decode
+from ..cuda_kernels import Kernel
 from ..ball_models import load_ball_model
 from ..frame_rate import require_phase_stride
 from ..gridtracknet import FRAMES_PER_UNIT, HEIGHT, WIDTH, GridPoint
 
 # A BGR HWC uint8 frame, either a host array or a CUDA tensor of the same layout.
 FrameInput = Union[np.ndarray, torch.Tensor]
+# What the prepass reads: such a frame, or an NV12 picture NVDEC decoded (converted as it is resized).
+PrepassFrame = Union[np.ndarray, torch.Tensor, video_decode.Nv12Frame]
 # The prepass's pieces: one frame's input tensor with its source index, and a five-frame unit
 # (the frames' tensors, in order) with the source indices it covers.
 _PrepassFrame = Tuple[torch.Tensor, int]
@@ -189,8 +193,10 @@ class GridTrackNetBallDetector(BallDetectorBackend):
     answered by up to five overlapping units, and the answers a frame gets are
     averaged grid by grid before it is decoded once (``ball_gpu.HeatRing``).
 
-    Every frame is resized to the model's input on the GPU (``ball_gpu.ModelResize``,
-    the bytes OpenCV's resize gives) and each frame's peak is found there, so
+    The clip is decoded by NVDEC where it can (``Config.ball_prepass_gpu_decode``;
+    each NV12 picture becomes the model input in one kernel, ``ball_gpu.Nv12ModelResize``),
+    else by cv2. Every frame is resized to the model's input on the GPU (the bytes
+    OpenCV's resize gives of OpenCV's picture, either way) and each frame's peak is found there, so
     only four floats a frame come back, through pinned memory a few calls
     behind the device.
 
@@ -214,12 +220,14 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             raise RuntimeError("GridTrackNet requires CUDA-enabled torch.")
         self.cfg = cfg
         self.device = torch.device(f"cuda:{cfg.device}")
-        self._frame_tensor: Callable[[FrameInput, torch.device], torch.Tensor] = self._model_input
+        self._frame_tensor: Callable[[PrepassFrame, torch.device], torch.Tensor] = self._model_input
         # The one-unit-per-frame prepass finds each frame's peak on the device; a decoder set here,
         # ``gridtracknet.decode_predictions``'s signature, decodes the model's output on the host
         # instead (the tests' seam for stand-in models that answer no grid).
         self._decode: Optional[Callable[[torch.Tensor, int, int, float], List[GridPoint]]] = None
         self._resizers: Dict[Tuple[int, int], ModelResize] = {}
+        self._nv12_resizers: Dict[Tuple[int, int, bool], Nv12ModelResize] = {}
+        self._nv12_kernel: Optional[Kernel] = None
         window_step = self.window_step()
         # One entry per decoded source frame, appended by the prepass.
         self.precomputed: Optional[List[List[RawDetection]]] = None
@@ -287,10 +295,36 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         except ValueError as error:
             raise RuntimeError(str(error)) from error
 
-    def _model_input(self, frame: FrameInput, device: torch.device) -> torch.Tensor:
-        """One BGR HWC uint8 frame (host array or CUDA tensor) as the model's (3, HEIGHT, WIDTH) RGB
-        FP16 input on `device`: a host frame goes up as uint8 through pinned memory without waiting,
-        and ``ModelResize`` resizes it there."""
+    def _open_frames(self, video_path: Path) -> Any:
+        """The prepass's reader: NVDEC's NV12 pictures on the device when ``Config.ball_prepass_gpu_decode``
+        asks for them, NVDEC opens the clip and the NV12 kernel loads (``ball_gpu.Nv12ModelResize``),
+        else cv2 through ``open_frames``; a fallback is reported.
+
+        NVDEC with the BGR conversion (``nv12_to_bgr``) and then ``ModelResize`` would be slower than
+        cv2: the prepass is bound by the GPU there, and the conversion's int32 passes over the whole
+        picture added 1.3 s on pomona (``audit/records/opt_phaseA_followup.md``)."""
+        if self.cfg.ball_prepass_gpu_decode and self.device.type == "cuda" and video_decode.nvdec_available():
+            try:
+                if self._nv12_kernel is None:
+                    self._nv12_kernel = load_nv12_kernel(self.device, Path(self.cfg.ball_engine_dir))
+                return video_decode.NvdecDecoder(video_path, device=self.device, nv12=True)
+            except RuntimeError as error:          # KernelUnavailable is one
+                print(f"[detector] {str(error).splitlines()[0]}; the prepass decodes on the CPU")
+        return open_frames(video_path, self.device)
+
+    def _model_input(self, frame: PrepassFrame, device: torch.device) -> torch.Tensor:
+        """One frame as the model's (3, HEIGHT, WIDTH) RGB FP16 input on `device`: an NV12 picture
+        converted and resized in one kernel (``Nv12ModelResize``), or a BGR HWC uint8 frame (host
+        array or CUDA tensor; a host frame goes up as uint8 through pinned memory without waiting)
+        resized by ``ModelResize``. Both give the bytes OpenCV's picture resized by OpenCV gives."""
+        if isinstance(frame, video_decode.Nv12Frame):
+            key = (frame.width, frame.height, frame.full_range)
+            nv12_resize = self._nv12_resizers.get(key)
+            if nv12_resize is None:
+                assert self._nv12_kernel is not None
+                nv12_resize = self._nv12_resizers[key] = Nv12ModelResize(
+                    frame.width, frame.height, WIDTH, HEIGHT, frame.full_range, device, self._nv12_kernel)
+            return nv12_resize(frame)
         if isinstance(frame, torch.Tensor):
             source = frame.to(device)
         else:
@@ -331,7 +365,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                         self._ready.wait(timeout=0.5)
                 self._raise_if_failed()
             return
-        capture = open_frames(video_path, self.device)
+        capture = self._open_frames(video_path)
         args =(capture, cached, source_stride, width, height, int(total))
         if background:
             self._worker = threading.Thread(target=self._prepass, args=args, daemon=True, name="gridtracknet-prepass")
@@ -524,16 +558,17 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             self._finish()
 
         elapsed = time.perf_counter() - started
-        self._report_prepass(frame_index, detected, inference_calls, source_stride, elapsed, total_hint)
+        decode = getattr(capture, "backend", video_decode.BACKEND_OPENCV)
+        self._report_prepass(frame_index, detected, inference_calls, source_stride, elapsed, total_hint, decode)
 
     def _report_prepass(self, frame_index: int, detected: int, inference_calls: int, source_stride: int,
-                        elapsed: float, total_hint: int) -> None:
+                        elapsed: float, total_hint: int, decode: str = video_decode.BACKEND_OPENCV) -> None:
         """The prepass's console line, and a second when the decoded frame count differs from the
         container's (the decoded count is the one every index refers to)."""
         print(
             f"[detector] GridTrackNet prepass: {frame_index} source frames, {detected} detections, "
             f"{inference_calls} batched calls across {source_stride} phase(s) "
-            f"in {elapsed:.1f}s ({frame_index / max(elapsed, 1e-9):.1f} source fps)"
+            f"in {elapsed:.1f}s ({frame_index / max(elapsed, 1e-9):.1f} source fps, {decode} decode)"
             + (" [overlapped with pass 1]" if self._worker is not None else "")
         )
         if self._worker_error is None and frame_index != total_hint:

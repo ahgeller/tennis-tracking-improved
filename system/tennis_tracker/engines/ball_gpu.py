@@ -23,12 +23,15 @@ maximum, as NumPy's), returning the confidence, the two offsets and the flat cel
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 
+from ..cuda_kernels import Kernel, load_kernel
 from ..gridtracknet import FRAMES_PER_UNIT, GridPoint
+from ..video_decode import Nv12Frame, swscale_coefficients
 
 INTER_RESIZE_COEF_BITS = 11
 INTER_RESIZE_COEF_SCALE = 1 << INTER_RESIZE_COEF_BITS
@@ -91,6 +94,99 @@ class ModelResize:
         rounded to ``dtype``."""
         resized = self.resize_u8(frame)
         return resized.permute(2, 0, 1).flip(0).to(torch.float32).div_(255.0).to(self.dtype)
+
+
+# ``Nv12ModelResize``'s kernel: one thread per model-input pixel converts its four source taps from
+# NV12 to BGR as ``video_decode.nv12_to_bgr`` does and combines them as ``ModelResize.resize_u8``
+# does, every step in the same integer arithmetic, then writes the pixel's RGB values as the FP16
+# bit patterns ``lut`` holds for each byte.
+_NV12_MODEL_INPUT_SOURCE = r"""
+extern "C" __global__ void nv12_model_input(
+        const unsigned char* __restrict__ nv12, int pitch, int height,
+        unsigned short* __restrict__ out, int out_height, int out_width,
+        const long long* __restrict__ columns, const int* __restrict__ column_weights,
+        const long long* __restrict__ rows, const int* __restrict__ row_weights,
+        const unsigned short* __restrict__ lut,
+        int cy, int y_offset, int v2r, int u2b, int u2g, int v2g) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= out_width || y >= out_height) return;
+    int sums[3] = {0, 0, 0};
+    for (int tap_row = 0; tap_row < 2; ++tap_row) {
+        const int row = (int)rows[tap_row * out_height + y];
+        const unsigned char* luma_row = nv12 + (long long)row * pitch;
+        const unsigned char* chroma_row = nv12 + (long long)(height + (row >> 1)) * pitch;
+        int across[3] = {0, 0, 0};
+        for (int tap_column = 0; tap_column < 2; ++tap_column) {
+            const int column = (int)columns[tap_column * out_width + x];
+            const int weight = column_weights[tap_column * out_width + x];
+            const int luma = ((((int)luma_row[column]) << 3) - y_offset) * cy >> 16;
+            const int u = (((int)chroma_row[column & ~1]) << 3) - 1024;
+            const int v = (((int)chroma_row[(column & ~1) + 1]) << 3) - 1024;
+            int green = ((u * u2g) >> 16) + ((v * v2g) >> 16);
+            green = min(max(green, -32768), 32767);
+            const int bgr[3] = {luma + ((u * u2b) >> 16), luma + green, luma + ((v * v2r) >> 16)};
+            for (int channel = 0; channel < 3; ++channel) {
+                across[channel] += min(max(bgr[channel], 0), 255) * weight;
+            }
+        }
+        const int row_weight = row_weights[tap_row * out_height + y];
+        for (int channel = 0; channel < 3; ++channel) {
+            sums[channel] += ((across[channel] >> 4) * row_weight) >> 16;
+        }
+    }
+    const int plane = out_height * out_width;
+    for (int channel = 0; channel < 3; ++channel) {
+        const int value = min(max((sums[channel] + 2) >> 2, 0), 255);
+        out[(2 - channel) * plane + y * out_width + x] = lut[value];     // BGR in, RGB out
+    }
+}
+"""
+_NV12_KERNEL_NAME = "nv12_model_input"
+_NV12_BLOCK = (32, 8, 1)
+
+
+def load_nv12_kernel(device: torch.device, cache_dir: Optional[Path] = None) -> Kernel:
+    """``Nv12ModelResize``'s kernel on `device` (``cuda_kernels.load_kernel``, cached in `cache_dir`);
+    raises ``KernelUnavailable`` when it cannot be compiled or loaded."""
+    return load_kernel(_NV12_MODEL_INPUT_SOURCE, _NV12_KERNEL_NAME, device, cache_dir)
+
+
+class Nv12ModelResize:
+    """An NV12 picture (``video_decode.Nv12Frame``) of one source size -> the model's (3, height,
+    width) RGB FP16 input, in one kernel: the bytes ``ModelResize`` gives for OpenCV's BGR picture
+    of it (``video_decode.nv12_to_bgr``), without the full-size BGR picture ever being made. The
+    conversion is per pixel, so converting only the source pixels the resize reads changes nothing."""
+
+    def __init__(self, source_width: int, source_height: int, width: int, height: int, full_range: bool,
+                 device: torch.device, kernel: Kernel):
+        self.source_size = (int(source_width), int(source_height))
+        self.size = (int(width), int(height))
+        self.full_range = bool(full_range)
+        self.kernel = kernel
+        taps = ModelResize(source_width, source_height, width, height, device)
+        self.columns, self.rows = taps.columns, taps.rows                            # int64: x0 then x1, y0 then y1
+        self.column_weights = taps.column_weights.reshape(-1).contiguous()          # a0 then a1, int32
+        self.row_weights = taps.row_weights.reshape(-1).contiguous()                # b0 then b1, int32
+        # uint8 / 255 in float32 rounded to FP16, made by the very ops ``ModelResize.__call__`` runs.
+        self.lut = torch.arange(256, dtype=torch.uint8, device=device).to(torch.float32).div_(255.0).to(torch.float16)
+        c = swscale_coefficients(self.full_range)
+        self.coefficients = [c["y"], c["y_offset"], c["v2r"], c["u2b"], c["u2g"], c["v2g"]]
+        self.grid = ((int(width) + _NV12_BLOCK[0] - 1) // _NV12_BLOCK[0],
+                     (int(height) + _NV12_BLOCK[1] - 1) // _NV12_BLOCK[1], 1)
+
+    def __call__(self, frame: Nv12Frame) -> torch.Tensor:
+        planes = frame.planes
+        if (frame.width, frame.height) != self.source_size or frame.full_range != self.full_range:
+            raise ValueError(f"Nv12ModelResize for {self.source_size} got a {frame.width}x{frame.height} picture")
+        if planes.dtype != torch.uint8 or planes.dim() != 2 or planes.stride(1) != 1:
+            raise ValueError("Nv12ModelResize reads (H * 3 / 2, W) uint8 rows")
+        width, height = self.size
+        out = torch.empty((3, height, width), dtype=torch.float16, device=planes.device)
+        self.kernel(self.grid, _NV12_BLOCK, [
+            planes, planes.stride(0), self.source_size[1], out, height, width,
+            self.columns, self.column_weights, self.rows, self.row_weights, self.lut, *self.coefficients])
+        return out
 
 
 def grid_peaks(grids: torch.Tensor) -> torch.Tensor:

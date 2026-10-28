@@ -53,7 +53,10 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   overlapping units are averaged before one decode (`_UnitStream`, and
   `HeatRing` in `ball_gpu.py`); 5 is the old prepass, one unit per frame.
   `ball_gpu.py` is the prepass's device side (OpenCV's resize to the byte, the heat
-  ring, peaks); `ball_trt.py` builds and caches the ball model's TensorRT engine
+  ring, peaks, and the one kernel that turns NVDEC's NV12 pictures into the model
+  input with the same bytes; `tennis_tracker/cuda_kernels.py` compiles such kernels
+  with the NVRTC PyTorch ships and caches the cubins; `video_decode.py` is NVDEC
+  and OpenCV decoding with OpenCV's pixels); `ball_trt.py` builds and caches the ball model's TensorRT engine
   (`Config.ball_prepass_runtime`); `ball_prepass_process.py` runs the prepass in a
   child process. The prepass runs before pass 1 by default
   (`audit/records/opt_ball_prepass.md` on the `optimization` branch has why).

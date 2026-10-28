@@ -6,7 +6,11 @@ import pytest
 import torch
 
 from tennis_tracker.engines import ball_gpu
-from tennis_tracker.engines.ball_gpu import HeatRing, ModelResize, Readback, grid_peaks, peak_points
+from tennis_tracker.cuda_kernels import KernelUnavailable
+from tennis_tracker.engines.ball_gpu import (
+    HeatRing, ModelResize, Nv12ModelResize, Readback, grid_peaks, peak_points,
+)
+from tennis_tracker.video_decode import Nv12Frame, nv12_to_bgr
 from tennis_tracker.gridtracknet import HEIGHT, WIDTH, decode_grid, frame_tensor
 
 CPU = torch.device("cpu")
@@ -93,3 +97,42 @@ def test_a_cpu_readback_is_ready_at_once():
     readback = Readback(values)
     values.zero_()                                   # the copy is the host's own
     assert readback.ready() and readback.wait().tolist() == [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+
+def _nv12_kernel_or_skip(device: torch.device):
+    if not torch.cuda.is_available():
+        pytest.skip("the NV12 kernel runs on a CUDA device")
+    try:
+        return ball_gpu.load_nv12_kernel(device)
+    except KernelUnavailable as error:
+        pytest.skip(f"no NVRTC here: {error}")
+
+
+@pytest.mark.parametrize("width, height", [(1920, 1080), (1280, 720), (640, 360), (768, 432), (98, 64), (1000, 562)])
+@pytest.mark.parametrize("full_range", [False, True])
+def test_the_nv12_kernel_is_the_resize_of_opencvs_bgr_to_the_byte(width, height, full_range):
+    """Random NV12 pictures (every chroma and rounding case) of downscales, upscales and the model's
+    own size: one kernel gives exactly ModelResize(nv12_to_bgr(...)), the path whose bytes are
+    cv2.resize's of OpenCV's picture."""
+    device = torch.device("cuda")
+    kernel = _nv12_kernel_or_skip(device)
+    generator = torch.Generator().manual_seed(width * 7 + height + int(full_range))
+    planes = torch.randint(0, 256, (height * 3 // 2, width), dtype=torch.uint8, generator=generator).to(device)
+    expected = ModelResize(width, height, WIDTH, HEIGHT, device)(nv12_to_bgr(planes, full_range))
+    got = Nv12ModelResize(width, height, WIDTH, HEIGHT, full_range, device, kernel)(Nv12Frame(planes, full_range))
+    assert got.dtype == torch.float16 and got.shape == expected.shape
+    assert torch.equal(got.view(torch.int16), expected.view(torch.int16))
+
+
+def test_the_nv12_kernel_reads_rows_with_a_pitch_and_refuses_another_picture():
+    device = torch.device("cuda")
+    kernel = _nv12_kernel_or_skip(device)
+    padded = torch.randint(0, 256, (96, 192), dtype=torch.uint8).to(device)
+    planes = padded[:, :128]                                    # a 128x64 picture in rows of 192 bytes
+    resize = Nv12ModelResize(128, 64, 40, 24, False, device, kernel)
+    expected = ModelResize(128, 64, 40, 24, device)(nv12_to_bgr(planes.contiguous(), False))
+    assert torch.equal(resize(Nv12Frame(planes, False)).view(torch.int16), expected.view(torch.int16))
+    with pytest.raises(ValueError, match="got a"):
+        resize(Nv12Frame(planes, True))
+    with pytest.raises(ValueError, match="got a"):
+        resize(Nv12Frame(padded[:90, :128], False))

@@ -228,6 +228,28 @@ def test_nvdec_frames_equal_opencvs_from_any_start(tmp_path, codec, pix_fmt, col
 
 @needs_ffmpeg
 @needs_nvdec
+def test_nvdec_hands_out_nv12_pictures_that_convert_to_opencvs(tmp_path):
+    """``nv12=True`` skips the conversion: each picture, converted by ``nv12_to_bgr`` with the
+    decoder's calibrated range, is OpenCV's frame, and the count is exact."""
+    path = tmp_path / "clip.mp4"
+    _encode(path, _coloured_frames(30), pix_fmt="yuvj420p")
+    reference = _opencv_frames(path)
+    decoder = video_decode.NvdecDecoder(path, nv12=True)
+    pictures = []
+    while (read := decoder.read())[0]:
+        pictures.append(read[1])
+    decoder.release()
+    assert len(pictures) == len(reference) == 30
+    for picture, ref in zip(pictures, reference):
+        assert isinstance(picture, video_decode.Nv12Frame) and picture.full_range
+        assert (picture.width, picture.height) == (256, 160) and picture.planes.is_cuda
+        assert np.array_equal(video_decode.nv12_to_bgr(picture.planes, picture.full_range).cpu().numpy(), ref)
+    with pytest.raises(ValueError, match="on the device only"):
+        video_decode.NvdecDecoder(path, host=True, nv12=True)
+
+
+@needs_ffmpeg
+@needs_nvdec
 def test_a_shared_nvdec_source_feeds_a_consumer_on_another_stream(tmp_path):
     path = tmp_path / "clip.mp4"
     _encode(path, _coloured_frames(40))
