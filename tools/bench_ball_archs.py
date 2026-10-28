@@ -112,7 +112,15 @@ def export_onnx(model: nn.Module, inputs: Tuple[torch.Tensor, ...], path: Path, 
                       input_names=[f"input{index}" for index in range(len(inputs))], output_names=outputs)
 
 
+REUSE_ENGINES = False       # --reuse-engines: time the engines an earlier run built (the networks are seeded)
+
+
 def build_engine(onnx_path: Path, engine_path: Path) -> bytes:
+    """The serialized FP16 engine for `onnx_path`, written to `engine_path`; with
+    ``REUSE_ENGINES`` an existing `engine_path` is read instead, so a re-timing holds the GPU lock
+    for seconds rather than for the builds."""
+    if REUSE_ENGINES and engine_path.is_file():
+        return engine_path.read_bytes()
     import tensorrt as trt
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -191,7 +199,11 @@ def main() -> int:
                         help="also time the trainable form exported without the RepVGG/BatchNorm fold")
     parser.add_argument("--video", type=Path, default=ROOT / "system" / "sample" / "pomona.mp4",
                         help="the clip whose frames fill the units (the checks compare outputs on real frames)")
+    parser.add_argument("--reuse-engines", action="store_true",
+                        help="time the engines an earlier run left in --out instead of building them again")
     args = parser.parse_args()
+    global REUSE_ENGINES
+    REUSE_ENGINES = args.reuse_engines
     torch.manual_seed(0)
     device = torch.device("cuda")
     stream = torch.cuda.Stream()
