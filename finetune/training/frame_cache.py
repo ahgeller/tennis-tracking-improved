@@ -24,8 +24,9 @@ from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, resize_to_model
 from tennis_tracker.frame_rate import require_phase_stride
 from finetune.data.fileio import write_atomic
 from finetune.data.labels import LabelPoint, read_labels
-from finetune.data.workspace import video_meta
+from finetune.data.workspace import video_meta, videos_in
 from finetune.training.clips import Clip
+from finetune.training.pseudo_labels import PSEUDO_SOURCE, is_pseudo_csv, pseudo_csv, read_pseudo_labels
 
 DATA_VERSION = 5
 PNG_COMPRESSION = 1        # the frame cache's encoding: lossless, and the fastest zlib level to write and read
@@ -34,14 +35,20 @@ FRAME_SUFFIX = ".png"
 Target = Optional[List[float]]       # a training target: [x, y] on the image, or None for no ball
 
 
-class TrainingUnit(TypedDict):
-    """One training sample: five cached frames at model cadence and their targets."""
+class _Unit(TypedDict):
     clip: str
     source: str
     indices: List[int]      # the five source frame indices, at model cadence
     frames: List[str]       # cache-relative paths, frames/<clip>/<index>.png
     points: List[Target]    # one per frame, in the clip's native pixels
     size: List[int]         # [width, height] of the clip
+
+
+class TrainingUnit(_Unit, total=False):
+    """One training sample: five cached frames at model cadence and their targets; a unit of a
+    pseudo-labelled clip also carries ``valid``, False for a frame whose label is ignored (its
+    point is None and the labelled loss leaves it out), see ``pseudo_labels``."""
+    valid: List[bool]
 
 
 class ClipRecord(TypedDict):
@@ -146,12 +153,17 @@ def extract_frames(video: Path, frame_dir: Path, needed: Set[int]) -> None:
         raise ValueError(f"{video.name} ended before frames {sorted(remaining)[:5]}")
 
 
-def prepare_clip(entry: Clip, data_dir: Path, rebuild: bool) -> ClipRecord:
+def prepare_clip(entry: Clip, data_dir: Path, rebuild: bool, prefix: str = "") -> ClipRecord:
     """Describe one clip's training units from its labels as they are now, and extract the
     768x432 frames they need that the cache does not hold yet: every frame with ``rebuild``, and
     every frame when no record vouches for what is on disk (the video or the record format
     changed, or the record is unreadable), since frames of another video or format would
-    otherwise sit beside the new ones for good."""
+    otherwise sit beside the new ones for good.
+
+    A pseudo-label file (``pseudo_labels.is_pseudo_csv``) gives units with ``valid`` (its ignored
+    frames) and no unit whose five frames are all ignored. `prefix` is put before the units'
+    frame paths: the folder `data_dir` sits in under the trainer's cache root (``pseudo/`` for the
+    pseudo-labelled clips, cached apart so their names never meet a workspace clip's)."""
     clip, video, csv_path, source = entry
     meta_path = data_dir / "clips" / f"{clip}.json"
     frame_dir = data_dir / "frames" / clip
@@ -162,13 +174,22 @@ def prepare_clip(entry: Clip, data_dir: Path, rebuild: bool) -> ClipRecord:
     on_disk = {index for index in (cached or {"frames": []})["frames"] if (frame_dir / frame_name(index)).is_file()}
     fps, width, height, _ = video_meta(video)
     stride = require_phase_stride(fps)
-    labels = training_targets(csv_path, width, height)
+    ignored: Set[int] = set()
+    if is_pseudo_csv(csv_path):
+        labels, ignored = read_pseudo_labels(csv_path, width, height)
+    else:
+        labels = training_targets(csv_path, width, height)
     samples: List[TrainingUnit] = []
     needed: Set[int] = set()
     for window in build_units(labels, stride):
-        samples.append(TrainingUnit(clip=clip, source=source, indices=list(window),
-                                    frames=[f"frames/{clip}/{frame_name(index)}" for index in window],
-                                    points=[labels[index] for index in window], size=[width, height]))
+        if all(index in ignored for index in window):
+            continue                       # nothing in it the labelled loss could read
+        unit = TrainingUnit(clip=clip, source=source, indices=list(window),
+                            frames=[f"{prefix}frames/{clip}/{frame_name(index)}" for index in window],
+                            points=[labels[index] for index in window], size=[width, height])
+        if ignored:
+            unit["valid"] = [index not in ignored for index in window]
+        samples.append(unit)
         needed.update(window)
     missing = needed - on_disk
     if missing:
@@ -204,3 +225,27 @@ def prepare_data(clips: List[Clip], data_dir: Path, val_clips: List[str], rebuil
     if not manifest["train"]:
         raise ValueError("Need labelled clips in the training split")
     return manifest
+
+
+PSEUDO_CACHE = "pseudo"        # the pseudo-labelled clips' frames, under the trainer's cache root
+
+
+def prepare_pseudo(root: Path, data_dir: Path, rebuild: bool, workers: int) -> List[TrainingUnit]:
+    """The training units of every video in ``<root>/videos`` with a pseudo-label file in
+    ``<root>/labels`` (``pseudo_labels``), cached under ``<data_dir>/pseudo/`` (their frame paths
+    carry that prefix, so one dataset reads both), tagged with the source ``pseudo``. A folder
+    with no labelled video is a ValueError: ``--pseudo`` was given for nothing."""
+    entries: List[Clip] = [(clip, video, pseudo_csv(root, clip), PSEUDO_SOURCE)
+                           for clip, video in videos_in(root / "videos").items() if pseudo_csv(root, clip).is_file()]
+    if not entries:
+        raise ValueError(f"--pseudo {root}: no video in {root / 'videos'} has a pseudo-label file in {root / 'labels'} "
+                         "(ft.py pseudo label makes them)")
+    started = time.perf_counter()
+    target = data_dir / PSEUDO_CACHE
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        records = list(pool.map(lambda entry: prepare_clip(entry, target, rebuild, f"{PSEUDO_CACHE}/"), entries))
+    units = [unit for record in records for unit in record["samples"]]
+    labelled = sum(sum(unit.get("valid", [True] * FRAMES_PER_UNIT)) for unit in units)
+    print(f"[data] {len(records)} pseudo-labelled clips ready in {time.perf_counter() - started:.0f}s: "
+          f"{len(units)} units, {labelled} of their {len(units) * FRAMES_PER_UNIT} frames labelled, the rest ignored")
+    return units

@@ -8,6 +8,7 @@ AiFolder/
 finetune/videos/
 finetune/cache/
 finetune/runs/
+finetune/pseudo/
 finetune/models/*
 finetune/labels/*.draft
 finetune/labels/*.review.json
