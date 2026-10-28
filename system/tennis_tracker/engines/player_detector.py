@@ -76,6 +76,7 @@ class PlayerPending:
     court_kps: Optional[List[float]]
     outputs: Optional[List[torch.Tensor]] = None
     input_tensor: Optional[torch.Tensor] = None  # keeps the engine input alive until wait()
+    done: Optional[torch.cuda.Event] = None       # marks this launch's outputs ready (async sessions)
 
 
 class PlayerDetector:
@@ -157,7 +158,20 @@ class PlayerDetector:
             t, _ = self.session.preprocess_cuda_chw_frame(frame_gpu_chw)
         if t is None:
             t, _ = self.session.preprocess_frame(frame)
-        pending.outputs = self.session.forward_tensor(t)
+        outputs = self.session.forward_tensor(t)
+        stream = self.session.stream
+        if stream is not None:
+            # The session's output buffers are reused by the next launch, which may come before
+            # this one is finished (pass 1 finishes a frame's players one frame later), so the
+            # outputs are copied on the engine's stream, and the event lets ``detect_async_finish``
+            # wait for this launch alone rather than everything launched since.
+            with torch.cuda.stream(stream):
+                outputs = [out.clone() for out in outputs]
+            current = torch.cuda.current_stream(device=self.session.device)
+            for out in outputs:
+                out.record_stream(current)
+            pending.done = self.session.completion_event()
+        pending.outputs = outputs
         pending.input_tensor = t
         return pending
 
@@ -181,7 +195,7 @@ class PlayerDetector:
             # Pass empty detections to tell the tracker to coast the boxes forward.
             dets = np.empty((0, POSTPROCESSED_COLUMNS))
         else:
-            self.session.wait()
+            self.session.wait(pending.done)
             dets = self._decode_player_boxes(pending.outputs[0], pending.width, pending.height)
             # Drop spectators before the tracker learns them.
             if pending.court_kps and len(dets) > self.cfg.num_players:
