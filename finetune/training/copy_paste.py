@@ -43,7 +43,7 @@ from finetune.data.fileio import write_atomic
 from finetune.training.frame_cache import TrainingUnit
 
 BANK_NAME = "copypaste_bank.npz"
-BANK_VERSION = 2                 # 2: the crops' rows
+BANK_VERSION = 3                 # 2: the crops' rows; 3: one blob per matte
 CROP_RADIUS = 7                  # crops are (2r + 1) square, in cache pixels
 SLOW_PX = 1.5                    # a ball crop's speed limit, cache px per source frame
 CLEAR_PX = 10.0                  # a background frame's ball sits at least this far away
@@ -51,7 +51,7 @@ BACKGROUND_FRAMES = 3            # the background is the median of this many fra
 BACKGROUND_GAP = 15              # ... each at least this many source frames from the crop's
 MATTE_LOW, MATTE_HIGH = 0.04, 0.15   # colour difference (0..1) mapped to alpha 0..1
 DISC_PX = (3.5, 5.5)             # the matte is kept within the first radius and fades out by the second
-MATTE_MASS = (1.5, 40.0)         # a crop whose matte holds less or more is not a lone ball
+MATTE_MASS = (1.5, 20.0)         # a crop whose matte holds less or more is not a lone ball (a 4 px ball is ~13)
 MAX_CROPS_PER_CLIP = 60
 MIN_PATH_PX = 3.0                # a path must move this far over its five frames (cache px)
 MAX_STEP_PX = 120.0              # ... and no step longer than this (a label error or a cut)
@@ -114,14 +114,22 @@ def unit_stride(unit: TrainingUnit) -> int:
 def matte(crop: np.ndarray, background: np.ndarray, centre: Tuple[float, float]) -> np.ndarray:
     """The ball's alpha in `crop` (S, S, 3 float in [0, 1]): its largest colour difference from
     `background` mapped from ``MATTE_LOW``..``MATTE_HIGH`` to 0..1, kept within ``DISC_PX`` of the
-    ball's `centre`."""
+    ball's `centre`, and to the one connected blob (alpha above a half) nearest that centre: the
+    speckle that compression noise leaves around it, and a second object in the disc, go."""
     difference = np.abs(crop - background).max(axis=2)
     alpha = np.clip((difference - MATTE_LOW) / (MATTE_HIGH - MATTE_LOW), 0.0, 1.0)
     size = crop.shape[0]
     ys, xs = np.mgrid[0:size, 0:size].astype(np.float32) + 0.5
     distance = np.hypot(xs - centre[0], ys - centre[1])
     inner, outer = DISC_PX
-    return (alpha * np.clip((outer - distance) / (outer - inner), 0.0, 1.0)).astype(np.float32)
+    alpha = (alpha * np.clip((outer - distance) / (outer - inner), 0.0, 1.0)).astype(np.float32)
+    count, labels = cv2.connectedComponents((alpha > 0.5).astype(np.uint8), connectivity=8)
+    if count <= 1:
+        return np.zeros_like(alpha)
+    nearest = min(range(1, count), key=lambda label: float(distance[labels == label].min()))
+    # The blob, grown by one pixel so its soft edge (alpha up to a half) stays.
+    keep = cv2.dilate((labels == nearest).astype(np.uint8), np.ones((3, 3), np.uint8)).astype(np.float32)
+    return alpha * keep
 
 
 def patch(image: np.ndarray, column: int, row: int, radius: int = CROP_RADIUS) -> Optional[np.ndarray]:
