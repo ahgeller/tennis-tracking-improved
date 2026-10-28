@@ -21,7 +21,7 @@ from ball_in_play_selector import PackedMask, RawDetection
 from .court.court_geometry import court_keypoints_key
 from .court.court_scene import PlayerBoxes
 from .engines.ball_detectors import FrameInput
-from .engines.player_detector import PlayerPending
+from .engines.player_detector import PlayerPending, interpolate_player_boxes
 from .frame_window import FrameWindow
 from .motion import (
     BackgroundModel, DetectorInputRequest, MotionMasks, PreprocessResult, build_court_side_protect_mask,
@@ -215,6 +215,7 @@ class _Pass1Collector:
         self.result = Pass1Result(cached_frames=self._frame_cache.frames if self._frame_cache is not None else None)
         self._progress_frame, self._progress_elapsed = 0, 0.0   # where the last progress line was
         self._player_pending: Deque[PlayerPending] = collections.deque()   # launched, not yet finished
+        self._players_tracked: List[bool] = []    # per committed frame: did the player tracker run on it
 
     # -- per-frame steps -------------------------------------------------------
 
@@ -340,7 +341,9 @@ class _Pass1Collector:
             out.rois[ghost_frame] = kept if kept else None
         out.rois.append(record.rois)
         out.ghost_rois.append([])
+        # A frame the player tracker skips (cfg.player_detect_interval) is filled after the loop.
         out.player_boxes.append(self.player_detector.player_boxes_by_slot())
+        self._players_tracked.append(self.player_detector.tracks_frame(record.frame_index))
         out.court_keypoints.append(record.court_keypoints)
         if self.detector_input_writer is not None:
             # Stream the detector input straight to its writer rather than keep it.
@@ -448,6 +451,8 @@ class _Pass1Collector:
         if pending is not None:
             self._finish_pending(pending)
         self._finish_players(frame_index)
+        if not all(self._players_tracked):
+            self.result.player_boxes = interpolate_player_boxes(self.result.player_boxes, self._players_tracked)
         return self.result
 
 
