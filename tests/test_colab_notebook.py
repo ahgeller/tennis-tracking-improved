@@ -1,87 +1,89 @@
-"""The Colab notebook stages every repository module the trainer imports.
+"""The Colab notebooks stage every repository module the trainer imports, and the older notebook's
+settings.
 
-train_gridtracknet.py imports a handful of finetune.* and tennis_tracker.* modules (some inside
-functions); the notebook's staging cell lists the files it needs as REQUIRED, by their path in the
-repository (``finetune/...`` at the top, the tracker's packages under ``system/``) (``finetune.colab_zip.staged_files``
-reads it; ``ft.py colab-zip`` packs those files). This walks the trainer's internal import closure
-from the source and checks the two agree, so a new import in the trainer fails here instead of
-with ModuleNotFoundError on Colab. The settings cell is checked for the trainer flags the notebook
-must pass: it runs both the held-out selection run and the ``--all-clips`` run that follows it."""
+``ft.py colab-zip`` derives the code it packs from the code (``finetune.colab_zip.code_files``:
+the import closure of the trainer and the pseudo-label tool, function-level imports included)
+and writes the list to ``code/code_manifest.json``, which both notebooks check before running.
+These tests keep that derivation honest: the walker is checked on a small tree of its own, and
+the staged files alone, copied apart from the repository as Colab has them, must import the
+trainer and pass its self-test, so a module the walker missed fails here instead of with
+ModuleNotFoundError on Colab. The settings cell of ``GridTrackNet_FineTune_Colab.ipynb`` is
+checked for the trainer flags it must pass; ``test_optimization_notebook.py`` runs the new one."""
 import ast
 import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
-from typing import Iterator, Set
 
-from finetune import REPOSITORY, SYSTEM
-from finetune.colab_zip import NOTEBOOK, staged_files
+import pytest
 
-PACKAGES = ("finetune", "tennis_tracker", "ball_in_play_selector")
-TRAINER = "finetune.training.train_gridtracknet"
+from finetune import REPOSITORY
+from finetune.colab_zip import NOTEBOOK, OPTIMIZATION_NOTEBOOK, code_files, import_closure, staged_files
 
 
-def package_root(name: str) -> Path:
-    """The folder a module's top-level package sits in: the repository for finetune, system/ for the
-    tracker's packages."""
-    return REPOSITORY if name.split(".")[0] == "finetune" else SYSTEM
+def write(root: Path, name: str, text: str = "") -> None:
+    (root / name).parent.mkdir(parents=True, exist_ok=True)
+    (root / name).write_text(text, encoding="utf-8")
 
 
-def module_path(name: str) -> Path:
-    root = package_root(name)
-    path = root / (name.replace(".", "/") + ".py")
-    return path if path.is_file() else root / name.replace(".", "/") / "__init__.py"
+def test_the_walker_follows_every_kind_of_import_and_stops_at_the_repository(tmp_path):
+    write(tmp_path, "finetune/__init__.py")
+    write(tmp_path, "finetune/training/__init__.py")
+    write(tmp_path, "finetune/training/trainer.py",
+          "import os\nfrom finetune.training import helper\nfrom . import sibling\n"
+          "def later():\n    from tennis_tracker.engines.box import Box\n")
+    write(tmp_path, "finetune/training/helper.py", "import numpy\n")
+    write(tmp_path, "finetune/training/sibling.py", "from ..data.io import read\n")
+    write(tmp_path, "finetune/data/__init__.py")
+    write(tmp_path, "finetune/data/io.py")
+    write(tmp_path, "finetune/data/unused.py")
+    write(tmp_path, "system/tennis_tracker/__init__.py")
+    write(tmp_path, "system/tennis_tracker/engines/__init__.py", "from .box import Box\n")
+    write(tmp_path, "system/tennis_tracker/engines/box.py", "from tennis_tracker import paths\n")
+    write(tmp_path, "system/tennis_tracker/paths.py")
+    assert code_files(["finetune.training.trainer"], tmp_path) == [
+        "finetune/__init__.py", "finetune/data/__init__.py", "finetune/data/io.py", "finetune/training/__init__.py",
+        "finetune/training/helper.py", "finetune/training/sibling.py", "finetune/training/trainer.py",
+        "system/tennis_tracker/__init__.py", "system/tennis_tracker/engines/__init__.py",
+        "system/tennis_tracker/engines/box.py", "system/tennis_tracker/paths.py"]
+    write(tmp_path, "finetune/training/helper.py", "from finetune.training import gone_module\nimport finetune.nowhere\n")
+    with pytest.raises(ValueError, match="no module file for finetune.nowhere"):
+        import_closure(["finetune.training.trainer"], tmp_path)
 
 
-def module_name(path: Path) -> str:
-    """The dotted name of a module file under the repository (``system/tennis_tracker/config.py`` ->
-    ``tennis_tracker.config``; a package's ``__init__.py`` is the package)."""
-    parts = path.relative_to(SYSTEM if path.is_relative_to(SYSTEM) else REPOSITORY).with_suffix("").parts
-    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
-
-
-def internal_imports(path: Path) -> Iterator[str]:
-    """Every finetune.* / tennis_tracker.* module `path` imports, at module level or inside a
-    function, relative imports (``from .config import Config``) resolved against `path`."""
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.split(".")[0] in PACKAGES:
-                    yield alias.name
-        elif isinstance(node, ast.ImportFrom):
-            if node.level:                       # relative: the package `path` sits in, `level - 1` levels up
-                package = module_name(path.parent / "__init__.py").split(".")
-                base = ".".join(package[:len(package) - (node.level - 1)])
-                module = f"{base}.{node.module}" if node.module else base
-            else:
-                module = node.module or ""
-            if not module or module.split(".")[0] not in PACKAGES:
-                continue
-            yield module
-            for alias in node.names:            # `from finetune import refine` names a module too
-                if (package_root(module) / module.replace(".", "/") / f"{alias.name}.py").is_file():
-                    yield f"{module}.{alias.name}"
-
-
-def import_closure(module: str) -> Set[str]:
-    seen: Set[str] = set()
-    pending = [module]
-    while pending:
-        name = pending.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        pending.extend(internal_imports(module_path(name)))
-    for name in list(seen):                      # importing a submodule imports every package above it
-        parts = name.split(".")
-        seen.update(".".join(parts[:depth]) for depth in range(1, len(parts)))
-    return seen
-
-
-def test_the_notebook_stages_the_trainers_whole_import_closure():
-    needed = {module_path(name).relative_to(REPOSITORY).as_posix() for name in import_closure(TRAINER)}
+def test_the_staged_code_alone_imports_and_self_tests_the_trainer(tmp_path):
+    """The Colab situation: only the staged files, laid out as the zip lays them, no repository on
+    the path. The trainer's self-test runs and the pseudo-label tool and every architecture's
+    module import; the roots and the new training modules are in the list."""
     staged = staged_files()
-    assert set(staged) == needed, f"missing from the notebook: {sorted(needed - set(staged))}; " \
-                                  f"staged but not imported: {sorted(set(staged) - needed)}"
-    assert all((REPOSITORY / name).is_file() for name in staged)
+    assert {"finetune/training/train_gridtracknet.py", "finetune/training/distill.py", "finetune/training/copy_paste.py",
+            "finetune/training/pseudo_labels.py", "system/tennis_tracker/ball_models.py"} <= set(staged)
+    for name in staged:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPOSITORY / name, tmp_path / name)
+    script = ("import sys; sys.path.insert(0, '.'); import finetune\n"
+              "import finetune.training.pseudo_labels\n"
+              "from tennis_tracker.ball_models import ARCHITECTURES, model_class\n"
+              "for arch in ARCHITECTURES: model_class(arch)\n"
+              "assert all(not m.__file__.startswith(sys.argv[1]) for m in list(sys.modules.values()) "
+              "if getattr(m, '__file__', None) and m.__name__.split('.')[0] in ('finetune', 'tennis_tracker'))\n"
+              "from finetune.training.train_gridtracknet import main\n"
+              "raise SystemExit(main(['--self-test']))\n")
+    result = subprocess.run([sys.executable, "-I", "-c", script, str(REPOSITORY)], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "train_gridtracknet self-test passed" in result.stdout
+
+
+@pytest.mark.parametrize("notebook", [NOTEBOOK, OPTIMIZATION_NOTEBOOK])
+def test_the_notebooks_check_the_code_against_the_zips_manifest_not_a_list_of_their_own(notebook):
+    cells = ["".join(cell["source"]) for cell in json.loads(notebook.read_text(encoding="utf-8"))["cells"]
+             if cell["cell_type"] == "code"]
+    staging = [source for source in cells if "REQUIRED = " in source]
+    assert len(staging) == 1
+    assert "REQUIRED = json.loads((CODE / 'code_manifest.json').read_text(encoding='utf-8'))" in staging[0]
+    assert "REQUIRED = [" not in staging[0]
 
 
 def test_the_notebook_runs_the_trainer_as_a_module_from_the_staged_code():

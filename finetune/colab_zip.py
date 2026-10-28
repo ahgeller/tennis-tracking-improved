@@ -1,6 +1,6 @@
-"""The one zip the Colab notebook unpacks: ``python finetune/ft.py colab-zip``.
+"""The one zip the Colab notebooks unpack: ``python finetune/ft.py colab-zip``.
 
-``GridTrackNet_FineTune_Colab.ipynb`` runs the trainer on Google Drive, where everything it reads
+``Optimization_Train_Colab.ipynb`` (and the older ``GridTrackNet_FineTune_Colab.ipynb``) run the trainer on Google Drive, where everything it reads
 or writes sits in the one folder ``MyDrive/tennis_finetune/`` (the zips, and ``runs/<TAG>/`` for
 the outputs). It unpacks a single ``tennis_finetune_colab.zip`` whose entries all sit under
 ``tennis_finetune/``:
@@ -8,8 +8,10 @@ the outputs). It unpacks a single ``tennis_finetune_colab.zip`` whose entries al
     tennis_finetune/videos/<every video in the workspace>
     tennis_finetune/labels/<every file in the workspace labels folder>
     tennis_finetune/clips.csv, review_status.json, holdouts.json, exclude.txt
-    tennis_finetune/models/ball_detector.pt                  (the tracker's weights: the start)
-    tennis_finetune/code/<the trainer's import closure>      (the notebook's REQUIRED list)
+    tennis_finetune/models/ball_detector.pt                  (the tracker's weights: the start and the teacher)
+    tennis_finetune/pseudo/videos/, pseudo/labels/*_pseudo.csv  (when the workspace has pseudo-labels)
+    tennis_finetune/code/<the trainer's import closure>      (``code_files``)
+    tennis_finetune/code/code_manifest.json                  (that list, which the notebooks check)
 
 ``code/`` is laid out as the repository is: ``finetune/`` at its top and the tracker's modules under
 ``system/``, which ``finetune/__init__.py`` puts on ``sys.path`` there as it does here.
@@ -23,10 +25,14 @@ present: without them the trainer on Colab treats every clip as untrusted and tr
 Entries are stored, not deflated: the videos are already compressed, and deflating 900 MB of
 them costs minutes for nothing.
 
-``staged_files`` reads the REQUIRED list out of the notebook, so the zip and
-``tests/test_colab_notebook.py`` (which checks that list against the trainer's imports) agree
-on what code goes in. Like ``ft.py``, this imports only the standard library and
-``finetune.data``, so it loads under any interpreter.
+The code is derived from the code, not listed by hand: ``code_files`` walks the import closure
+of ``CODE_ROOTS`` (the trainer and the pseudo-label tool) through their source with ``ast``, every
+``finetune.*``, ``tennis_tracker.*`` and ``ball_in_play_selector.*`` import at module level or
+inside a function, relative ones resolved, and the packages above every module. A network a new
+``ball_models`` architecture adds, or a new import in the trainer, goes in without an edit
+here; ``tests/test_colab_notebook.py`` imports the trainer from the staged files alone, as Colab
+does. Like ``ft.py``, this imports only the standard library and ``finetune.data``, so it loads
+under any interpreter.
 """
 from __future__ import annotations
 
@@ -37,7 +43,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterable, Iterator, List, Set
 
 from finetune import REPOSITORY
 from finetune.data import workspace as ws
@@ -46,6 +52,12 @@ from finetune.data.workspace import videos_in
 from tennis_tracker.paths import BALL_WEIGHTS
 
 NOTEBOOK = REPOSITORY / "finetune" / "GridTrackNet_FineTune_Colab.ipynb"
+OPTIMIZATION_NOTEBOOK = REPOSITORY / "finetune" / "Optimization_Train_Colab.ipynb"
+CODE_ROOTS = ("finetune.training.train_gridtracknet", "finetune.training.pseudo_labels")
+PACKAGES = ("finetune", "tennis_tracker", "ball_in_play_selector")     # the repository's own top-level packages
+CODE_MANIFEST = "code_manifest.json"                   # under code/: the staged files, which the notebooks check
+PSEUDO = "pseudo"                                      # the workspace's pseudo-label folder (pseudo_labels.PSEUDO_DIR)
+PSEUDO_SUFFIX = "_pseudo.csv"
 TOP = "tennis_finetune"                                 # the folder every entry sits under
 DEFAULT_OUT = REPOSITORY / "output" / "tennis_finetune_colab.zip"
 DEFAULT_CODE_OUT = REPOSITORY / "output" / "tennis_finetune_code.zip"      # --code-only: the code and records alone
@@ -53,18 +65,83 @@ REQUIRED_RECORDS = (ws.MANIFEST_NAME, ws.REVIEW_STATUS_NAME)      # missing: the
 OPTIONAL_RECORDS = (ws.HOLDOUTS_NAME, ws.EXCLUDE_NAME)
 
 
+# --------------------------------------------------------------------------- the code's import closure
+
+def package_root(name: str, repository: Path = REPOSITORY) -> Path:
+    """The folder a module's top-level package sits in: the repository for finetune, system/ for the
+    tracker's packages."""
+    return repository if name.split(".")[0] == "finetune" else repository / "system"
+
+
+def module_path(name: str, repository: Path = REPOSITORY) -> Path:
+    """The file of the module `name`: ``<root>/a/b.py``, or ``<root>/a/b/__init__.py`` for a package.
+    One that is neither is a ValueError naming it (an import of a module that does not exist)."""
+    root = package_root(name, repository)
+    for path in (root / (name.replace(".", "/") + ".py"), root / name.replace(".", "/") / "__init__.py"):
+        if path.is_file():
+            return path
+    raise ValueError(f"no module file for {name} under {root}")
+
+
+def module_name(path: Path, repository: Path = REPOSITORY) -> str:
+    """The dotted name of a module file under the repository (``system/tennis_tracker/config.py`` ->
+    ``tennis_tracker.config``; a package's ``__init__.py`` is the package)."""
+    system = repository / "system"
+    parts = path.relative_to(system if path.is_relative_to(system) else repository).with_suffix("").parts
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def internal_imports(path: Path, repository: Path = REPOSITORY) -> Iterator[str]:
+    """Every module of ``PACKAGES`` that `path` imports, at module level or inside a function,
+    relative imports (``from .config import Config``) resolved against `path`, and the submodule
+    a ``from package import module`` names."""
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in PACKAGES:
+                    yield alias.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:                       # relative: the package `path` sits in, `level - 1` levels up
+                package = module_name(path.parent / "__init__.py", repository).split(".")
+                base = ".".join(package[:len(package) - (node.level - 1)])
+                module = f"{base}.{node.module}" if node.module else base
+            else:
+                module = node.module or ""
+            if not module or module.split(".")[0] not in PACKAGES:
+                continue
+            yield module
+            for alias in node.names:
+                if (package_root(module, repository) / module.replace(".", "/") / f"{alias.name}.py").is_file():
+                    yield f"{module}.{alias.name}"
+
+
+def import_closure(roots: Iterable[str], repository: Path = REPOSITORY) -> Set[str]:
+    """Every module `roots` import, transitively, with every package above each one (importing a
+    submodule runs its packages' ``__init__``)."""
+    seen: Set[str] = set()
+    pending = list(roots)
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        pending.extend(internal_imports(module_path(name, repository), repository))
+    for name in list(seen):
+        parts = name.split(".")
+        seen.update(".".join(parts[:depth]) for depth in range(1, len(parts)))
+    return seen
+
+
+def code_files(roots: Iterable[str] = CODE_ROOTS, repository: Path = REPOSITORY) -> List[str]:
+    """The files of `roots`' import closure, relative to the repository root (``system/...`` for
+    the tracker's) with forward slashes, sorted: what ``code/`` holds."""
+    return sorted(module_path(name, repository).relative_to(repository).as_posix()
+                  for name in import_closure(roots, repository))
+
+
 def staged_files() -> List[str]:
-    """The REQUIRED list in the notebook's staging cell: the repository files, relative to the
-    repository root (``system/...`` for the tracker's) with forward slashes, that the trainer imports on Colab."""
-    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
-    for cell in notebook["cells"]:
-        source = "".join(cell["source"])
-        if cell["cell_type"] == "code" and "REQUIRED = [" in source:
-            tree = ast.parse(source.replace("!pip", "pass  # pip"))
-            for node in tree.body:
-                if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "REQUIRED":
-                    return ast.literal_eval(node.value)
-    raise ValueError(f"{NOTEBOOK.name} has no staging cell with a REQUIRED list")
+    """The code the zip stages: ``code_files`` of ``CODE_ROOTS``."""
+    return code_files()
 
 
 class ColabZipError(Exception):
@@ -73,9 +150,11 @@ class ColabZipError(Exception):
 
 @dataclass
 class ZipPlan:
-    """Which files go in, by section: the entry name under ``TOP`` -> the file on disk."""
+    """Which files go in, by section: the entry name under ``TOP`` -> the file on disk; and the
+    files written from memory (``code_manifest.json``)."""
     sections: Dict[str, Dict[str, Path]] = field(default_factory=dict)
     skipped: List[str] = field(default_factory=list)        # optional records that were not there
+    generated: Dict[str, str] = field(default_factory=dict)
 
     def add(self, section: str, entry: str, path: Path) -> None:
         self.sections.setdefault(section, {})[f"{TOP}/{entry}"] = path
@@ -112,10 +191,19 @@ def plan_zip(code_only: bool = False) -> ZipPlan:
         if not layout.repo_weights.is_file():
             raise ColabZipError(f"{layout.repo_weights} is missing; the notebook starts from the tracker's weights")
         plan.add("models", f"models/{BALL_WEIGHTS.name}", layout.repo_weights)
-    for name in staged_files():
-        if not (REPOSITORY / name).is_file():
-            raise ColabZipError(f"{name} is in the notebook's REQUIRED list but not in the repository")
+        pseudo = layout.root / PSEUDO
+        for clip, video in (videos_in(pseudo / "videos") if (pseudo / "videos").is_dir() else {}).items():
+            labels = pseudo / "labels" / f"{clip}{PSEUDO_SUFFIX}"
+            if labels.is_file():              # an unlabelled pseudo video trains nothing: left out
+                plan.add("pseudo", f"{PSEUDO}/videos/{video.name}", video)
+                plan.add("pseudo", f"{PSEUDO}/labels/{labels.name}", labels)
+    try:
+        code = staged_files()
+    except ValueError as error:
+        raise ColabZipError(f"the trainer's code imports a module that is not in the repository: {error}") from error
+    for name in code:
         plan.add("code", f"code/{name}", REPOSITORY / name)
+    plan.generated[f"{TOP}/code/{CODE_MANIFEST}"] = json.dumps(code, indent=1)
     return plan
 
 
@@ -131,6 +219,9 @@ def write_zip(plan: ZipPlan, out: Path) -> int:
             for entry, path in plan.entries.items():
                 archive.write(path, entry)
                 stored += path.stat().st_size
+            for entry, text in plan.generated.items():
+                archive.writestr(entry, text)
+                stored += len(text.encode("utf-8"))
         replace_file(temporary, out)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -147,7 +238,7 @@ def build_colab_zip(out: Path = DEFAULT_OUT, code_only: bool = False) -> Path:
     stored = write_zip(plan, out)
     for section, files in plan.sections.items():
         print(f"  {section:8s} {len(files):5d} files  {sum(p.stat().st_size for p in files.values()) / 2**20:8.1f} MB")
-    print(f"{out}: {len(plan.entries)} entries, {stored / 2**20:.1f} MB stored, {time.perf_counter() - started:.1f} s")
+    print(f"{out}: {len(plan.entries) + len(plan.generated)} entries, {stored / 2**20:.1f} MB stored, {time.perf_counter() - started:.1f} s")
     name = DEFAULT_CODE_OUT.name if code_only else DEFAULT_OUT.name
     print(f"next: upload it to MyDrive/tennis_finetune/ as {name} and run the notebook")
     return out
