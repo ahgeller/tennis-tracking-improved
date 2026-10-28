@@ -21,7 +21,23 @@ import sys
 import time
 from pathlib import Path
 
-LOCK = Path(__file__).resolve().parent.parent / ".gpu_bench_lock"
+def _main_checkout() -> Path:
+    """The main working tree of this repository, which every git worktree of it shares: a lock
+    beside this script would be one lock per worktree, and agents in different worktrees would
+    time their runs over each other. A checkout's ``.git`` is a directory; a worktree's is a file
+    naming ``<main>/.git/worktrees/<name>``."""
+    here = Path(__file__).resolve().parent.parent
+    marker = here / ".git"
+    if marker.is_file():
+        text = marker.read_text().strip()
+        if text.startswith("gitdir:"):
+            gitdir = Path(text.split(":", 1)[1].strip())
+            if gitdir.parent.name == "worktrees":
+                return gitdir.parent.parent.parent
+    return here
+
+
+LOCK = _main_checkout() / ".gpu_bench_lock"
 
 
 def acquire(stale_minutes: float, poll_seconds: float) -> None:
