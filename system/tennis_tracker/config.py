@@ -106,6 +106,9 @@ class Config:
     aux_detect_on_detect_frames: bool = True
     aux_force_interval: int = 6
     frame_reader_prefetch: int = 8
+    # Decode with NVDEC (PyNvVideoCodec) where it is installed and opens the clip, else OpenCV
+    # (tennis_tracker/video_decode.py). Pass 2 reads through it.
+    gpu_decode: bool = True
 
     # ROI-based motion - only compute motion/CC near ball
     roi_motion_enabled: bool = True

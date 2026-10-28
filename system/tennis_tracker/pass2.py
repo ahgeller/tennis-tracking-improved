@@ -23,13 +23,14 @@ from .motion import build_court_side_protect_mask
 from .render.motion_debug import draw_motion_masks, draw_selected_ball
 from .render.motion_trails import RawMotionTrails
 from .pass1 import Pass1Result
-from .court.court_drawing import draw_court_layer
+from .render.court_layer import CourtLayer
 from .render.rendering import (
     Canvas, MarkerSizer, SearchCentreSmoother, draw_hud, draw_motion_rois, draw_player_boxes, draw_raw_detections,
     draw_selected_result,
 )
 from .render.trails import DEBUG_TRACK_STYLE, LIGHT_TRACK_STYLE, BallTrail, CandidateTrackTrails, DisplayPathTrail
 from .run_context import CourtEvents, RunContext, Selection
+from .video_decode import Decoder, OpenCVDecoder, open_decoder
 from .video_io import ThreadedFrameReader, VideoWriter
 
 COLOR_ROI_THIN = (0, 255, 0)
@@ -41,40 +42,22 @@ def _open_writer(ctx: RunContext, path: str) -> VideoWriter:
     return VideoWriter(path, video.fps, video.width, video.height, ctx.cfg, encoder=ctx.encoder)
 
 
-def _open_capture(path) -> cv2.VideoCapture:
-    capture = cv2.VideoCapture(str(path))
-    if not capture.isOpened():
-        raise RuntimeError(f"Could not reopen the input video for pass 2: {path}")
-    return capture
+def _open_decoder(ctx: RunContext, cached: Sequence[np.ndarray]) -> Decoder:
+    """The clip reopened at the frame after the cached prefix, frame-exact: NVDEC seeks by its
+    frame index, OpenCV walks from an early seek to the cached pictures (``video_decode``).
 
-
-def _reopen_at(path, cached: Sequence[np.ndarray]) -> cv2.VideoCapture:
-    """The clip reopened with the frame after the cached prefix next to read: by a seek when its
-    picture proves it landed, else by decoding from the start and dropping the cached frames.
-
-    A seek is judged by what it decodes, not by ``CAP_PROP_POS_FRAMES``: OpenCV's FFmpeg backend
-    derives that position from the timestamp and the average frame rate, so it reports the frame
-    asked for while the picture is another one (a variable frame rate, dropped timestamps, an
-    MPEG-TS clip), and every overlay past the cache would then sit on the wrong frame.  The seek
-    goes to the last cached frame, which is read back and must equal the cache's copy; a seek
-    that lands decodes bit-identically on every container tried (mp4, mkv, TS, 59.94 fps).
+    OpenCV's own seek lands on another picture on a variable-frame-rate clip (pomona's seek to
+    frame 689 decodes 683), which pass 2 used to answer by decoding the whole clip again.
     """
-    first_frame = len(cached)
-    capture = _open_capture(path)
-    if first_frame == 0:
-        return capture
-    capture.set(cv2.CAP_PROP_POS_FRAMES, first_frame - 1)
-    ok, frame = capture.read()
-    if ok and frame is not None and np.array_equal(frame, cached[-1]):
-        return capture
-    print(f"[pass 2] The container's seek to frame {first_frame} decoded a picture that does not match "
-          f"the cache; decoding from the start and skipping the {first_frame} cached frames")
-    capture.release()
-    capture = _open_capture(path)
-    for _ in range(first_frame):
-        if not capture.grab():
-            break
-    return capture
+    try:
+        decoder = open_decoder(ctx.video.path, start_frame=len(cached), host=True, reference=cached,
+                               prefer_nvdec=ctx.cfg.gpu_decode)
+    except RuntimeError as error:
+        raise RuntimeError(f"Could not reopen the input video for pass 2: {ctx.video.path}") from error
+    if isinstance(decoder, OpenCVDecoder) and decoder.synced_by == "seek-missed":
+        print(f"[pass 2] The cached frames were not found near the seek to frame {len(cached)}; "
+              f"decoding from the start and skipping the {len(cached)} cached frames")
+    return decoder
 
 
 class _FrameSource:
@@ -82,27 +65,32 @@ class _FrameSource:
     that starts where the cache ends.
 
     The decode runs on a reader thread ahead of the renderer, as in pass 1, so a frame's
-    decoding overlaps the drawing of the one before it.  ``read`` says whether the frame it hands
-    out is the renderer's to draw on: a decoded frame is, a cached one is not.
+    decoding overlaps the drawing of the one before it.  Pass 2 is the cache's last reader: every
+    frame ``read`` hands out is the renderer's to draw on, and a cached frame leaves the cache as
+    it is handed out, so its memory is freed once it is written.
     """
 
     def __init__(self, ctx: RunContext, cached: Optional[List[np.ndarray]], frame_count: int) -> None:
-        self._cached: List[np.ndarray] = cached or []
+        self._cached: List[Optional[np.ndarray]] = cached if cached is not None else []
+        self._n_cached = len(self._cached)
         self._reader: Optional[ThreadedFrameReader] = None
-        n_cached = len(self._cached)
-        if cached is not None and n_cached >= frame_count:
-            print(f"[pass 2] Using RAM frame cache ({n_cached} frames)")
+        if cached is not None and self._n_cached >= frame_count:
+            print(f"[pass 2] Using RAM frame cache ({self._n_cached} frames)")
             return
-        if n_cached:
-            print(f"[pass 2] Using RAM frame cache ({n_cached} of {frame_count} frames), decoding the rest")
-        capture = _reopen_at(ctx.video.path, self._cached)
-        self._reader = ThreadedFrameReader(capture, prefetch=max(2, ctx.cfg.frame_reader_prefetch))
+        decoder = _open_decoder(ctx, cached or [])
+        if self._n_cached:
+            print(f"[pass 2] Using RAM frame cache ({self._n_cached} of {frame_count} frames), "
+                  f"decoding the rest ({decoder.backend})")
+        else:
+            print(f"[pass 2] Decoding the clip ({decoder.backend})")
+        self._reader = ThreadedFrameReader(decoder, prefetch=max(2, ctx.cfg.frame_reader_prefetch))
 
-    def read(self, frame_index: int) -> Tuple[Optional[np.ndarray], bool]:
-        """Frame ``frame_index`` (None once the decode runs dry) and whether the renderer owns it."""
-        if frame_index < len(self._cached):
-            return self._cached[frame_index], False
-        return self._reader.read(), True
+    def read(self, frame_index: int) -> Optional[np.ndarray]:
+        """Frame ``frame_index``, the renderer's to draw on; None once the decode runs dry."""
+        if frame_index < self._n_cached:
+            frame, self._cached[frame_index] = self._cached[frame_index], None
+            return frame
+        return self._reader.read() if self._reader is not None else None
 
     def release(self) -> None:
         if self._reader is not None:
@@ -121,6 +109,11 @@ class _GroundModelCache:
         self.keypoints: Optional[List[float]] = None
         self._key: Optional[Tuple[int, ...]] = None     # court_keypoints_key of the model's keypoints
         self.model = None
+
+    @property
+    def key(self) -> Optional[Tuple[int, ...]]:
+        """What the current model was built from (``court_keypoints_key`` of its keypoints)."""
+        return self._key
 
     def update(self, court_kps: Optional[List[float]]):
         if court_kps and len(court_kps) >= MIN_KEYPOINT_VALUES:
@@ -181,6 +174,7 @@ class _FrameRenderer:
         self.cfg, self.video, self.timing = cfg, video, ctx.timing
         self.pass1, self.selection, self.events, self.writers = pass1, selection, events, writers
         self.ground_model = _GroundModelCache()
+        self.court_layer = CourtLayer(cfg, video.height, video.width, selection.court_polygon)
         self.protect_masks = _ProtectMaskCache(video.height, video.width)
         self.sizer = MarkerSizer(cfg)
         self.search_smoother = SearchCentreSmoother()
@@ -203,7 +197,7 @@ class _FrameRenderer:
                         frame.copy() if self.writers.track_debug is not None else None)
         model = self.ground_model.update(court_kps)
 
-        draw_court_layer(canvas.both, cfg, court_kps, model, selection.court_polygon)
+        self.court_layer.draw(canvas.both, court_kps, model, self.ground_model.key)
         if cfg.draw_players:
             draw_player_boxes(canvas.both, pass1.player_boxes[fi])
         # Rejected proposals and ROIs belong only in the track-debug view.  Candidate tracks go
@@ -304,11 +298,11 @@ def render_pass2(ctx: RunContext, pass1: Pass1Result, selection: Selection, even
     try:
         for fi in range(n):
             read_t0 = timing.start()
-            frame, owned = source.read(fi)
+            frame = source.read(fi)
             if frame is None:
                 break
             timing.add("pass2_read", read_t0)
-            renderer.render(fi, frame, owned=owned)
+            renderer.render(fi, frame, owned=True)
             rendered += 1
             if cfg.progress_every and (fi + 1) % cfg.progress_every == 0:
                 print(f"  [pass2 {fi+1}/{n}] rendering...")
