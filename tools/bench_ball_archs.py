@@ -187,6 +187,8 @@ def main() -> int:
     parser.add_argument("--archs", nargs="+", default=[name for name in ball_models.ARCHITECTURES if name != "gridtracknet"])
     parser.add_argument("--iterations", type=int, default=200)
     parser.add_argument("--repeats", type=int, default=7)
+    parser.add_argument("--unfused", action=argparse.BooleanOptionalAction, default=True,
+                        help="also time the trainable form exported without the RepVGG/BatchNorm fold")
     parser.add_argument("--video", type=Path, default=ROOT / "system" / "sample" / "pomona.mp4",
                         help="the clip whose frames fill the units (the checks compare outputs on real frames)")
     args = parser.parse_args()
@@ -218,6 +220,14 @@ def main() -> int:
         row["trt_max_abs_diff"] = check_engine(engine, (units.to(device),), (expected,), stream)
         row["trt_fp16_ms_per_call"] = round(time_ms(lambda: engine.run(stream), stream, args.iterations, args.repeats), 4)
         row["trt_fp16_ms_per_unit"] = round(row["trt_fp16_ms_per_call"] / UNITS_PER_CALL, 4)
+        if args.unfused and hasattr(trainable, "reparameterize"):
+            # The trainable form exported as it is: what TensorRT makes of the RepVGG branches
+            # and BatchNorm on its own, against the fold done before export.
+            unfused_path = args.out / f"{arch}_b{UNITS_PER_CALL}_unfused.onnx"
+            export_onnx(trainable, (units,), unfused_path, ["output"])
+            unfused = Engine(build_engine(unfused_path, unfused_path.with_suffix(".engine")))
+            row["trt_fp16_ms_per_call_unfused"] = round(time_ms(lambda: unfused.run(stream), stream, args.iterations,
+                                                                args.repeats), 4)
         if arch == streamnet.ARCH:
             row.update(stream_halves(deployed.cpu(), units, args, stream, device))
         results[arch] = row
