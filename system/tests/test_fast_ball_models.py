@@ -185,3 +185,17 @@ def test_wasb_fuses_branches_of_sizes_that_do_not_halve_evenly():
     assert 1.4e6 < sum(parameter.numel() for parameter in model.parameters()) < 1.6e6
     with pytest.raises(ValueError, match="multiples of 4"):
         model(torch.zeros(1, INPUT_CHANNELS, 30, 64))
+
+
+@pytest.mark.parametrize("arch", FAST)
+def test_a_fresh_network_answers_the_heat_prior_with_its_real_features(arch):
+    """``repvgg.reset_head`` gives the head CenterNet's small weights, so the prior holds on a
+    fresh network's own features too, not only with the head zeroed: Kaiming weights let WASB-5f's
+    summed branches push the mean heat to 0.30 (measured 2026-10-27)."""
+    torch.manual_seed(0)
+    model = model_class(arch)().train()
+    with torch.no_grad():
+        output = model(torch.rand(2, INPUT_CHANNELS, *SMALL))
+    heat = output[:, 0::3]
+    assert float(heat.mean()) == pytest.approx(HEAT_PRIOR, abs=0.005) and float(heat.std()) < 0.01
+    assert float(model.head.weight.detach().std()) == pytest.approx(repvgg.HEAD_STD, rel=0.2)

@@ -43,7 +43,6 @@ convolutions; the ``.pt`` record is the trainable form (``heatmapnet.save_model`
 """
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
@@ -52,7 +51,7 @@ from torch import nn
 
 from . import repvgg
 from .gridtracknet import FRAMES_PER_UNIT, HEIGHT, INPUT_CHANNELS, WIDTH
-from .heatmapnet import HEAT_CHANNELS, HEAT_PRIOR, read_record
+from .heatmapnet import read_record
 
 ARCH = "stream_s4"
 STRIDE = 4
@@ -107,16 +106,13 @@ class StreamNet(nn.Module):
 
     def reset_parameters(self) -> None:
         """Kaiming-normal convolutions (fan in, the norm ``loop.hold_conv_scale`` holds) with zero
-        bias, and the head's heat channels biased to ``HEAT_PRIOR``, as HeatmapNet."""
+        bias, and the head as ``repvgg.reset_head`` leaves it (the heat prior, CenterNet's small weights)."""
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-        bias = self.head.bias
-        assert bias is not None
-        with torch.no_grad():
-            bias[list(HEAT_CHANNELS)] = -math.log((1 - HEAT_PRIOR) / HEAT_PRIOR)
+        repvgg.reset_head(self.head)
 
     def encode_frame(self, frame: torch.Tensor, previous: torch.Tensor) -> PairFeatures:
         """The features of the step from `previous` to `frame` (``(N, 3, H, W)`` RGB in [0, 1],

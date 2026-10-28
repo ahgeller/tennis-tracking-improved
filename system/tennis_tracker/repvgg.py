@@ -19,10 +19,13 @@ at its Kaiming norm, which keeps FP16 training finite (the ledger's heat1 and he
 from __future__ import annotations
 
 import copy
+import math
 from typing import Optional, Tuple
 
 import torch
 from torch import nn
+
+from .heatmapnet import HEAT_CHANNELS, HEAT_PRIOR
 
 
 def conv_bn(in_channels: int, out_channels: int, kernel: int, stride: int = 1) -> nn.Sequential:
@@ -47,6 +50,26 @@ def _affine(norm: nn.BatchNorm2d) -> Tuple[torch.Tensor, torch.Tensor]:
         raise ValueError("a BatchNorm without running statistics cannot be folded")
     scale = norm.weight.double() / torch.sqrt(variance.double() + norm.eps)
     return scale, norm.bias.double() - mean.double() * scale
+
+
+HEAD_STD = 0.001       # the output head's initial weight spread, CenterNet's (fill_fc_weights)
+
+
+def reset_head(head: nn.Conv2d) -> None:
+    """Initialise a ball detector's 15-channel output convolution as CenterNet initialises its
+    heads (Zhou et al. 2019, github.com/xingyizhou/CenterNet, ``fill_fc_weights``: weights from
+    N(0, 0.001), zero bias) with the heat channels' bias at HeatmapNet's ``HEAT_PRIOR``, so a fresh
+    network answers the prior everywhere whatever the size of the features before the head.
+    Kaiming weights there let the logits spread with the features: measured on a fresh network,
+    a heat-logit standard deviation of 4.6 for WASB-5f (summed HRNet branches; mean heat 0.30
+    against the prior's 0.10) and 1.9 for StreamNet, and WASB-5f's first loss was 12000 against
+    StreamNet's 2500."""
+    bias = head.bias
+    assert bias is not None
+    with torch.no_grad():
+        nn.init.normal_(head.weight, std=HEAD_STD)
+        bias.zero_()
+        bias[list(HEAT_CHANNELS)] = -math.log((1 - HEAT_PRIOR) / HEAT_PRIOR)
 
 
 def folded(conv: nn.Conv2d, norm: nn.BatchNorm2d) -> Tuple[torch.Tensor, torch.Tensor]:

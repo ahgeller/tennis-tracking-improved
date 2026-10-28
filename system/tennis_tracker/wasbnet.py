@@ -22,7 +22,6 @@ Every convolution-BatchNorm pair is an ``nn.Sequential`` (``repvgg.conv_bn``), s
 """
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import List, Sequence
 
@@ -31,7 +30,7 @@ from torch import nn
 
 from . import repvgg
 from .gridtracknet import FRAMES_PER_UNIT, HEIGHT, INPUT_CHANNELS, WIDTH
-from .heatmapnet import HEAT_CHANNELS, HEAT_PRIOR, read_record
+from .heatmapnet import read_record
 
 ARCH = "wasb_5f"
 STRIDE = 4
@@ -151,16 +150,13 @@ class WasbNet(nn.Module):
 
     def reset_parameters(self) -> None:
         """Kaiming-normal convolutions (fan in, the norm ``loop.hold_conv_scale`` holds; upstream
-        uses fan out) with zero bias and the heat channels at ``HEAT_PRIOR``."""
+        uses fan out) with zero bias and the head as ``repvgg.reset_head`` leaves it."""
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-        bias = self.head.bias
-        assert bias is not None
-        with torch.no_grad():
-            bias[list(HEAT_CHANNELS)] = -math.log((1 - HEAT_PRIOR) / HEAT_PRIOR)
+        repvgg.reset_head(self.head)
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         if value.shape[-2] % STRIDE or value.shape[-1] % STRIDE:

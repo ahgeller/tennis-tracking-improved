@@ -20,7 +20,6 @@ HeatmapNet's (``heatmapnet.save_model``/``read_record``) and holds the trainable
 """
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Tuple
 
@@ -29,7 +28,7 @@ from torch import nn
 
 from . import repvgg
 from .gridtracknet import FRAMES_PER_UNIT, HEIGHT, INPUT_CHANNELS, WIDTH
-from .heatmapnet import HEAT_CHANNELS, HEAT_PRIOR, read_record
+from .heatmapnet import read_record
 
 ARCH = "heatmap_lite"
 STRIDE = 4
@@ -70,17 +69,14 @@ class HeatmapLite(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        """Kaiming-normal convolutions with zero bias and the heat channels at ``HEAT_PRIOR``, as
-        HeatmapNet initialises."""
+        """Kaiming-normal convolutions with zero bias and the head as ``repvgg.reset_head`` leaves it
+        (the heat prior, CenterNet's small weights)."""
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-        bias = self.head.bias
-        assert bias is not None
-        with torch.no_grad():
-            bias[list(HEAT_CHANNELS)] = -math.log((1 - HEAT_PRIOR) / HEAT_PRIOR)
+        repvgg.reset_head(self.head)
 
     def encode(self, value: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """The skips at strides 4 and 8 and the bottleneck at 16. Sides that are not multiples of
