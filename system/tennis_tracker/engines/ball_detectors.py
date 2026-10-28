@@ -67,11 +67,52 @@ class FrameReader:
         raise NotImplementedError
 
 
-def open_frames(video_path: Path) -> Any:
-    """A ``FrameReader`` over `video_path`; one that cannot be opened is a RuntimeError."""
+class PinnedCapture(FrameReader):
+    """``cv2.VideoCapture`` decoding each frame straight into one of a few page-locked host buffers,
+    which go up to `device` on the current stream without a wait: no pageable frame is copied into
+    pinned memory first (1.2 ms a 1080p frame read and uploaded, against 3.6 ms through
+    ``Tensor.pin_memory``; ``audit/records/opt_ball_prepass.md``). A buffer is decoded into again
+    only once the upload that read it has finished. A frame cv2 could not decode in place (another
+    size) is returned as its host array."""
+
+    def __init__(self, capture: Any, device: torch.device, slots: int = 4):
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._capture, self._device = capture, device
+        self._buffers = [torch.empty((height, width, 3), dtype=torch.uint8, pin_memory=True) for _ in range(slots)]
+        self._uploaded: List[Optional[torch.cuda.Event]] = [None] * slots
+        self._next = 0
+
+    def read(self) -> Tuple[bool, Optional[FrameInput]]:
+        slot = self._next
+        self._next = (slot + 1) % len(self._buffers)
+        uploaded = self._uploaded[slot]
+        if uploaded is not None:
+            uploaded.synchronize()
+        host = self._buffers[slot]
+        ok, frame = self._capture.read(host.numpy())
+        if not ok or frame is None:
+            return False, None
+        if frame.ctypes.data != host.data_ptr() or tuple(frame.shape) != tuple(host.shape):
+            return True, frame
+        on_device = host.to(self._device, non_blocking=True)
+        event = torch.cuda.Event()
+        event.record()
+        self._uploaded[slot] = event
+        return True, on_device
+
+    def release(self) -> None:
+        self._capture.release()
+
+
+def open_frames(video_path: Path, device: Optional[torch.device] = None) -> Any:
+    """A ``FrameReader`` over `video_path`, decoding into pinned memory and uploading to `device`
+    when that is a CUDA device; one that cannot be opened is a RuntimeError."""
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise RuntimeError(f"Could not open input video for GridTrackNet: {video_path}")
+    if device is not None and device.type == "cuda" and capture.get(cv2.CAP_PROP_FRAME_WIDTH) > 0:
+        return PinnedCapture(capture, device)
     return capture
 
 
@@ -290,8 +331,8 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                         self._ready.wait(timeout=0.5)
                 self._raise_if_failed()
             return
-        capture = open_frames(video_path)
-        args = (capture, cached, source_stride, width, height, int(total))
+        capture = open_frames(video_path, self.device)
+        args =(capture, cached, source_stride, width, height, int(total))
         if background:
             self._worker = threading.Thread(target=self._prepass, args=args, daemon=True, name="gridtracknet-prepass")
             self._worker.start()

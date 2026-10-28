@@ -344,3 +344,32 @@ def test_a_prepass_process_failure_reaches_the_consumer():
     detector = _remote_detector(FakeRemote([[]] * 4, error=RuntimeError("the prepass process failed: boom")))
     with pytest.raises(RuntimeError, match="prepass failed"):
         detector.detect_clip(Path("clip.mp4"), 30.0, 1920, 1080, total=4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="decodes into pinned memory for a CUDA upload")
+def test_the_pinned_reader_gives_cv2s_frames_on_the_device(tmp_path):
+    """More frames than the reader has buffers, so every buffer is decoded into again after its
+    upload: each frame on the device is the one cv2 reads."""
+    path = tmp_path / "clip.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (96, 64))
+    rng = np.random.default_rng(3)
+    for _ in range(9):
+        writer.write(rng.integers(0, 256, (64, 96, 3), dtype=np.uint8))
+    writer.release()
+    device = torch.device("cuda")
+    reader = ball_detectors.open_frames(path, device)
+    assert isinstance(reader, ball_detectors.PinnedCapture)
+    expected = cv2.VideoCapture(str(path))
+    got = []
+    while True:
+        ok, frame = reader.read()
+        if not ok:
+            break
+        assert isinstance(frame, torch.Tensor) and frame.device.type == "cuda"
+        got.append(frame.clone())
+    reader.release()
+    for frame in got:
+        ok, host = expected.read()
+        assert ok and np.array_equal(frame.cpu().numpy(), host)
+    assert not expected.read()[0] and len(got) == 9
+    expected.release()
