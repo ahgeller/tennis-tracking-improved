@@ -30,11 +30,11 @@ class Config:
     # from one unit, the prepass as it was before.
     gridtracknet_window_step: int = 1
     # What runs the prepass's network: "tensorrt", an FP16 engine built from the weights on first
-    # use and cached in ball_engine_dir (engines/ball_trt.py; 0.6 ms a unit against 2.4 to 4.7 ms
-    # eager on the RTX 5080 laptop), or "torch", the FP16 PyTorch model. TensorRT falls back to
+    # use and cached in ball_engine_dir (engines/ball_trt.py; 1.2 to 1.6 ms a unit against 3.8 to 4.1 ms
+    # eager on the throttled RTX 5080 laptop), or "torch", the FP16 PyTorch model. TensorRT falls back to
     # torch, with a message, when it is not installed or cannot build the model.
     ball_prepass_runtime: str = "tensorrt"
-    ball_engine_batch: int = 8          # units per engine call (the batch sweep in audit/records/opt_ball_prepass.md)
+    ball_engine_batch: int = 4          # units per engine call (the batch sweep in audit/records/opt_ball_prepass.md)
     ball_engine_dir: str = str(MODELS / "engine_cache")
     # Run the background prepass in a child process (engines/ball_prepass_process.py) instead of a
     # worker thread, so it never contends with pass 1 for the interpreter lock.

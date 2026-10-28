@@ -3,8 +3,8 @@
 
 The model is exported to ONNX (opset 17, the TorchScript exporter) at a static batch of units with
 FP16 input and output, the dtypes the PyTorch prepass feeds and reads, and built with TensorRT's
-FP16 flag. On the RTX 5080 laptop HeatmapNet ran at 0.6 ms a unit this way against 2.4 to 4.7 ms
-eager (``audit/records/opt_ball_prepass.md`` has the batch sweep that chose the default batch).
+FP16 flag. On the RTX 5080 laptop HeatmapNet ran at 1.2 to 1.6 ms a unit this way against 3.8 to 4.1 ms
+FP16 eager, thermally throttled (``audit/records/opt_ball_prepass.md`` has the batch sweep that chose the default batch).
 
 An engine is only valid for the weights, the TensorRT version and the GPU that built it, so the
 cache file's name carries a key over exactly those (the weights file's SHA-256, the architecture,
