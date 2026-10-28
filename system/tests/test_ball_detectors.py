@@ -321,7 +321,7 @@ class FakeRemote:
 
 
 def _remote_detector(remote):
-    detector = _bare_detector(Config(device="0", gridtracknet_prepass_process=True))
+    detector = _bare_detector(Config(device="0", gridtracknet_prepass_background=True, gridtracknet_prepass_process=True))
     detector.on_publish = None
     detector._remote = remote
     return detector

@@ -41,8 +41,13 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   odd phases each run at about 30 FPS. Preserve source-frame indices and
   temporal order. `Config.gridtracknet_window_step` (1, the default since
   2026-10-26) is the frames of a phase between unit starts: below 5 a frame's
-  overlapping units are averaged before one decode (`_UnitStream`,
-  `_HeatAverage`); 5 is the old prepass, one unit per frame.
+  overlapping units are averaged before one decode (`_UnitStream`, and
+  `HeatRing` in `ball_gpu.py`); 5 is the old prepass, one unit per frame.
+  `ball_gpu.py` is the prepass's device side (OpenCV's resize to the byte, the heat
+  ring, peaks); `ball_trt.py` builds and caches the ball model's TensorRT engine
+  (`Config.ball_prepass_runtime`); `ball_prepass_process.py` runs the prepass in a
+  child process. The prepass runs before pass 1 by default
+  (`audit/records/opt_ball_prepass.md` on the `optimization` branch has why).
   `engine_session.py`: the TensorRT session the ball, player
   and court engines share; `engine_files.py`: locating engine files, their
   Ultralytics metadata and I/O tensor table (no CUDA); `engine_boxes.py`:

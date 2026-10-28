@@ -194,8 +194,8 @@ class GridTrackNetBallDetector(BallDetectorBackend):
     only four floats a frame come back, through pinned memory a few calls
     behind the device.
 
-    ``prepare_video`` decodes the whole clip once (by default on a worker
-    thread, see ``Config.gridtracknet_prepass_background``) and caches one
+    ``prepare_video`` decodes the whole clip once (by default before pass 1,
+    or on a worker thread or process, see ``Config.gridtracknet_prepass_background``) and caches one
     detection per decoded source frame; ``detections_at(i)`` returns frame
     ``i``'s result, waiting for the prepass if it is behind, and raises once
     the prepass has finished without ever decoding frame ``i``.
