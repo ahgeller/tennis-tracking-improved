@@ -10,12 +10,13 @@ from OpenCV.
 
 Frame identity.  OpenCV's FFmpeg backend seeks by timestamp, computed from the frame number and
 the *average* frame rate; on a variable-frame-rate clip (phone recordings, ``sample/pomona.mp4``:
-60/1 nominal, 59.67 average) a seek to frame 689 decodes frame 683 while reporting 690.  NVDEC's
-index is built from the container's packets, so ``start_frame`` lands on the frame asked for
-(measured on pomona at frames 1 to 750: every seek decodes the sequential decode's picture with
-its timestamp).  ``OpenCVDecoder`` has no such index; given the pictures that precede the start
-frame (``reference``, the frames pass 1 cached) it seeks a margin early and walks forward to them,
-and without a match it decodes from the first frame.
+60/1 nominal, 59.67 average) a seek to frame 689 decodes frame 683 while reporting 690, and after
+a seek it counts frames from that guess, so the stream can also end a few frames early (pomona
+from a seek near 620: 1330 of 1332 frames).  ``OpenCVDecoder`` therefore never seeks: it decodes
+from the first frame and skips to the start with ``grab`` (no colour conversion: 690 frames of
+pomona in 0.3 s), on its first ``read``, so behind ``ThreadedFrameReader`` the skip runs on the
+reader thread.  ``NvdecDecoder`` seeks with PyNvVideoCodec's ``start_frame`` and checks every
+frame it hands out against the packets' timestamps (``_refill``).
 
 Colour.  The detector was trained on OpenCV's pictures, so NVDEC's must be the same pixels.
 H.264 decoding is bit-exact, so NVDEC's NV12 planes are libavcodec's; the difference is the
@@ -38,7 +39,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -56,13 +57,6 @@ BACKEND_NVDEC = "nvdec"
 BACKEND_OPENCV = "opencv"
 # Frames NVDEC's decode thread keeps ready ahead of the reader (PyNvVideoCodec recommends 8 to 16).
 NVDEC_BUFFER_FRAMES = 12
-# The OpenCV seek lands up to a share of the target frame number away from it on a variable-frame-rate
-# clip (pomona: 1%; the VFR test clip: 24%), plus a fixed allowance.  The walk tries the tight share
-# first (the walk costs a decode and a comparison per frame: 1.8 s at frame 690 with 50%), then the wide.
-_SYNC_MARGIN_SHARES = (0.05, 0.5)
-_SYNC_MARGIN_FRAMES = 30
-# Pictures of the cached prefix the walk matches in a row; more when they are all alike.
-_SYNC_TAIL_FRAMES = 3
 _NO_PTS = -(1 << 63)          # FFmpeg's AV_NOPTS_VALUE
 
 
@@ -312,64 +306,26 @@ class NvdecDecoder:
 class OpenCVDecoder:
     """The clip decoded by OpenCV on the CPU from frame ``start_frame``, as BGR host arrays.
 
-    ``reference`` is the pictures of the frames just before ``start_frame`` as an earlier
-    sequential OpenCV decode gave them (pass 1's cache); with it the start is found by a seek a
-    margin early and a walk forward to those pictures, else by decoding from the first frame.
-    ``synced_by`` says which: ``"start"`` (nothing to skip), ``"seek"``, ``"decode"`` (no usable
-    reference: none, or all one picture) or ``"seek-missed"`` (the walk did not find the
-    reference, so the clip was decoded from the first frame).
+    The frames before the start are decoded and dropped on the first ``read`` (see the module
+    docstring for why OpenCV's seek cannot be trusted).  Raises ``RuntimeError`` when OpenCV
+    cannot open the clip.
     """
 
     backend = BACKEND_OPENCV
 
-    def __init__(self, path, start_frame: int = 0, reference: Optional[Sequence[np.ndarray]] = None) -> None:
+    def __init__(self, path, start_frame: int = 0) -> None:
         self._path = str(path)
         self.next_index = int(start_frame)
-        self.synced_by = "start"
-        self._capture = self._open()
-        if start_frame > 0:
-            tail = _distinct_tail(reference or ())
-            if tail and self._seek_to(start_frame, tail):
-                self.synced_by = "seek"
-            else:
-                self._decode_to(start_frame)
-                self.synced_by = "seek-missed" if tail else "decode"
-
-    def _open(self) -> cv2.VideoCapture:
-        capture = cv2.VideoCapture(self._path)
-        if not capture.isOpened():
+        self._skip = int(start_frame)
+        self._capture = cv2.VideoCapture(self._path)
+        if not self._capture.isOpened():
             raise RuntimeError(f"Could not open the video: {self._path}")
-        return capture
-
-    def _seek_to(self, start_frame: int, tail: Sequence[np.ndarray]) -> bool:
-        """Seek early and read forward until the decoded pictures equal ``tail`` (the frames just
-        before ``start_frame``), leaving the capture on ``start_frame``.  False (with the capture
-        reopened at the first frame) when they do not show up within the widest margin."""
-        first = start_frame - len(tail)
-        for share in _SYNC_MARGIN_SHARES:
-            margin = _SYNC_MARGIN_FRAMES + int(share * start_frame)
-            self._capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, first - margin))
-            matched = 0
-            for _ in range(2 * margin + len(tail)):
-                ok, frame = self._capture.read()
-                if not ok:
-                    break
-                if np.array_equal(frame, tail[matched]):
-                    matched += 1
-                else:
-                    matched = 1 if np.array_equal(frame, tail[0]) else 0
-                if matched == len(tail):
-                    return True
-        self._capture.release()
-        self._capture = self._open()
-        return False
-
-    def _decode_to(self, start_frame: int) -> None:
-        for _ in range(start_frame):
-            if not self._capture.grab():
-                break
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+        while self._skip:
+            if not self._capture.grab():
+                return False, None
+            self._skip -= 1
         ok, frame = self._capture.read()
         if ok:
             self.next_index += 1
@@ -379,35 +335,22 @@ class OpenCVDecoder:
         self._capture.release()
 
 
-def _distinct_tail(reference: Sequence[np.ndarray]) -> List[np.ndarray]:
-    """The last ``_SYNC_TAIL_FRAMES`` pictures of ``reference``, extended back until they hold two
-    different pictures (a run of identical frames would match anywhere along it); empty when the
-    whole reference is one picture."""
-    count = min(_SYNC_TAIL_FRAMES, len(reference))
-    while count <= len(reference):
-        tail = list(reference[len(reference) - count:])
-        if tail and any(not np.array_equal(tail[0], other) for other in tail[1:]):
-            return tail
-        count += 1
-    return []
-
-
 Decoder = Union[NvdecDecoder, OpenCVDecoder]
 
 
 def open_decoder(path, device: Optional[torch.device] = None, start_frame: int = 0, host: bool = False,
-                 reference: Optional[Sequence[np.ndarray]] = None, prefer_nvdec: bool = True) -> Decoder:
+                 prefer_nvdec: bool = True) -> Decoder:
     """NVDEC when ``prefer_nvdec`` and it can open the clip, else OpenCV (see the two classes).
 
-    ``host`` asks NVDEC for host arrays; OpenCV always gives them.  ``reference`` only serves
-    OpenCV's start-frame search.  The fallback is reported on the console.
+    ``host`` asks NVDEC for host arrays; OpenCV always gives them.  The fallback is reported on
+    the console.
     """
     if prefer_nvdec and nvdec_available():
         try:
             return NvdecDecoder(path, device=device, start_frame=start_frame, host=host)
         except RuntimeError as error:
             print(f"[decode] {str(error).splitlines()[0]}; decoding on the CPU")
-    return OpenCVDecoder(path, start_frame=start_frame, reference=reference)
+    return OpenCVDecoder(path, start_frame=start_frame)
 
 
 # ---------------------------------------------------------------------------

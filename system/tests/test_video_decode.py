@@ -13,7 +13,7 @@ import torch
 
 from tennis_tracker import video_decode
 from tennis_tracker.video_decode import (
-    OpenCVDecoder, SharedFrameSource, _distinct_tail, nvdec_available, open_decoder,
+    OpenCVDecoder, SharedFrameSource, nvdec_available, open_decoder,
 )
 
 needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg to encode the clip")
@@ -135,17 +135,6 @@ def test_close_stops_a_decode_that_waits_for_a_consumer():
 
 # --------------------------------------------------------------------------- OpenCV start frame
 
-def _pictures(*values):
-    return [np.full((2, 2, 3), value, np.uint8) for value in values]
-
-
-def test_the_tail_grows_until_it_holds_two_different_pictures():
-    assert [int(f[0, 0, 0]) for f in _distinct_tail(_pictures(0, 1, 2, 3, 4))] == [2, 3, 4]
-    assert [int(f[0, 0, 0]) for f in _distinct_tail(_pictures(0, 1, 7, 7, 7, 7))] == [1, 7, 7, 7, 7]
-    assert _distinct_tail(_pictures(7, 7, 7)) == []
-    assert _distinct_tail([]) == []
-
-
 # --------------------------------------------------------------------------- real clips
 
 def _encode(path: Path, frames: List[np.ndarray], fps: int = 60, extra=(), codec: str = "libx264",
@@ -187,17 +176,20 @@ def _opencv_frames(path: Path) -> List[np.ndarray]:
 
 
 @needs_ffmpeg
-def test_opencv_starts_at_the_frame_asked_for_with_or_without_a_reference(tmp_path):
+def test_opencv_starts_at_the_frame_asked_for_and_reads_to_the_end(tmp_path):
+    """OpenCV decodes from the first frame and drops the frames before the start, so every start
+    yields exactly the sequential decode's frames from there on (a seek can end the stream early)."""
     path = tmp_path / "clip.mp4"
     _encode(path, _coloured_frames(90))
     reference = _opencv_frames(path)
-    for start in (0, 1, 45, 89):
-        for given in (reference[:start], None):
-            decoder = OpenCVDecoder(path, start_frame=start, reference=given)
-            ok, frame = decoder.read()
-            decoder.release()
-            assert ok and np.array_equal(frame, reference[start])
-            assert decoder.synced_by == ("start" if start == 0 else "seek" if given and start > 1 else "decode")
+    for start in (0, 1, 45, 89, 90):
+        decoder = OpenCVDecoder(path, start_frame=start)
+        frames = []
+        while (read := decoder.read())[0]:
+            frames.append(read[1])
+        decoder.release()
+        assert len(frames) == 90 - start and decoder.next_index == 90
+        assert all(np.array_equal(frame, ref) for frame, ref in zip(frames, reference[start:]))
 
 
 @needs_ffmpeg

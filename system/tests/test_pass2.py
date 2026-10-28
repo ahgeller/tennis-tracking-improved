@@ -21,45 +21,34 @@ from tests.test_pipeline_run import (  # noqa: F401
 )
 
 
-class SeekableCapture(Capture):
-    """``Capture`` that seeks with ``CAP_PROP_POS_FRAMES``.  With ``seeks=False`` a set is ignored, as
-    by a container that cannot seek exactly; with ``lands_past=n`` the position reads as asked while
-    the next picture is ``n`` frames later, as OpenCV's FFmpeg backend answers on a variable frame
-    rate (the position is computed from the timestamp and the average rate, not from the picture)."""
+class UnseekableCapture(Capture):
+    """``Capture`` that refuses a seek: pass 2 must reach its start by decoding, since OpenCV's
+    seek lands on another picture on a variable-frame-rate clip."""
 
     opened = []
 
-    def __init__(self, count: int, seeks: bool = True, lands_past: int = 0):
+    def __init__(self, count: int):
         super().__init__(count)
-        self.seeks, self.lands_past = seeks, lands_past
-        self.reported = None
+        self.grabbed = 0
         self.opened.append(self)
 
     def set(self, prop, value) -> bool:
-        assert prop == cv2.CAP_PROP_POS_FRAMES
-        if self.seeks:
-            self.index = int(value) + self.lands_past
-            self.reported = int(value)
-        return self.seeks
-
-    def get(self, prop) -> float:
-        assert prop == cv2.CAP_PROP_POS_FRAMES
-        return float(self.index if self.reported is None else self.reported)
+        raise AssertionError("pass 2 seeked with OpenCV")
 
     def grab(self) -> bool:
         ok, _ = self.read()
+        self.grabbed += ok
         return ok
 
 
 @pytest.fixture
 def captures(monkeypatch):
-    """Route pass 2's reopen (``video_decode``'s OpenCV decoder) to a 10-frame ``SeekableCapture``;
+    """Route pass 2's reopen (``video_decode``'s OpenCV decoder) to a 10-frame ``UnseekableCapture``;
     the list of captures opened."""
-    SeekableCapture.opened = []
+    UnseekableCapture.opened = []
     monkeypatch.setattr(video_decode, "nvc", None)
-    monkeypatch.setattr(video_decode, "cv2", SimpleNamespace(VideoCapture=lambda path: SeekableCapture(10),
-                                                             CAP_PROP_POS_FRAMES=cv2.CAP_PROP_POS_FRAMES))
-    return SeekableCapture.opened
+    monkeypatch.setattr(video_decode.cv2, "VideoCapture", lambda path: UnseekableCapture(10))
+    return UnseekableCapture.opened
 
 
 def _ctx() -> SimpleNamespace:
@@ -81,48 +70,15 @@ def _frames(source: pass2._FrameSource, count: int):
 
 # --------------------------------------------------------------------------- _FrameSource
 
-def test_frame_source_serves_the_cached_prefix_and_decodes_the_rest_from_a_seek(captures, capsys):
+def test_frame_source_serves_the_cached_prefix_and_decodes_the_rest_from_the_first_frame(captures, capsys):
+    """Past the cache, OpenCV decodes the clip from its first frame and drops the cached ones
+    (grabbed, never converted), with one open and no seek."""
     cached = _cached(4)
     source = pass2._FrameSource(_ctx(), cached, 10)
     assert "[pass 2] Using RAM frame cache (4 of 10 frames), decoding the rest (opencv)" in capsys.readouterr().out
     assert _frames(source, 10) == list(range(10))
-    assert len(captures) == 1                                                      # one open, seeked near frame 4
+    assert len(captures) == 1 and captures[0].grabbed == 4
     assert cached == [None] * 4                    # pass 2 is the cache's last reader: each frame leaves as it is served
-
-
-MISSED = ("[pass 2] The cached frames were not found near the seek to frame 4; "
-          "decoding from the start and skipping the 4 cached frames")
-
-
-def test_frame_source_walks_forward_from_a_seek_that_lands_early(monkeypatch, captures, capsys):
-    """A container that ignores the seek leaves the capture at frame 0: the walk forward to the
-    cached pictures finds the start all the same, with no second open."""
-    monkeypatch.setattr(video_decode.cv2, "VideoCapture", lambda path: SeekableCapture(10, seeks=False))
-    source = pass2._FrameSource(_ctx(), _cached(4), 10)
-    assert "not found" not in capsys.readouterr().out
-    assert _frames(source, 10) == list(range(10))
-    assert len(captures) == 1
-
-
-def test_frame_source_judges_a_seek_by_its_picture_not_by_the_reported_position(monkeypatch, captures, capsys):
-    """A seek that reports the frame asked for but decodes a later picture (a variable-frame-rate
-    clip) is not trusted: the walk looks for the cached pictures and, past them already, the
-    decode starts over."""
-    monkeypatch.setattr(video_decode.cv2, "VideoCapture", lambda path: SeekableCapture(10, lands_past=6))
-    source = pass2._FrameSource(_ctx(), _cached(4), 10)
-    assert captures[0].get(cv2.CAP_PROP_POS_FRAMES) == 0.0                        # what the container claimed
-    assert MISSED in capsys.readouterr().out
-    assert _frames(source, 10) == list(range(10))
-    assert len(captures) == 2                                                      # the missed seek's capture was released
-
-
-def test_frame_source_decodes_past_a_cache_of_one_frame(captures, capsys):
-    """One picture cannot be told apart from a run of its copies, so a one-frame cache is skipped
-    by decoding it, quietly."""
-    source = pass2._FrameSource(_ctx(), _cached(1), 10)
-    assert "not found" not in capsys.readouterr().out
-    assert _frames(source, 10) == list(range(10))
-    assert len(captures) == 1
 
 
 def test_frame_source_refuses_a_clip_it_cannot_reopen(monkeypatch, captures):
@@ -189,7 +145,7 @@ def test_frame_source_puts_every_frame_of_a_variable_frame_rate_clip_on_its_own_
     finally:
         source.release()
     out = capsys.readouterr().out
-    assert f"decoding the rest ({'nvdec' if gpu_decode else 'opencv'})" in out and "not found" not in out
+    assert f"decoding the rest ({'nvdec' if gpu_decode else 'opencv'})" in out
     assert [_painted_index(frame) for frame in served] == list(range(200))
     assert time.perf_counter() - started < 10.0
 

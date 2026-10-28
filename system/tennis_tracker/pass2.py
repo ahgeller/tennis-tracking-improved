@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -30,7 +30,7 @@ from .render.rendering import (
 )
 from .render.trails import DEBUG_TRACK_STYLE, LIGHT_TRACK_STYLE, BallTrail, CandidateTrackTrails, DisplayPathTrail
 from .run_context import CourtEvents, RunContext, Selection
-from .video_decode import Decoder, OpenCVDecoder, open_decoder
+from .video_decode import Decoder, open_decoder
 from .video_io import ThreadedFrameReader, VideoWriter
 
 COLOR_ROI_THIN = (0, 255, 0)
@@ -42,22 +42,18 @@ def _open_writer(ctx: RunContext, path: str) -> VideoWriter:
     return VideoWriter(path, video.fps, video.width, video.height, ctx.cfg, encoder=ctx.encoder)
 
 
-def _open_decoder(ctx: RunContext, cached: Sequence[np.ndarray]) -> Decoder:
-    """The clip reopened at the frame after the cached prefix, frame-exact: NVDEC seeks by its
-    frame index, OpenCV walks from an early seek to the cached pictures (``video_decode``).
+def _open_decoder(ctx: RunContext, n_cached: int) -> Decoder:
+    """The clip reopened at the frame after the cached prefix, frame-exact: NVDEC seeks and
+    checks each frame's timestamp, OpenCV decodes from the first frame and skips the prefix on
+    its reader thread (``video_decode``).
 
     OpenCV's own seek lands on another picture on a variable-frame-rate clip (pomona's seek to
     frame 689 decodes 683), which pass 2 used to answer by decoding the whole clip again.
     """
     try:
-        decoder = open_decoder(ctx.video.path, start_frame=len(cached), host=True, reference=cached,
-                               prefer_nvdec=ctx.cfg.gpu_decode)
+        return open_decoder(ctx.video.path, start_frame=n_cached, host=True, prefer_nvdec=ctx.cfg.gpu_decode)
     except RuntimeError as error:
         raise RuntimeError(f"Could not reopen the input video for pass 2: {ctx.video.path}") from error
-    if isinstance(decoder, OpenCVDecoder) and decoder.synced_by == "seek-missed":
-        print(f"[pass 2] The cached frames were not found near the seek to frame {len(cached)}; "
-              f"decoding from the start and skipping the {len(cached)} cached frames")
-    return decoder
 
 
 class _FrameSource:
@@ -77,7 +73,7 @@ class _FrameSource:
         if cached is not None and self._n_cached >= frame_count:
             print(f"[pass 2] Using RAM frame cache ({self._n_cached} frames)")
             return
-        decoder = _open_decoder(ctx, cached or [])
+        decoder = _open_decoder(ctx, self._n_cached)
         if self._n_cached:
             print(f"[pass 2] Using RAM frame cache ({self._n_cached} of {frame_count} frames), "
                   f"decoding the rest ({decoder.backend})")
