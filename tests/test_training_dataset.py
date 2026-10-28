@@ -113,7 +113,8 @@ def test_the_draws_of_a_seed_are_the_ones_every_run_has_made():
     draws = [basic.draw(unit) for _ in range(4)]
     assert draws[:3] == [Augmentation()] * 3 and draws[3].flip and draws[3].gain == pytest.approx(1.133007015099494)
     assert basic.rng.draws.random() == pytest.approx(0.6489745531369242)        # the stream is where it always was
-    everything = UnitDataset(Path("unused"), [unit], augment=True, augmentations=set(AUGMENTATIONS))
+    # Every augmentation the frozen sequence knew; copypaste draws after them and is pinned below.
+    everything = UnitDataset(Path("unused"), [unit], augment=True, augmentations=set(AUGMENTATIONS) - {"copypaste"})
     everything.rng = Augmenter(5)
     everything.draw(unit)
     drawn = everything.draw(unit)

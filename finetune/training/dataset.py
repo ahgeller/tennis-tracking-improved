@@ -18,11 +18,21 @@ on and be measured against the same run without it:
   five frames, border replicated (not reflected, which would copy a ball near the edge), held
   so that no label leaves the frame; the labels move by the shift in native pixels;
 - ``reverse``: the five frames and their labels in reverse time order;
-- ``compress``: a JPEG re-encode at a drawn quality, and sometimes a slight blur.
+- ``compress``: a JPEG re-encode at a drawn quality, and sometimes a slight blur;
+- ``copypaste``: a second, real ball pasted along a real ball's path with speed-scaled streak
+  blur, the same on all five frames, labelled as a ball (``copy_paste``; the banks it draws from
+  are cut once per run, ``copy_paste.build_banks``, and handed over as `banks`).
 
 The draws are made first, into one ``Augmentation`` (``UnitDataset.draw``), and then applied to
 the frames (``UnitDataset.apply``); the draws for the newer augmentations are made after the
 older ones, so a run that does not ask for them draws exactly what it always did.
+
+An example is ``(images, target)``; a dataset whose units carry ``valid`` (pseudo-labelled clips)
+or that reads cached teacher maps (`teacher_maps`, ``distill.TeacherMaps``) answers ``(images,
+target, valid)`` or ``(images, target, valid, teacher)`` for every unit instead (``loop.unpack``).
+The cached maps follow the flip, the shift and the time reversal (``distill.flip_maps`` and its
+neighbours), so with them a shift is held to whole cells of the model's grid; a pasted ball is
+written into them as into the target.
 """
 
 from __future__ import annotations
@@ -40,9 +50,10 @@ from torch.utils.data import Dataset, WeightedRandomSampler
 
 from tennis_tracker.ball_models import GRIDTRACKNET, model_class
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, HEIGHT, WIDTH
+from finetune.training import copy_paste, distill
 from finetune.training.frame_cache import Target, TrainingUnit
 
-AUGMENTATIONS = ("basic", "strong", "translate", "reverse", "compress")
+AUGMENTATIONS = ("basic", "strong", "translate", "reverse", "compress", "copypaste")
 HEAT_SIGMA_CELLS = 1.0         # the Gaussian heat target's sigma, in cells of the model's grid
 HEAT_RADIUS_SIGMAS = 3         # ... and how far it reaches before it is cut to zero
 TRANSLATE_PX = 20              # the largest shift, in cache pixels (at 768x432), either way on each axis
@@ -69,14 +80,17 @@ def gaussian_heat(target: np.ndarray, row: int, col: int, sigma: float = HEAT_SI
     np.maximum(target[top:bottom, left:right], heat, out=target[top:bottom, left:right])
 
 
-def make_target(points, width: int, height: int, arch: str = GRIDTRACKNET) -> torch.Tensor:
+def make_target(points, width: int, height: int, arch: str = GRIDTRACKNET, extra=None) -> torch.Tensor:
     """The (15, rows, cols) target of a unit's five labels on `arch`'s grid: per frame the heat
     grid (GridTrackNet: 1 at the ball's cell; HeatmapNet: ``gaussian_heat`` around it, 1 at the
     cell) and the x and y offsets, the ball's fractional position in [0, 1) within its cell,
-    written at that cell only. A frame without a ball (None) is all zeros."""
+    written at that cell only. A frame without a ball (None) is all zeros. `extra` is a second
+    ball per frame (a pasted one, or None), drawn the same way beside the first."""
     grid_cols, grid_rows = model_class(arch).GRID_COLS, model_class(arch).GRID_ROWS
     target = np.zeros((FRAMES_PER_UNIT * 3, grid_rows, grid_cols), dtype=np.float32)
-    for index, point in enumerate(points):
+    balls = [(index, point) for index, point in enumerate(points)]
+    balls += [(index, point) for index, point in enumerate(extra or [])]
+    for index, point in balls:
         if point is None:
             continue
         grid_x = point[0] * grid_cols / width
@@ -221,7 +235,7 @@ class Augmentation:
     """One example's draws, made by ``UnitDataset.draw`` and applied by ``UnitDataset.apply``:
     the mirror flip, the gain (1: none), the ``strong`` draws (None: none), the shift in cache
     pixels (None: none), time reversed, the JPEG quality (None: no re-encode) and the blur after
-    it (None: none). ``NONE`` is the unaugmented example."""
+    it (None: none), and the pasted ball (None: none). ``NONE`` is the unaugmented example."""
     flip: bool = False
     gain: float = 1.0
     photometric: Optional[Photometric] = None
@@ -229,24 +243,48 @@ class Augmentation:
     reverse: bool = False
     compress: Optional[int] = None
     blur: Optional[float] = None
+    paste: Optional[copy_paste.Paste] = None
 
 
 NONE = Augmentation()
 
 
+def shifted_points(points: Sequence[Target], dx: int, dy: int, width: int, height: int) -> List[Target]:
+    """Pasted balls moved by a shift of the frames (cache pixels), None once off the image."""
+    moved: List[Target] = []
+    for point in points:
+        if point is None:
+            moved.append(None)
+            continue
+        x, y = point[0] + dx * width / WIDTH, point[1] + dy * height / HEIGHT
+        moved.append([x, y] if 0 <= x < width and 0 <= y < height else None)
+    return moved
+
+
 class UnitDataset(Dataset):
     """The cached units as (images, target) pairs: the five frames as one (15, H, W) float tensor
     and ``make_target`` on `arch`'s grid, with the augmentations in `augmentations` drawn when
-    `augment` is set."""
+    `augment` is set. ``copypaste`` needs `banks` (``copy_paste.build_banks``'s file); with
+    `teacher_maps` (the cache root ``distill.build_teacher_maps`` filled) every example carries
+    the unit's teacher maps (module docstring)."""
 
     def __init__(self, data_dir: Path, samples: Sequence, augment: bool,
-                 augmentations: Collection[str] = ("basic",), arch: str = GRIDTRACKNET) -> None:
+                 augmentations: Collection[str] = ("basic",), arch: str = GRIDTRACKNET,
+                 banks: Optional[Path] = None, teacher_maps: Optional[Path] = None) -> None:
         unknown = set(augmentations) - set(AUGMENTATIONS)
         if unknown:
             raise ValueError(f"unknown augmentation(s) {sorted(unknown)}; choose from {AUGMENTATIONS}")
         model_class(arch)                        # an unknown architecture is refused here, not per unit
         self.data_dir, self.samples, self.augment, self.arch = data_dir, samples, augment, arch
         self.augmentations: Set[str] = set(augmentations) if augment else set()
+        if "copypaste" in self.augmentations and banks is None:
+            raise ValueError("--augment copypaste needs the ball and path banks (copy_paste.build_banks)")
+        self.banks_path, self.teacher_root = banks, teacher_maps
+        self.banks: Optional[copy_paste.Banks] = None          # loaded in the process that reads
+        self.teacher: Optional[distill.TeacherMaps] = None
+        self.with_valid = teacher_maps is not None or any("valid" in sample for sample in samples)
+        # The cached teacher maps move with a shift only by whole cells of the model's grid.
+        self.cell_px = WIDTH // model_class(arch).GRID_COLS if teacher_maps is not None else 1
         self.rng: Optional[Augmenter] = None     # made in the process that reads, see Augmenter
 
     def __len__(self) -> int:
@@ -289,32 +327,83 @@ class UnitDataset(Dataset):
                 flipped(unit["points"], unit["size"][0]) if flip else unit["points"],
                 unit["size"][0], unit["size"][1], WIDTH, HEIGHT)
             shift = (rng.draws.randint(dx_min, dx_max), rng.draws.randint(dy_min, dy_max))
+            if self.cell_px > 1:              # whole cells, toward zero, so the limits still hold
+                shift = (int(shift[0] / self.cell_px) * self.cell_px, int(shift[1] / self.cell_px) * self.cell_px)
         reversed_time = "reverse" in on and rng.draws.random() < REVERSE_P
         quality = softness = None
         if "compress" in on and rng.draws.random() < COMPRESS_P:
             quality = rng.draws.randint(*COMPRESS_QUALITY)
             if rng.draws.random() < BLUR_P:
                 softness = rng.draws.uniform(*BLUR_SIGMA)
-        return Augmentation(flip, gain, photometric, shift, reversed_time, quality, softness)
+        paste = None
+        if "copypaste" in on and rng.draws.random() < copy_paste.PASTE_P:
+            width = unit["size"][0]
+            own = flipped(unit["points"], width) if flip else unit["points"]
+            avoid = [None if point is None else copy_paste.cache_point(point, unit["size"]) for point in own]
+            paste = copy_paste.draw_paste(rng.draws, self.load_banks(), unit["clip"], copy_paste.unit_stride(unit), avoid)
+        return Augmentation(flip, gain, photometric, shift, reversed_time, quality, softness, paste)
 
-    def apply(self, sample: TrainingUnit, augmentation: Augmentation) -> Tuple[torch.Tensor, torch.Tensor]:
-        """One unit's (images, target) under `augmentation`."""
+    def load_banks(self) -> copy_paste.Banks:
+        if self.banks is None:
+            assert self.banks_path is not None
+            self.banks = copy_paste.load_banks(self.banks_path)
+        return self.banks
+
+    def teacher_answer(self, sample: TrainingUnit, augmentation: Augmentation, pasted: Optional[torch.Tensor]
+                       ) -> torch.Tensor:
+        """The unit's cached teacher maps under the geometric draws of `augmentation`, with the
+        pasted ball's target (`pasted`, after those draws) laid in."""
+        if self.teacher is None:
+            assert self.teacher_root is not None
+            self.teacher = distill.TeacherMaps(self.teacher_root)
+        maps = self.teacher.unit(sample)
+        if augmentation.flip:
+            maps = distill.flip_maps(maps)
+        if augmentation.shift is not None:
+            maps = distill.shift_maps(maps, augmentation.shift[0] // self.cell_px, augmentation.shift[1] // self.cell_px)
+        if augmentation.reverse:
+            maps = distill.reverse_maps(maps)
+        if pasted is not None:
+            maps = distill.paste_into_maps(maps, pasted.numpy())
+        return torch.from_numpy(np.ascontiguousarray(maps, dtype=np.float32))
+
+    def apply(self, sample: TrainingUnit, augmentation: Augmentation) -> Tuple[torch.Tensor, ...]:
+        """One unit's (images, target) under `augmentation`, with ``valid`` and the teacher maps
+        when the dataset carries them (the class docstring)."""
         width, height = sample["size"]
         images = self.read_frames(sample, augmentation.flip)
         points = flipped(sample["points"], width) if augmentation.flip else sample["points"]
+        valid = list(sample.get("valid", [True] * FRAMES_PER_UNIT))
+        extra: Optional[List[Target]] = None
+        if augmentation.paste is not None:
+            images = copy_paste.apply_paste(np.ascontiguousarray(images), self.load_banks(), augmentation.paste)
+            extra = [[x * width / WIDTH, y * height / HEIGHT] for x, y in augmentation.paste.points]
         if augmentation.gain != 1.0:
             images = np.clip(images * augmentation.gain, 0.0, 1.0)
         if augmentation.photometric is not None:
             images = apply_photometric(images, augmentation.photometric, self.augmenter().noise)
         if augmentation.shift is not None:
             images, points = translate(images, points, *augmentation.shift, width, height)
+            if extra is not None:
+                extra = shifted_points(extra, *augmentation.shift, width, height)
         if augmentation.reverse:
             images, points = reverse(images, points)
+            valid = valid[::-1]
+            if extra is not None:
+                extra = extra[::-1]
         if augmentation.compress is not None:
             images = compress(images, augmentation.compress)
             if augmentation.blur is not None:
                 images = blur(images, augmentation.blur)
-        return torch.from_numpy(np.ascontiguousarray(images)), make_target(points, width, height, self.arch)
+        example: Tuple[torch.Tensor, ...] = (torch.from_numpy(np.ascontiguousarray(images)),
+                                              make_target(points, width, height, self.arch, extra))
+        if not self.with_valid:
+            return example
+        example += (torch.tensor(valid, dtype=torch.float32),)
+        if self.teacher_root is not None:
+            pasted = None if extra is None else make_target([None] * FRAMES_PER_UNIT, width, height, self.arch, extra)
+            example += (self.teacher_answer(sample, augmentation, pasted),)
+        return example
 
     def __getitem__(self, index: int):
         sample = self.samples[index]
@@ -331,7 +420,8 @@ def unit_weights(samples: Sequence[TrainingUnit], oversample: Dict[str, float], 
     weights = []
     for index, sample in enumerate(samples):
         weight = float(oversample.get(sample["source"], 1.0))
-        if any(point is None for point in sample["points"]):
+        valid = sample.get("valid", [True] * FRAMES_PER_UNIT)
+        if any(point is None and counts for point, counts in zip(sample["points"], valid)):    # an ignored frame is not absent
             weight *= absent
         if index in flagged:
             weight *= false_alarms
