@@ -84,7 +84,9 @@ the evidence for their settings):
   see ``distill.py``. ``config.json`` records it as ``distill``;
 - ``--pseudo DIR``: pseudo-labelled clips (``pseudo_labels.py``) join the training units as
   ``--pseudo-share`` of every epoch's draws, their uncertain frames left out of the labelled
-  loss; recorded as ``pseudo``;
+  loss; recorded as ``pseudo``. A share of 1 trains on them alone (the hand-labelled clips are
+  never drawn, and the copy-paste bank is cut from the pseudo-labelled clips), while the
+  held-out set is still scored against its hand labels;
 - ``--augment copypaste``: a second, real, motion-blurred ball pasted along a real path
   (``copy_paste.py``).
 """
@@ -193,10 +195,13 @@ def mix_pseudo(weights: List[float], pseudo: int, share: float, epoch_units: Opt
     """The sampling weights of the labelled units (`weights`) followed by `pseudo` pseudo-labelled
     ones, each pseudo unit weighted alike so that together they are `share` of the draws, and the
     epoch's unit count: `epoch_units`, or by default every labelled unit's expected draw count
-    kept as it was without them (the labelled units divided by 1 - `share`). A share outside
-    (0, 1) is a ValueError."""
-    if not 0.0 < share < 1.0:
-        raise ValueError(f"--pseudo-share is the pseudo-labelled share of the draws, between 0 and 1, not {share:g}")
+    kept as it was without them (the labelled units divided by 1 - `share`). A share of 1 draws
+    the pseudo-labelled units alone (every labelled weight 0), by default as many as there are;
+    a share outside (0, 1] is a ValueError."""
+    if not 0.0 < share <= 1.0:
+        raise ValueError(f"--pseudo-share is the pseudo-labelled share of the draws, above 0 and at most 1, not {share:g}")
+    if share == 1.0:
+        return [*([0.0] * len(weights)), *([1.0] * pseudo)], epoch_units or pseudo
     each = sum(weights) * share / (1.0 - share) / pseudo
     units = epoch_units or round(len(weights) / (1.0 - share))
     return [*weights, *([each] * pseudo)], units
@@ -623,7 +628,9 @@ def train(args: argparse.Namespace) -> None:
               f"{epoch_units} units")
     sampler = weighted_sampler(weights, epoch_units)
     args.run_dir.mkdir(parents=True, exist_ok=True)
-    banks = build_banks(train_units, args.data_dir, args.run_dir / BANK_NAME) if "copypaste" in args.augment else None
+    pseudo_only = bool(pseudo_units) and args.pseudo_share == 1.0     # the hand labels are never drawn, nor pasted
+    banks = (build_banks(pseudo_units if pseudo_only else train_units, args.data_dir, args.run_dir / BANK_NAME)
+             if "copypaste" in args.augment else None)
     config = distill_config(args)
     maps_dir = None
     if config is not None and config.maps == "cache":
@@ -804,7 +811,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Also train on the pseudo-labelled videos in DIR (videos/ and labels/, ft.py pseudo label "
                              "makes them); training only, never held out")
     pseudo.add_argument("--pseudo-share", type=float, default=0.3,
-                        help="Their share of every epoch's draws (default 0.3)")
+                        help="Their share of every epoch's draws (default 0.3; 1 trains on them alone)")
     parser.add_argument("--oversample", nargs="*", metavar="SOURCE=WEIGHT",
                         help="Relative sampling weight per source, e.g. custom=6 grid=1 tracknetv2=0.5 (0 drops it from training)")
     parser.add_argument("--oversample-absent", type=float, default=1.0, metavar="K",

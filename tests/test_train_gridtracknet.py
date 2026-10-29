@@ -243,8 +243,16 @@ def test_mix_pseudo_gives_the_pseudo_units_their_share_and_keeps_the_labelled_dr
     assert weights[:3] == [1.0, 1.0, 2.0] and sum(weights[3:]) == pytest.approx(0.25 * sum(weights))
     assert len(set(weights[3:])) == 1 and units == 4
     assert training.mix_pseudo([1.0] * 6, 2, 0.5, 100)[1] == 100
-    with pytest.raises(ValueError, match="between 0 and 1"):
-        training.mix_pseudo([1.0], 1, 1.0, None)
+    with pytest.raises(ValueError, match="at most 1"):
+        training.mix_pseudo([1.0], 1, 1.5, None)
+    with pytest.raises(ValueError, match="at most 1"):
+        training.mix_pseudo([1.0], 1, 0.0, None)
+
+
+def test_mix_pseudo_at_a_share_of_one_draws_the_pseudo_units_alone():
+    weights, units = training.mix_pseudo([1.0, 1.0, 2.0], 5, 1.0, None)
+    assert weights == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0] and units == 5
+    assert training.mix_pseudo([1.0] * 3, 5, 1.0, 40)[1] == 40
 
 
 def test_a_distilled_runs_checkpoint_carries_the_mgd_adapters(tmp_path):

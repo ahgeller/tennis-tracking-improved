@@ -80,9 +80,17 @@ def test_the_first_cells_unpack_the_zip_from_drive_check_the_code_and_build_the_
     assert args.arch == "heatmap_s4" and args.from_scratch and args.distill and args.distill_loss == "qfl"
     assert args.teacher == data / "models" / "ball_detector.pt" and args.teacher_maps == "online"
     assert args.augment == ["basic", "translate", "copypaste"] and args.holdout == "mixed_v1"
-    assert args.pseudo == data / "pseudo" and args.pseudo_share == pytest.approx(0.3)
+    assert args.pseudo is None          # TRAIN_DATA "hand", the default
     assert args.save.name == "winner.pt" and args.run_dir == drive / "tennis_finetune" / "runs" / "opt1"
     assert not args.resume
+    for choice, share in (("both", 0.3), ("model", 1.0)):
+        exec(compile(runnable(settings).replace('TRAIN_DATA = "hand"', f'TRAIN_DATA = "{choice}"'), "settings", "exec"),
+             namespace)
+        chosen = build_parser().parse_args(namespace["cmd"][4:])
+        assert chosen.pseudo == data / "pseudo" and chosen.pseudo_share == pytest.approx(share)
+    with pytest.raises(SystemExit, match="needs model-labelled clips"):     # a zip without any
+        exec(compile(runnable(settings).replace('TRAIN_DATA = "hand"', 'TRAIN_DATA = "model"'), "settings", "exec"),
+             {**namespace, "pseudo": []})
     # Run again: the zip is unchanged, so nothing is unpacked twice; a checkpoint makes it a resume.
     (args.run_dir / "checkpoint.pt").write_bytes(b"")
     (args.run_dir / "config.json").write_text(json.dumps({"lr": 1.0}), encoding="utf-8")
