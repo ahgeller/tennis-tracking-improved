@@ -1,4 +1,5 @@
 """The ball backends' interface and the GridTrackNet prepass on a fake decoder; no GPU or weights."""
+import copy
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -8,7 +9,9 @@ import numpy as np
 import pytest
 import torch
 
+from tennis_tracker import streamnet
 from tennis_tracker.engines import ball_detectors
+from tennis_tracker.engines.ball_gpu import StreamHalves, transition_slots
 from tennis_tracker.engines.ball_detectors import (
     BallDetectorBackend,
     CachedDetections,
@@ -76,6 +79,7 @@ def _bare_detector(cfg=None) -> GridTrackNetBallDetector:
     detector._frame_tensor = lambda frame, device: torch.zeros((1, 3))
     detector._decode = lambda output, width, height, conf: [((10.0, 20.0), 0.9)] * (int(output.shape[0]) * 5)
     detector.engine = None
+    detector.stream_halves = None
     detector._resizers = {}
     detector._nv12_resizers = {}
     detector._nv12_kernel = None
@@ -303,6 +307,118 @@ def test_a_static_batch_engine_answers_what_the_pytorch_model_answers(step, stri
             answers.append(detector.detect_clip(Path("s.mp4"), _FPS_FOR_STRIDE[stride], 1920, 1080, count))
         assert published == sorted(published) and published[-1] == count
     assert answers[0] == answers[1] and sum(map(bool, answers[0])) > count // 2
+
+
+# --- a streaming network ----------------------------------------------------
+
+class StreamStandIn:
+    """GridStandIn as a streaming network's halves of a static `batch`: a transition's feature is
+    the index of the frame it ends at, and the decoder checks each unit's four are consecutive
+    frames of one phase (`stride` apart) before answering as GridStandIn does on that unit."""
+
+    def __init__(self, batch, stride):
+        self.batch, self.stride = batch, stride
+        self.grid = GridStandIn()
+        self.decoded = []
+
+    def halves(self):
+        return StreamHalves(encode=self.encode, decode=self.decode, batch=self.batch)
+
+    def encode(self, frames, before):
+        assert frames.shape[0] == before.shape[0] == self.batch
+        return (frames[:, :1].clone(),)
+
+    def decode(self, ends):
+        assert ends.shape == (self.batch, 4, 1, 1)
+        ends = ends[:, :, 0, 0]
+        assert torch.equal(ends[:, 1:] - ends[:, :-1], torch.full((self.batch, 3), float(self.stride)))
+        self.decoded.append(ends[:, -1].tolist())
+        indices = torch.cat([ends[:, :1] - self.stride, ends], dim=1)
+        return self.grid.answer(indices.view(self.batch, 5, 1, 1, 1).expand(-1, -1, 3, -1, -1).reshape(self.batch, 15, 1, 1))
+
+
+@pytest.mark.parametrize("batch", [1, 2, 4, 7])
+@pytest.mark.parametrize("stride", [1, 2, 3])
+@pytest.mark.parametrize("step", [1, 2, 3, 4, 5])
+def test_the_streamed_prepass_decodes_every_unit_the_windowed_one_runs(step, stride, batch):
+    """Across window steps, phases and batches, the ring hands each unit its own four transitions
+    (the decoder checks them), the slots ``transition_slots`` sizes are never overwritten before a
+    unit is decoded although the ring wraps several times, and every frame's answer, from the clip's
+    first units to its trailing windows, is the windowed prepass's on the same static batch."""
+    count = 3 * transition_slots(batch, step, stride) + 2       # the ring wraps more than twice
+    answers, streamed = [], StreamStandIn(batch, stride)
+    for halves in (None, streamed.halves()):
+        published = []
+        cfg = Config(device="0", conf=0.25, gridtracknet_window_step=step, gridtracknet_source_stride=stride)
+        detector = CpuGridTrackNet(cfg, model=GridStandIn(), decode=None, on_publish=published.append,
+                                   frame_tensor=lambda frame, device: torch.full((3, 1, 1), float(frame[0, 0, 0])))
+        detector.engine = StaticBatchEngine(batch) if halves is None else None
+        detector.stream_halves = halves
+        with patch.object(cv2, "VideoCapture", side_effect=lambda _: Capture(count)), \
+             patch.object(torch.cuda, "synchronize"):
+            answers.append(detector.detect_clip(Path("s.mp4"), 30.0, 1920, 1080, count))
+        assert published == sorted(published) and published[-1] == count
+    assert answers[0] == answers[1] and sum(map(bool, answers[0])) > count // 2
+    if step == 1:                               # a unit ends at every frame from each phase's fifth on
+        assert {end for call in streamed.decoded for end in call} == set(range(4 * stride, count))
+
+
+STREAM_SIZE = (32, 48)          # multiples of StreamNet's total stride, 16
+
+
+def _stream_net():
+    """A StreamNet with BatchNorm statistics off the identity and a head whose heat varies across
+    the grid, so every frame has a clear peak to compare."""
+    torch.manual_seed(5)
+    model = streamnet.StreamNet()
+    with torch.no_grad():
+        for module in model.modules():
+            if isinstance(module, torch.nn.BatchNorm2d):
+                module.running_mean.uniform_(-0.5, 0.5)
+                module.running_var.uniform_(0.25, 2.25)
+                module.weight.uniform_(0.5, 1.5)
+        model.head.weight.normal_(0.0, 0.05)
+    return model.eval()
+
+
+def _stream_frame(frame, device):
+    """A random picture seeded by the frame's index, the model input's shape at STREAM_SIZE."""
+    return torch.rand((3, *STREAM_SIZE), generator=torch.Generator().manual_seed(int(frame[0, 0, 0])))
+
+
+@pytest.mark.parametrize("step, stride, count, batch", [
+    (1, 2, 47, 4), (1, 1, 23, 3), (2, 2, 31, 4), (5, 2, 33, 4), (3, 1, 14, 1),
+    (1, 2, 9, 4),               # one phase gets a single unit, the other none
+    (1, 2, 7, 4),               # no phase reaches five frames: no unit at all
+])
+def test_a_streaming_stream_net_answers_as_its_windowed_prepass(monkeypatch, step, stride, count, batch):
+    """The real network, streamed on the CPU through its PyTorch halves (deployed, so folded),
+    gives every frame the detection the windowed prepass gives with the trainable form: the same
+    point and confidence to float32 rounding, and nothing on a frame no unit covers."""
+    monkeypatch.setattr(ball_detectors, "_UNITS_PER_INFERENCE", batch)
+    monkeypatch.setattr(ball_detectors, "HEIGHT", STREAM_SIZE[0])
+    monkeypatch.setattr(ball_detectors, "WIDTH", STREAM_SIZE[1])
+    model = _stream_net()
+    answers = []
+    # The windowed constructor warms the network up on an FP16 unit, which the CPU cannot convolve.
+    unit_forward = StandInModel(lambda batch: model(batch.float()))
+    for streaming in (False, True):
+        cfg = Config(device="0", conf=0.0, gridtracknet_window_step=step, ball_prepass_streaming=streaming)
+        network = copy.deepcopy(model) if streaming else unit_forward
+        detector = CpuGridTrackNet(cfg, model=network, decode=None, frame_tensor=_stream_frame)
+        assert (detector.stream_halves is not None) == streaming and detector.engine is None
+        with patch.object(cv2, "VideoCapture", side_effect=lambda _: Capture(count)), \
+             patch.object(torch.cuda, "synchronize"):
+            answers.append(detector.detect_clip(Path("s.mp4"), _FPS_FOR_STRIDE[stride], 1920, 1080, count))
+    windowed, streamed = answers
+    assert len(windowed) == len(streamed) == count
+    for index, (plain, stream) in enumerate(zip(windowed, streamed)):
+        covered = len(range(index % stride, count, stride)) >= 5
+        assert bool(plain) == bool(stream) == covered, index
+        if covered:
+            (box, confidence), = plain
+            (stream_box, stream_confidence), = stream
+            assert stream_box == pytest.approx(box, abs=1e-3) and stream_confidence == pytest.approx(confidence, abs=1e-5)
 
 
 class FakeRemote:

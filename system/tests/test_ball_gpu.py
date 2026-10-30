@@ -8,7 +8,7 @@ import torch
 from tennis_tracker.engines import ball_gpu
 from tennis_tracker.cuda_kernels import KernelUnavailable
 from tennis_tracker.engines.ball_gpu import (
-    HeatRing, ModelResize, Nv12ModelResize, Readback, grid_peaks, peak_points,
+    HeatRing, ModelResize, Nv12ModelResize, Readback, StreamHalves, TransitionRing, grid_peaks, peak_points,
 )
 from tennis_tracker.video_decode import Nv12Frame, nv12_to_bgr
 from tennis_tracker.gridtracknet import HEIGHT, WIDTH, decode_grid, frame_tensor
@@ -136,3 +136,47 @@ def test_the_nv12_kernel_reads_rows_with_a_pitch_and_refuses_another_picture():
         resize(Nv12Frame(planes, True))
     with pytest.raises(ValueError, match="got a"):
         resize(Nv12Frame(padded[:90, :128], False))
+
+
+def _identity_halves(batch, calls):
+    """Halves whose transition features are (frame, previous) at two strides and whose decoder hands
+    back what it was given, recording each encoder batch."""
+    def encode(frames, before):
+        calls.append((frames.clone(), before.clone()))
+        return frames[:, :1].clone(), before[:, :1, :1, :1].clone()
+    def decode(first, second):         # (batch, 4) frame indices and (batch, 4) previous ones
+        return torch.stack([first[:, :, 0, 0], second[:, :, 0, 0]], dim=2)
+    return StreamHalves(encode=encode, decode=decode, batch=batch)
+
+
+def test_the_transition_ring_encodes_each_transition_once_and_gathers_each_units_four():
+    """Two phases of frames 0 to 13 (a frame's picture holds its index): a phase's first frame has no
+    transition, every full batch is encoded as it fills and a decode encodes the rest first; the
+    ring wraps (8 slots for 12 transitions) and each unit gets its four transitions in order,
+    padded with its last unit to the static batch."""
+    calls = []
+    ring = TransitionRing(_identity_halves(3, calls), slots=8, phases=2)
+    numbers = []
+    for index in range(14):
+        numbers.append(ring.push(torch.full((1, 2, 2), float(index)), index % 2))
+    assert numbers[:2] == [None, None] and numbers[2:] == list(range(12))
+    assert len(calls) == 4                                      # 12 transitions, batches of 3
+    frames, before = calls[1]
+    assert frames[:, 0, 0, 0].tolist() == [5.0, 6.0, 7.0] and before[:, 0, 0, 0].tolist() == [3.0, 4.0, 5.0]
+    phase0, phase1 = numbers[4:14:2], numbers[5:14:2]          # frames 4 to 12 and 5 to 13
+    output = ring.decode([phase0, phase1])
+    assert output.shape == (3, 4, 2)
+    assert output[:, :, 0].tolist() == [[6.0, 8.0, 10.0, 12.0], [7.0, 9.0, 11.0, 13.0], [7.0, 9.0, 11.0, 13.0]]
+    assert output[:, :, 1].tolist() == [[4.0, 6.0, 8.0, 10.0], [5.0, 7.0, 9.0, 11.0], [5.0, 7.0, 9.0, 11.0]]
+    with pytest.raises(ValueError, match="1 to 3 units a call, not 4"):
+        ring.decode([phase0] * 4)
+
+
+def test_the_transition_ring_refuses_a_unit_whose_transition_was_overwritten():
+    ring = TransitionRing(_identity_halves(2, []), slots=5, phases=1)
+    numbers = [ring.push(torch.full((1, 2, 2), float(index)), 0) for index in range(8)]
+    assert ring.decode([numbers[3:8]])[0, :, 0].tolist() == [4.0, 5.0, 6.0, 7.0]
+    with pytest.raises(RuntimeError, match="lost transition 1"):
+        ring.decode([numbers[1:6]])
+    with pytest.raises(ValueError, match="at least 4 slots"):
+        TransitionRing(_identity_halves(2, []), slots=3, phases=1)

@@ -131,7 +131,7 @@ class StandInModel:
 
 class CpuGridTrackNet(GridTrackNetBallDetector):
     """The real constructor, run on the CPU with an injected model (a callable, wrapped in
-    ``StandInModel`` unless it already is one), decoder and frame encoder.
+    ``StandInModel`` unless it already is one or is a real network), decoder and frame encoder.
 
     The constructor insists on CUDA and loads weights from disk; both are
     replaced for its duration only. ``on_publish`` sees every prefix the
@@ -139,7 +139,7 @@ class CpuGridTrackNet(GridTrackNetBallDetector):
     """
 
     def __init__(self, cfg, model, decode, frame_tensor, on_publish=None):
-        if not isinstance(model, StandInModel):
+        if not isinstance(model, (StandInModel, torch.nn.Module)):
             model = StandInModel(model)
         with patch.object(torch.cuda, "is_available", return_value=True), \
              patch.object(torch, "device", return_value=torch.device("cpu")), \

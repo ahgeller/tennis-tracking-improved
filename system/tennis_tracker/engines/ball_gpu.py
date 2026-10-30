@@ -20,11 +20,19 @@ earliest unit holding a frame holds it at the latest position), so the float32 s
 the host computed. ``grid_peaks`` is ``gridtracknet.decode_grid``'s argmax on the device (the first
 maximum, as NumPy's), returning the confidence, the two offsets and the flat cell index;
 ``peak_points`` turns them into points on the host with the same float arithmetic.
+
+``TransitionRing`` is the prepass's side of a network that streams (``streamnet``, ``stream_s4``):
+each frame's transition (the frame and the one before it in its phase) is encoded once, in batches
+of ``StreamHalves.batch``, its features kept in a ring of slots on the device, and each unit is
+decoded from the four slots of its transitions, gathered on the device by one ``index_select`` per
+stride. A unit is always the last five frames its phase has seen (``ball_detectors._UnitStream``),
+so its transitions are the phase's last four, whatever the window step.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -276,3 +284,109 @@ class Readback:
         if self.event is not None:
             self.event.synchronize()
         return self.host.numpy()
+
+
+@dataclass
+class StreamHalves:
+    """A streaming network's two halves as the prepass runs them: ``encode(frames, previous)``
+    (``(batch, 3, H, W)`` each) returns the transitions' features (one ``(batch, C, h, w)`` tensor
+    per stride) and ``decode(*features)`` (each ``(batch, 4 * C, h, w)``, a unit's four transitions
+    concatenated per stride in temporal order) the units' 15-channel output. Both take
+    exactly ``batch`` rows; ``stream`` is the CUDA stream they run on (TensorRT's), None for the
+    current one. Either may return buffers the next call overwrites."""
+
+    encode: Callable[..., Sequence[torch.Tensor]]
+    decode: Callable[..., torch.Tensor]
+    batch: int
+    stream: Optional[Any] = None
+
+
+class TransitionRing:
+    """One clip's transitions for ``StreamHalves`` (see the module docstring). ``push(frame, phase)``
+    takes each decoded frame's model input in order and returns the sequence number of the transition
+    ending at it (None for a phase's first frame, which has no previous frame); every ``batch`` of
+    them is encoded as it fills. ``decode(units)`` encodes what is left and returns the output of up
+    to ``batch`` units, each given as its five frames' values from ``push`` (the first is not read),
+    padded with copies of the last unit as a static batch is. Transition ``n`` lives in slot
+    ``n % slots``; a unit whose transition was overwritten before it was decoded is a RuntimeError
+    (``transition_slots`` sizes the ring so the prepass never does that)."""
+
+    def __init__(self, halves: StreamHalves, slots: int, phases: int):
+        self.halves = halves
+        self.batch = int(halves.batch)
+        self.slots = int(slots)
+        if self.slots < FRAMES_PER_UNIT - 1:
+            raise ValueError(f"TransitionRing needs at least {FRAMES_PER_UNIT - 1} slots, not {slots}")
+        self.previous: List[Optional[torch.Tensor]] = [None] * int(phases)
+        self.pushed = 0                 # transitions numbered so far
+        self.encoded = 0                # transitions below this number are in the ring
+        self.frames: Optional[torch.Tensor] = None              # the encoder's inputs: the frame ...
+        self.before: Optional[torch.Tensor] = None              # ... and the one before it
+        self.features: List[torch.Tensor] = []                  # per stride, (slots, C, h, w)
+        self.gathered: List[torch.Tensor] = []                  # per stride, the decoder's (batch, 4 C, h, w) input
+
+    def push(self, frame: torch.Tensor, phase: int) -> Optional[int]:
+        previous, self.previous[phase] = self.previous[phase], frame
+        if previous is None:
+            return None
+        if self.frames is None:
+            self.frames = torch.empty((self.batch, *frame.shape), dtype=frame.dtype, device=frame.device)
+            self.before = torch.empty_like(self.frames)
+        assert self.before is not None
+        row = self.pushed - self.encoded
+        self.frames[row].copy_(frame)
+        self.before[row].copy_(previous)
+        self.pushed += 1
+        if self.pushed - self.encoded == self.batch:
+            self._encode()
+        return self.pushed - 1
+
+    def _encode(self) -> None:
+        """Encode the transitions pushed since the last call (the rows past them are stale and
+        their answers are dropped) into their slots, wrapping at the ring's end."""
+        count = self.pushed - self.encoded
+        if count == 0:
+            return
+        features = self.halves.encode(self.frames, self.before)
+        if not self.features:
+            self.features = [torch.empty((self.slots, *level.shape[1:]), dtype=level.dtype, device=level.device)
+                             for level in features]
+            pairs = FRAMES_PER_UNIT - 1
+            self.gathered = [torch.empty((self.batch, pairs * level.shape[1], *level.shape[2:]), dtype=level.dtype,
+                                         device=level.device) for level in features]
+        start = self.encoded % self.slots
+        first = min(count, self.slots - start)
+        for ring, level in zip(self.features, features):
+            ring[start:start + first].copy_(level[:first])
+            if first < count:
+                ring[:count - first].copy_(level[first:count])
+        self.encoded = self.pushed
+
+    def decode(self, units: Sequence[Sequence[Optional[int]]]) -> torch.Tensor:
+        if not 0 < len(units) <= self.batch:
+            raise ValueError(f"TransitionRing decodes 1 to {self.batch} units a call, not {len(units)}")
+        self._encode()
+        padded = list(units) + [units[-1]] * (self.batch - len(units))
+        numbers = [int(number) for unit in padded for number in unit[1:]]      # type: ignore[arg-type]
+        if self.encoded - min(numbers) > self.slots:
+            raise RuntimeError(f"TransitionRing of {self.slots} slots lost transition {min(numbers)} "
+                               f"before its unit was decoded ({self.encoded} encoded)")
+        device = self.features[0].device
+        index = torch.tensor([number % self.slots for number in numbers], dtype=torch.long)
+        if device.type == "cuda":           # pinned, so the copy does not wait for the stream
+            index = index.pin_memory().to(device, non_blocking=True)
+        for ring, gathered in zip(self.features, self.gathered):
+            torch.index_select(ring, 0, index, out=gathered.view(len(numbers), *ring.shape[1:]))
+        return self.halves.decode(*self.gathered)
+
+
+def transition_slots(batch: int, step: int, stride: int) -> int:
+    """Slots enough for a ``TransitionRing`` behind the prepass with `batch` units a call, a unit
+    every `step` frames of each of `stride` phases; at most one transition is pushed per source
+    frame. A unit's four transitions were pushed within the ``4 * stride`` source frames it spans,
+    and it is decoded at the latest when its call fills, ``batch - 1`` units later: every phase cuts
+    one every ``step * stride`` source frames, so within ``ceil((batch - 1) / stride) * step * stride``
+    frames. One more ``stride`` covers phases starting a frame apart, and one slot the transition
+    being written. Measured over steps 1 to 5, 1 to 3 phases and batches 1 to 8, a ring two slots
+    smaller still never lost a transition (``audit/records/opt_stream_prepass.md`` on the optimization branch)."""
+    return (FRAMES_PER_UNIT - 1) * stride + -(-(batch - 1) // stride) * step * stride + stride + 1

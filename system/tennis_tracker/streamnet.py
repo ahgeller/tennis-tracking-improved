@@ -161,6 +161,38 @@ class StreamNet(nn.Module):
         repvgg.fuse_for_inference(self)
         return self
 
+    def streaming_halves(self) -> Tuple["StreamEncoder", "StreamDecoder"]:
+        """The network as the two modules a streaming prepass runs (and exports to TensorRT), both
+        sharing this network's weights: ``StreamEncoder`` (one transition at a time) and
+        ``StreamDecoder`` (one unit from its four transitions' features). A detector streams the
+        model it holds when it has this method (``ball_detectors``)."""
+        return StreamEncoder(self), StreamDecoder(self)
+
+
+class StreamEncoder(nn.Module):
+    """``StreamNet.encode_frame`` as a module: ``(frame, previous)`` (each ``(N, 3, H, W)``) to the
+    transitions' features at strides 4, 8 and 16."""
+
+    def __init__(self, model: StreamNet):
+        super().__init__()
+        self.model = model
+
+    def forward(self, frame: torch.Tensor, previous: torch.Tensor) -> PairFeatures:
+        return self.model.encode_frame(frame, previous)
+
+
+class StreamDecoder(nn.Module):
+    """``StreamNet.decode`` as a module on the four transitions' features already concatenated per
+    stride in temporal order (``(N, PAIRS_PER_UNIT * C, h, w)`` at each of strides 4, 8 and 16, the
+    layout ``torch.cat`` of the four gives), to the unit's 15-channel output."""
+
+    def __init__(self, model: StreamNet):
+        super().__init__()
+        self.model = model
+
+    def forward(self, quarter: torch.Tensor, eighth: torch.Tensor, bottom: torch.Tensor) -> torch.Tensor:
+        return self.model._decode(quarter, eighth, bottom)
+
 
 def stream_units(model: StreamNet, frames: Sequence[torch.Tensor]) -> List[torch.Tensor]:
     """Every five-frame unit's output over one phase's consecutive `frames` (each ``(N, 3, H, W)``),

@@ -38,6 +38,11 @@ class Config:
     # torch, with a message, when it is not installed or cannot build the model.
     ball_prepass_runtime: str = "tensorrt"
     ball_engine_batch: int = 4          # units per engine call (the batch sweep in audit/records/opt_ball_prepass.md)
+    # A network that can stream (stream_s4) encodes each frame's transition once and decodes every
+    # unit from the cached features (ball_gpu.TransitionRing), as two engines; off, it runs unit by
+    # unit like any other. The units are the same and their answers agree to FP16 rounding
+    # (audit/records/opt_stream_prepass.md on the optimization branch).
+    ball_prepass_streaming: bool = True
     ball_engine_dir: str = str(MODELS / "engine_cache")
     # Run the background prepass in a child process (engines/ball_prepass_process.py) instead of a
     # worker thread, so it never contends with pass 1 for the interpreter lock.
