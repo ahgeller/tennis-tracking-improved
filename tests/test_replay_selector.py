@@ -35,7 +35,7 @@ def _payload(tracks, present_frames):
             "chosen_track": tracks[0], "tracks": tracks, "motion_diagnostics": {}, "court_events": {}, "frames": frames}
 
 
-BALL = list(range(0, 12)) + list(range(14, 30))          # a two-frame hole at 12 and 13
+BALL = list(range(0, 12)) + list(range(13, 30))          # a one-frame hole at 12 (a fill bridges one detector step)
 CLUTTER = [34, 35, 36]                                   # a short slow track far from the ball
 
 
@@ -63,8 +63,8 @@ def test_the_chain_fills_the_hole_the_raw_variant_leaves_and_the_union_keeps_eve
                for variant in VARIANTS}
     assert present["control"] == set(BALL)
     assert present["raw"] == set(BALL) | set(CLUTTER)                     # every detection, nothing filled
-    assert present["chain"] == set(BALL) | {12, 13}                        # the chosen ball, its hole filled
-    assert present["union"] == set(BALL) | {12, 13} | set(CLUTTER)         # every track, the fills over them
+    assert present["chain"] == set(BALL) | {12}                            # the chosen ball, its hole filled
+    assert present["union"] == set(BALL) | {12} | set(CLUTTER)             # every track, the fills over them
     chain = replay_variant("chain", payload)
     assert [track["track_id"] for track in chain["tracks"]] == [0, 1] and chain["chosen_track"]["track_id"] == 0
     assert chain["frames"][5]["player_boxes"] == {} and chain["frames"][12]["source"] == "interp"
@@ -90,10 +90,10 @@ def test_report_scores_every_variant_against_the_labels_per_source_and_pooled(tm
         elif text:
             by_variant[variant][text.split()[0]] = text
     assert set(by_variant) == {"control", "chain", "raw"} and list(by_variant["chain"]) == ["video13", "source=prof", "ALL"]
-    assert "hits=   30 wrong=  0 tracks=   2" in by_variant["chain"]["ALL"]        # the hole's two frames filled
+    assert "hits=   30 wrong=  0 tracks=   2" in by_variant["chain"]["ALL"]        # the hole filled
     assert "hits=   30" in by_variant["chain"]["source=prof"]
-    assert "hits=   28 wrong=  0 tracks=   2" in by_variant["control"]["ALL"]      # the run as written: the hole open
-    assert "hits=   28 wrong=  0 tracks=   0" in by_variant["raw"]["ALL"]
+    assert "hits=   29 wrong=  0 tracks=   2" in by_variant["control"]["ALL"]      # the run as written: the hole open
+    assert "hits=   29 wrong=  0 tracks=   0" in by_variant["raw"]["ALL"]
     assert "falseAlarm=1.000 (3/3: bridged=0 false=3)" in by_variant["raw"]["video13"]      # the clutter, no chooser
     assert "falseAlarm=0.000 (0/3: bridged=0 false=0)" in by_variant["chain"]["video13"]
     assert main([str(run_dir), "--archive", str(tmp_path), "--variant", *DEFAULT_VARIANTS]) == 0
