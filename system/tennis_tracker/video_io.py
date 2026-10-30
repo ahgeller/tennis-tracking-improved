@@ -72,8 +72,8 @@ BGR_TO_GRAY = (0.114, 0.587, 0.299)
 
 
 def pinned_source(frame: np.ndarray) -> Optional[torch.Tensor]:
-    """The pinned tensor `frame` was decoded into (``ThreadedFrameReader(pinned=True)``), when it
-    is one: the uploader copies from it straight to the device. Else None."""
+    """The pinned tensor `frame` was decoded into (``ThreadedFrameReader(pinned_shape=...)``), when
+    it is one: the uploader copies from it straight to the device. Else None."""
     base = frame.base
     if (isinstance(base, torch.Tensor) and base.is_pinned() and tuple(base.shape) == frame.shape
             and base.data_ptr() == frame.ctypes.data):
@@ -394,9 +394,10 @@ def _close_pipes(proc: subprocess.Popen) -> None:
 
 
 class FrameCapture(Protocol):
-    """What ``ThreadedFrameReader`` reads from: ``cv2.VideoCapture`` or a ``video_decode`` decoder."""
+    """What ``ThreadedFrameReader`` reads from: ``cv2.VideoCapture`` or a ``video_decode`` decoder.
+    ``read`` may decode into ``image`` (OpenCV does when its shape and type fit) or ignore it."""
 
-    def read(self) -> Tuple[bool, Any]: ...
+    def read(self, image: Optional[np.ndarray] = None) -> Tuple[bool, Any]: ...
 
     def release(self) -> None: ...
 
@@ -448,11 +449,21 @@ class ThreadedFrameReader:
     def _read(self) -> Tuple[bool, Any]:
         """The capture's next frame; with ``pinned_shape``, decoded into a fresh pinned buffer from
         PyTorch's caching host allocator, which ``PinnedFrameUploader`` copies to the device as it
-        is (OpenCV writes into a buffer of the frame's shape and type, and allocates one otherwise)."""
+        is. A capture that does not decode into the buffer (frames of another size, which OpenCV
+        allocates its own array for, or a decoder with its own buffers) ends the pinned reads: the
+        frames are read as they come, with a warning when their size is not the one expected."""
         if self._pinned_shape is None:
             return self._cap.read()
         h, w = self._pinned_shape
-        return self._cap.read(torch.empty((h, w, 3), dtype=torch.uint8, pin_memory=True).numpy())
+        buffer = torch.empty((h, w, 3), dtype=torch.uint8, pin_memory=True).numpy()
+        ret, frame = self._cap.read(buffer)
+        if ret and not (isinstance(frame, np.ndarray) and frame.ctypes.data == buffer.ctypes.data):
+            self._pinned_shape = None
+            shape = getattr(frame, "shape", None)
+            if shape is not None and tuple(shape[:2]) != (h, w):
+                print(f"[decode] frames are {shape[1]}x{shape[0]}, not the {w}x{h} the clip reported; "
+                      "reading them without pinned buffers")
+        return ret, frame
 
     def read(self) -> Optional[np.ndarray]:
         if self._done:

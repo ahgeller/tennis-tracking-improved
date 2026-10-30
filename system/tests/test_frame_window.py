@@ -222,11 +222,43 @@ def test_frames_decoded_into_pinned_memory_upload_from_it_and_leave_the_cache_pa
     frames = []
     while (frame := reader.read()) is not None:
         ok, expected = plain.read()
-        assert ok and np.array_equal(frame, expected) and pinned_source(frame) is not None
+        assert ok
+        assert np.array_equal(frame, expected)
+        assert pinned_source(frame) is not None
         assert torch.equal(uploader.upload_hwc_u8(frame).cpu(), torch.from_numpy(expected))
         cache.add(frame)
         frames.append(frame)
     reader.release()
-    assert len(frames) == 5 and len({f.ctypes.data for f in frames}) == 5     # one buffer a frame
-    assert all(pinned_source(f) is None and np.array_equal(f, g) for f, g in zip(cache.frames, frames))
+    assert len(frames) == 5
+    assert len({f.ctypes.data for f in frames}) == 5                  # one buffer a frame
+    assert len(cache.frames) == 5
+    for cached, frame in zip(cache.frames, frames):
+        assert pinned_source(cached) is None
+        assert np.array_equal(cached, frame)
+    # A frame that was not decoded into a pinned buffer has none to upload from.
     assert pinned_source(_random_frame(0, 54, 96)) is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_frames_of_another_size_end_the_pinned_reads_with_one_warning(tmp_path, capsys):
+    """The clip reported one size and decodes at another: the first read finds OpenCV did not use
+    the pinned buffer, says so once, and the reader stops allocating them; every frame still comes."""
+    import cv2
+
+    from tennis_tracker.video_io import ThreadedFrameReader, pinned_source
+
+    path = tmp_path / "clip.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (96, 54))
+    for index in range(4):
+        writer.write(_random_frame(index, 54, 96))
+    writer.release()
+    reader = ThreadedFrameReader(cv2.VideoCapture(str(path)), prefetch=2, pinned_shape=(50, 90))
+    frames = []
+    while (frame := reader.read()) is not None:
+        frames.append(frame)
+    reader.release()
+    assert len(frames) == 4
+    assert all(f.shape == (54, 96, 3) and pinned_source(f) is None for f in frames)
+    assert reader._pinned_shape is None
+    out = capsys.readouterr().out
+    assert out.count("frames are 96x54, not the 90x50") == 1

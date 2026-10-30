@@ -319,7 +319,9 @@ class NvdecDecoder:
             self._ready.record(self._stream)
         self._pending = list(bgr.unbind(0))
 
-    def read(self) -> Tuple[bool, Optional[Decoded]]:
+    def read(self, image: Optional[np.ndarray] = None) -> Tuple[bool, Optional[Decoded]]:
+        """The next frame; ``image`` is ignored (NVDEC decodes into its own buffers, pinned ones for
+        host frames), so ``ThreadedFrameReader``'s pinned reads stop after the first frame."""
         if not self._pending and not self._refill():
             return False, None
         frame = self._pending.pop(0)
@@ -355,12 +357,13 @@ class OpenCVDecoder:
         if not self._capture.isOpened():
             raise RuntimeError(f"Could not open the video: {self._path}")
 
-    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+    def read(self, image: Optional[np.ndarray] = None) -> Tuple[bool, Optional[np.ndarray]]:
+        """The next frame, decoded into ``image`` when its shape and type fit (``cv2.VideoCapture.read``)."""
         while self._skip:
             if not self._capture.grab():
                 return False, None
             self._skip -= 1
-        ok, frame = self._capture.read()
+        ok, frame = self._capture.read() if image is None else self._capture.read(image)
         if ok:
             self.next_index += 1
         return ok, frame
