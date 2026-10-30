@@ -36,15 +36,19 @@ are unchanged; `--weights` selects the new model.
   Script: `slot_margin.py` in the scratchpad.
 - **Two engines** (`ball_trt.ensure_stream_engines`, `open_stream_engines`). `StreamNet.streaming_halves`
   gives `StreamEncoder` (`encode_frame` as a module) and `StreamDecoder` (`_decode` on the four
-  transitions concatenated per stride). The halves are exported from the deployed form. Their
-  weights are folded in float32, then cast to FP16 once, because TensorRT cannot merge RepVGG's
-  parallel branches (`opt_detector_archs.md`, decision 5). Each half is cached as its own file. Its
-  key adds `part=encoder|decoder` to the existing key: weights digest, arch, batch, input size,
-  TensorRT, torch, GPU name and compute capability, and recipe. The whole-model key has no part
-  line, so it is the key it was before (a test recomputes it from the documented fields). Proof
+  transitions concatenated per stride). The halves are exported from the deployed form, which
+  `ball_models.load_deployed` builds in float32 from the `.pt` record, folds and only then casts to
+  FP16, so each fused weight is rounded once. Folding is needed because TensorRT cannot merge
+  RepVGG's parallel branches (`opt_detector_archs.md`, decision 5). Each half is cached as its own
+  file. Its key adds `part=encoder|decoder` and `halves_recipe=2` to the existing key: weights
+  digest, arch, batch, input size, TensorRT, torch, GPU name and compute capability, and recipe.
+  The whole-model key has neither line, so it is the key it was before (a test recomputes it from
+  the documented fields). Proof
   in practice: the windowed engine this tree built, `stream_s4_e60-stream_s4-b4-56c786801e724068`,
   has exactly the name the base tree built. Both halves run on one stream, which the prepass works
-  on, at addresses bound per call; the engine sizes are 0.74 MB and 0.88 MB.
+  on, at addresses bound per call; each call checks every input's shape, dtype and contiguity
+  against the engine's binding, and the batch is read from the bindings (the two halves must
+  agree). The engine sizes are 0.74 MB and 0.88 MB.
 - **Selection and fallback.** The detector streams any model that has `streaming_halves`, unless
   `Config.ball_prepass_streaming` (default on) is off. If TensorRT cannot provide the engines, it
   prints `TensorRT engines unavailable, streaming the PyTorch model (...)` and streams the PyTorch
@@ -57,7 +61,8 @@ are unchanged; `--weights` selects the new model.
 
 ## 1. Parity on Pomona
 
-Script: `parity.py` in the scratchpad. It ran 4 prepasses at confidence 0, so every covered frame
+Script: `tools/stream_prepass_parity.py --weights system/models/candidates/stream_s4_e60.pt --out
+<dir>` (committed; it writes `parity.json`). It ran 4 prepasses at confidence 0, so every covered frame
 reports its peak, and recorded every unit's 15-channel output as the prepass handed it to the heat
 ring (2014 units):
 
@@ -71,30 +76,36 @@ Per unit, max absolute difference over all 15 channels and 192x108 cells:
 
 | pair | max heat | p99 of per-unit max heat | median per-unit max heat | max offset (cell units) |
 |---|---:|---:|---:|---:|
-| W vs S | 0.0109 | 0.0056 | 0.0018 | 0.063 |
+| W vs S | 0.0125 | 0.0061 | 0.0020 | 0.060 |
 | W vs R | 0.0090 | 0.0049 | 0.0015 | 0.055 |
-| **S vs R** | **0.0051** | 0.0037 | 0.0015 | 0.054 |
-| T vs R | 0.0037 | 0.0024 | 0.0010 | 0.025 |
-| T vs S | 0.0034 | 0.0027 | 0.0010 | 0.051 |
+| **S vs R** | **0.0063** | 0.0034 | 0.0013 | 0.049 |
+| T vs R | 0.0034 | 0.0022 | 0.0009 | 0.023 |
+| T vs S | 0.0044 | 0.0029 | 0.0011 | 0.058 |
 
-The streamed engines are closer to the FP32 reference than the windowed engine is (0.0051 against
+The streamed engines are closer to the FP32 reference than the windowed engine is (0.0063 against
 0.0090). So W vs S is two FP16 roundings, not a streaming error. Folding before export plausibly
 helps: TensorRT runs one convolution instead of three branches summed in FP16. A cell offset of
-0.063 is 0.25 model px, or 0.63 source px. The schedule itself is exact: the CPU test below
+0.060 is 0.24 model px, or 0.6 source px.
+
+These are the numbers with the single-rounding fold. The first version folded the already-FP16
+model (rounded twice) and measured S vs R 0.0051, T vs R 0.0037 and W vs S 0.0109: T moved closer
+to the reference, and the rebuilt engines moved by an amount of the same size in the other
+direction, which is TensorRT's FP16 kernel choice rather than the weights. The schedule itself is exact: the CPU test below
 matches the windowed prepass to float32 rounding.
 
 Per frame, after the heat ring's averaging and the device peak:
 
 | pair | presence differs | detections at 0.3 / 0.4 / 0.5 | frames that differ at 0.3 / 0.4 / 0.5 | same frame, > 4 px apart, above 0.3 | max confidence difference |
 |---|---:|---|---|---:|---:|
-| W vs S | 0 | 1250/1249, 1130/1130, 1049/1049 | 3, 0, 0 | 0 | 0.0039 |
+| W vs S | 0 | 1250/1249, 1130/1128, 1049/1049 | 3, 2, 0 | 0 | 0.0039 |
 | W vs R | 0 | 1250/1249, 1130/1129, 1049/1049 | 3, 1, 0 | 0 | 0.0029 |
-| S vs R | 0 | 1249/1249, 1130/1129, 1049/1049 | 0, 1, 0 | 0 | 0.0027 |
+| S vs R | 0 | 1249/1249, 1128/1129, 1049/1049 | 0, 3, 0 | 0 | 0.0026 |
 
-At the tracker's 0.4 threshold and at 0.5, streamed and windowed detections are identical on every
-frame. At 0.3, 3 frames sit within 0.004 of the threshold and flip. The windowed engine flips just
-as many against the FP32 reference. Five frames move their peak by more than 4 px, all below 0.3:
-the argmax jumps between near-equal background cells.
+At 0.5, streamed and windowed detections are identical on every frame. At 0.3 (3 frames) and at
+the tracker's 0.4 (2 frames), frames within 0.004 of the threshold flip; the windowed engine flips
+3 and 1 against the FP32 reference. (With the first, twice-rounded fold, 0.4 was identical and 0.3
+differed by the same 3 frames.) Four frames move their peak by more than 4 px, all below 0.3: the
+argmax jumps between near-equal background cells.
 
 ### Unit tests (no GPU)
 
@@ -117,7 +128,14 @@ the argmax jumps between near-equal background cells.
   unchanged. One export serves both halves, which are built once and then found in the cache. The
   runtime choice: engines on a GPU; PyTorch halves on request, off the GPU, or on a TensorRT
   failure (with the message); no streaming when it is off, where the model stays unfolded as
-  loaded, or for a model without halves.
+  loaded, or for a model without halves. With a GPU and TensorRT (skipped otherwise),
+  `test_a_small_streaming_networks_engines_stream_what_its_forward_pass_answers` builds a small
+  StreamNet's two halves (64x96, batch 2) as real engines, runs 7 frames through a 6-slot ring
+  (so it wraps) and compares 3 units with the float32 forward pass: max 0.066 and mean 0.0007
+  against a mean of 0.084 for the wrong unit. A wrong-dtype input is refused. The engines are
+  cached in pytest's cache, so only a machine's first run pays the build (about 60 s; 4 s after).
+- `test_fast_ball_models.py`: `load_deployed` gives exactly the float32 fold rounded once, for
+  every fast architecture, and folding the FP16 model does not.
 - Mutation check: off-by-one slot indices fail 66 of the 72 streaming cases. The 6 that pass are
   the cases where no unit is decoded.
 
@@ -131,19 +149,19 @@ Config), so "before" means the base tree (windowed) and "after" means this tree 
 | conf | before: recall / wrong / falseAlarm | after: recall / wrong / falseAlarm |
 |---|---|---|
 | 0.30 | 0.965 / 0.006 / 0.195 (101/518) | 0.965 / 0.006 / 0.195 (101/518) |
-| 0.40 | 0.952 / 0.005 / 0.106 (55/518) | 0.953 / 0.005 / 0.108 (56/518) |
+| 0.40 | 0.952 / 0.005 / 0.106 (55/518) | 0.952 / 0.005 / 0.106 (55/518) |
 | 0.50 | 0.930 / 0.004 / 0.052 (27/518) | 0.930 / 0.004 / 0.052 (27/518) |
 
-At 0.3 and 0.5 the pooled lines are identical. At 0.4, a few frames sit at the threshold and flip
-under FP16 rounding: 2 more visible hits (8119 to 8121) and 1 more false alarm (video20, 3/10 to
-4/10). In the per-clip table, 4 of 24 clips change in the third decimal. The before value is the
+The pooled lines are identical at all three thresholds. In the per-clip table one value changes:
+video17's median error rounds to 0.8 px instead of 0.7 px. (The first, twice-rounded fold flipped
+a few frames at 0.4: recall 0.953 and 56/518 false alarms.) The before value is the
 held-out figure the task quotes (0.930 / 0.052 at 0.5).
 
 Tracker JSONs on Pomona (`clean_tracker.py --no-video`, the timing runs below): each path is
 deterministic run to run, with 0 differences between its own runs.
 
-- Streamed against windowed: selected frames go from 1102 to 1094, and the track count from 18 to
-  19. On the 1094 frames both select, the median move is 0.001 px and the max 1.9 px.
+- Measured with the first, twice-rounded fold. Streamed against windowed: selected frames go
+  from 1102 to 1094, and the track count from 18 to 19. On the 1094 frames both select, the median move is 0.001 px and the max 1.9 px.
 - The 8 frames (1488, 1498-1504) are a far-court segment, y about 114. The detections the selector
   received there are the same set at 0.4: confidences move by at most 0.004, positions by about
   0.001 px.
@@ -209,6 +227,7 @@ import. The isolated prepass bench above is the number to use.
 
 - New:
   - this record
+  - `tools/stream_prepass_parity.py` (the parity check of section 1)
 - Changed:
   - `system/tennis_tracker/streamnet.py` (`streaming_halves`, `StreamEncoder`, `StreamDecoder`)
   - `system/tennis_tracker/engines/ball_gpu.py` (`StreamHalves`, `TransitionRing`, `transition_slots`)
@@ -216,13 +235,17 @@ import. The isolated prepass bench above is the number to use.
     `ensure_stream_engines`, `open_stream_engines`)
   - `system/tennis_tracker/engines/ball_detectors.py` (`_open_stream`, the prepass's two branch
     points)
+  - `system/tennis_tracker/ball_models.py` (`load_deployed`)
+  - `system/tennis_tracker/engines/engine_session.py` (`deserialize_engine` and `torch_dtype` made
+    public for `ball_trt`)
   - `system/tennis_tracker/config.py` (`ball_prepass_streaming`)
   - `system/AGENTS.md`
   - `audit/records/opt_detector_archs.md` (its open issue points here)
-  - tests: `system/tests/test_ball_detectors.py`, `test_ball_gpu.py`, `test_ball_trt.py` and
+  - tests: `system/tests/test_ball_detectors.py`, `test_ball_gpu.py`, `test_ball_trt.py`,
+    `test_fast_ball_models.py` and
     `_helpers.py` (`CpuGridTrackNet` takes a real network unwrapped)
 
-Tests: `python -m pytest -q` passes in `system/` (548 passed, 1 skipped) and at the root (1275 passed, 1 skipped). `mypy`
+Tests: `python -m pytest -q` passes in `system/` (552 passed, 1 skipped) and at the root (1279 passed, 1 skipped). `mypy`
 is clean in `system/` (17 files) and at the root.
 
 ## Open issues

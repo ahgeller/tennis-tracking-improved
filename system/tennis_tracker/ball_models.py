@@ -75,6 +75,19 @@ def load_ball_model(weights: Path, device: torch.device) -> nn.Module:
     return _MODULES[arch_of(weights)].load_model(Path(weights), device)
 
 
+def load_deployed(weights: Path, device: torch.device) -> nn.Module:
+    """The FP16 inference form of `weights` on ``device``: a ``.pt`` record's trainable network
+    built in float32 from the record, folded (``deployed``) and only then cast to FP16, so each
+    fused weight is rounded to FP16 once; GridTrackNet (``.npz``), which has nothing to fold, as
+    ``load_ball_model`` loads it."""
+    arch = arch_of(weights)
+    if WEIGHTS_SUFFIX[arch] != _RECORD_SUFFIX:
+        return load_ball_model(weights, device)
+    model = model_class(arch)()
+    model.load_state_dict(heatmapnet.read_record(Path(weights), arch)["state_dict"])
+    return deployed(model.eval()).to(device).half()
+
+
 def deployed(model: nn.Module) -> nn.Module:
     """`model` in its inference form, in place: a network with a ``reparameterize`` (the RepVGG
     and BatchNorm folds of ``repvgg.fuse_for_inference``) is fused, which answers the same to

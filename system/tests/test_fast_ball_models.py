@@ -11,7 +11,8 @@ import torch
 from torch import nn
 
 from tennis_tracker import ball_models, repvgg, streamnet
-from tennis_tracker.ball_models import HEATMAP_LITE, STREAM_S4, WASB_5F, arch_of, deployed, load_ball_model, model_class
+from tennis_tracker.ball_models import (HEATMAP_LITE, STREAM_S4, WASB_5F, arch_of, deployed, load_ball_model,
+                                         load_deployed, model_class)
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, HEIGHT, INPUT_CHANNELS, WIDTH
 from tennis_tracker.heatmapnet import HEAT_PRIOR, HeatmapNet, save_model
 
@@ -199,3 +200,23 @@ def test_a_fresh_network_answers_the_heat_prior_with_its_real_features(arch):
     heat = output[:, 0::3]
     assert float(heat.mean()) == pytest.approx(HEAT_PRIOR, abs=0.005) and float(heat.std()) < 0.01
     assert float(model.head.weight.detach().std()) == pytest.approx(repvgg.HEAD_STD, rel=0.2)
+
+
+@pytest.mark.parametrize("arch", FAST)
+def test_the_deployed_load_folds_the_float32_record_and_rounds_to_fp16_once(arch, tmp_path):
+    """``load_deployed`` folds the record's float32 weights and casts the result to FP16 once:
+    exactly the float32 fold rounded, which folding the FP16 model ``load_ball_model`` gives
+    (rounded twice) is not."""
+    torch.manual_seed(0)
+    weights = tmp_path / f"{arch}.pt"
+    save_model(scrambled(model_class(arch)()), weights)
+    loaded = load_deployed(weights, CPU)
+    reference = deployed(copy.deepcopy(load_ball_model(weights, CPU)).float())
+    record = model_class(arch)()
+    record.load_state_dict(torch.load(weights, weights_only=True)["state_dict"])
+    once = deployed(record.eval()).half()
+    assert not any(isinstance(module, nn.BatchNorm2d) for module in loaded.modules())
+    pairs = list(zip(loaded.state_dict().values(), once.state_dict().values()))
+    assert pairs and all(a.dtype == torch.float16 and torch.equal(a, b) for a, b in pairs)
+    twice = [a for a, b in zip(loaded.state_dict().values(), reference.half().state_dict().values()) if not torch.equal(a, b)]
+    assert twice                                                # the FP16 model's fold rounds differently

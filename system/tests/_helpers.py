@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 
+from tennis_tracker.ball_models import deployed
 from tennis_tracker.engines import ball_detectors
 from tennis_tracker.engines.ball_detectors import GridTrackNetBallDetector
 from tennis_tracker.config import Config
@@ -144,7 +145,8 @@ class CpuGridTrackNet(GridTrackNetBallDetector):
         with patch.object(torch.cuda, "is_available", return_value=True), \
              patch.object(torch, "device", return_value=torch.device("cpu")), \
              patch.object(torch.cuda, "synchronize"), \
-             patch.object(ball_detectors, "load_ball_model", return_value=model):
+             patch.object(ball_detectors, "load_ball_model", return_value=model), \
+             patch.object(ball_detectors, "load_deployed", side_effect=lambda weights, device: deployed(model)):
             super().__init__("unused.npz", cfg)
         self._decode = decode
         self._frame_tensor = frame_tensor

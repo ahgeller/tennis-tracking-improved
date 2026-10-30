@@ -44,7 +44,8 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   `streaming_halves` unless `Config.ball_prepass_streaming` is off) and `wasbnet.py` (`wasb_5f`, WASB-SBDT's
   small HRNet at stride 4). `repvgg.py` holds their RepVGG blocks and the fold to plain
   convolutions: `ball_models.deployed(model)` is the inference form (export it, not the
-  trainable one `load_ball_model` returns). Measurements: `audit/records/opt_detector_archs.md`
+  trainable one `load_ball_model` returns); `ball_models.load_deployed(weights, device)` folds
+  from the float32 record, so each fused weight is rounded to FP16 once. Measurements: `audit/records/opt_detector_archs.md`
   on the `optimization` branch.
 - `tennis_tracker/engines/`: `ball_detectors.py`, the progressive GridTrackNet
   prepass and the single-frame TensorRT ball engine. At about 60 FPS, even and

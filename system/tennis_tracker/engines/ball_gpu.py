@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
@@ -367,7 +367,10 @@ class TransitionRing:
             raise ValueError(f"TransitionRing decodes 1 to {self.batch} units a call, not {len(units)}")
         self._encode()
         padded = list(units) + [units[-1]] * (self.batch - len(units))
-        numbers = [int(number) for unit in padded for number in unit[1:]]      # type: ignore[arg-type]
+        given = [number for unit in padded for number in unit[1:]]
+        if any(number is None for number in given):
+            raise ValueError("a unit's frames past its first must each end a transition (a number from push)")
+        numbers = cast(List[int], given)
         if self.encoded - min(numbers) > self.slots:
             raise RuntimeError(f"TransitionRing of {self.slots} slots lost transition {min(numbers)} "
                                f"before its unit was decoded ({self.encoded} encoded)")

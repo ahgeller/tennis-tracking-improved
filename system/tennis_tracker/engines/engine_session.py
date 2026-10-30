@@ -32,11 +32,11 @@ def import_tensorrt() -> Any:
     return trt
 
 
-def _torch_dtype(np_dtype: npt.DTypeLike) -> torch.dtype:
+def torch_dtype(np_dtype: npt.DTypeLike) -> torch.dtype:
     return torch.from_numpy(np.empty((0,), dtype=np_dtype)).dtype
 
 
-def _deserialize_engine(trt: Any, engine_path: str) -> Tuple[Any, Any]:
+def deserialize_engine(trt: Any, engine_path: str) -> Tuple[Any, Any]:
     """Load ``engine_path`` (with or without the Ultralytics metadata header)
     and create its execution context."""
     _, raw = read_engine_header(Path(engine_path))
@@ -90,7 +90,7 @@ class TensorRTRuntimeSession:
             raise RuntimeError("TensorRT session requires CUDA-enabled torch.")
         trt = import_tensorrt()
         self.device = device if device is not None else torch.device("cuda:0")
-        self.engine, self.context = _deserialize_engine(trt, engine_path)
+        self.engine, self.context = deserialize_engine(trt, engine_path)
 
         self.use_async = bool(async_execute) and hasattr(self.context, "execute_async_v3")
         self.stream = torch.cuda.Stream(device=self.device) if self.use_async else None
@@ -135,7 +135,7 @@ class TensorRTRuntimeSession:
             else:
                 self.output_names.append(io.name)
             shape_now = tuple(self.context.get_tensor_shape(io.name))
-            tensor = torch.empty(shape_now, dtype=_torch_dtype(np_dtype), device=self.device)
+            tensor = torch.empty(shape_now, dtype=torch_dtype(np_dtype), device=self.device)
             self.bindings[io.name] = _Binding(io.name, io.index, np_dtype, shape_now, tensor, int(tensor.data_ptr()))
 
     def _input_size(self) -> Tuple[int, int]:

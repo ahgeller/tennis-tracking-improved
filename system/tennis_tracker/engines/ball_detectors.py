@@ -33,7 +33,7 @@ from .engine_boxes import OutputMode, decode_engine_boxes, engine_output_mode
 from .engine_session import TensorRTRuntimeSession
 from .. import video_decode
 from ..cuda_kernels import Kernel
-from ..ball_models import deployed, load_ball_model
+from ..ball_models import load_ball_model, load_deployed
 from ..frame_rate import require_phase_stride
 from ..gridtracknet import FRAMES_PER_UNIT, HEIGHT, WIDTH, GridPoint
 
@@ -303,9 +303,9 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             return None
 
     def _open_stream(self, weights: Path) -> Optional[StreamHalves]:
-        """The model's streaming halves (``streaming_halves``, folded first by ``ball_models.deployed``)
-        when it has them and ``Config.ball_prepass_streaming`` is on, else None (the model runs unit
-        by unit). They run as cached TensorRT engines when ``Config.ball_prepass_runtime`` and the
+        """The model's streaming halves (``streaming_halves``, of the network ``ball_models.load_deployed``
+        folds from the weights, which replaces the model) when it has them and
+        ``Config.ball_prepass_streaming`` is on, else None (the model runs unit by unit). They run as cached TensorRT engines when ``Config.ball_prepass_runtime`` and the
         device allow, else as the PyTorch modules, a TensorRT failure reported as ``_open_engine``
         reports it."""
         if not self.cfg.ball_prepass_streaming or not callable(getattr(self.model, "streaming_halves", None)):
@@ -313,8 +313,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         runtime = self.cfg.ball_prepass_runtime
         if runtime not in RUNTIMES:
             raise ValueError(f"ball_prepass_runtime must be one of {RUNTIMES}, not {runtime!r}")
-        dtype = next(self.model.parameters()).dtype
-        self.model = deployed(self.model.float()).to(dtype)     # folded in float32: each weight rounded once
+        self.model = load_deployed(weights, self.device)
         encoder, decoder = self.model.streaming_halves()
         if runtime == "tensorrt" and self.device.type == "cuda":
             batch = int(self.cfg.ball_engine_batch)
@@ -322,7 +321,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                 from .ball_trt import ensure_stream_engines, open_stream_engines
                 paths = ensure_stream_engines(weights, self.model.ARCH, encoder, decoder, batch,
                                               Path(self.cfg.ball_engine_dir), self.device)
-                return open_stream_engines(paths, batch, self.device)
+                return open_stream_engines(paths, self.device)
             except (RuntimeError, OSError, ImportError) as error:
                 print(f"[detector] TensorRT engines unavailable, streaming the PyTorch model ({error})")
         return StreamHalves(encoder, decoder, _UNITS_PER_INFERENCE)

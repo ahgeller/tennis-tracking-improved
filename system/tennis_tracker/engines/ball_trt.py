@@ -16,10 +16,10 @@ reclaim the space. The engine runs through ``engine_session.TensorRTRuntimeSessi
 A network that streams (``streamnet.StreamNet.streaming_halves``) is built as two engines instead:
 its encoder (``ENCODER``: a batch of transitions, ``(frame, previous)`` to the features at strides
 4, 8 and 16) and its decoder (``DECODER``: a batch of units from their transitions' features), each
-cached the same way with the half's name in the key and the file name. The prepass exports them
-from the deployed network (``ball_models.deployed``: the RepVGG branches folded, which TensorRT
-cannot do itself), and ``open_stream_engines`` runs them on one stream at the addresses the
-prepass's ``ball_gpu.TransitionRing`` hands them.
+cached the same way with the half's name and ``HALVES_RECIPE`` in the key and the half's name in the
+file name. The prepass exports them from the deployed network (``ball_models.load_deployed``: the
+RepVGG branches folded, which TensorRT cannot do itself), and ``open_stream_engines`` runs them on
+one stream at the addresses the prepass's ``ball_gpu.TransitionRing`` hands them.
 """
 from __future__ import annotations
 
@@ -36,9 +36,11 @@ from ..gridtracknet import HEIGHT, WIDTH
 from .ball_gpu import StreamHalves
 from .build_engines import _write_bytes_atomic
 from .engine_files import iter_engine_io
-from .engine_session import TensorRTRuntimeSession, _deserialize_engine, _torch_dtype, import_tensorrt
+from .engine_session import TensorRTRuntimeSession, deserialize_engine, import_tensorrt, torch_dtype
 
 ENGINE_RECIPE = 1
+# The halves' export, raised whenever it changes (2: folded from the float32 record, not the FP16 model).
+HALVES_RECIPE = 2
 INPUT_NAME = "frames"
 OUTPUT_NAME = "grids"
 ENCODER, DECODER = "encoder", "decoder"             # the halves of a streaming network
@@ -67,7 +69,7 @@ def engine_key(weights: Path, arch: str, batch: int, device: torch.device, part:
         f"recipe={ENGINE_RECIPE}", f"weights={weights_digest(weights)}", f"arch={arch}", f"batch={batch}",
         f"input={HEIGHT}x{WIDTH}", f"tensorrt={trt.__version__}", f"torch={torch.__version__}",
         f"gpu={properties.name}", f"sm={properties.major}.{properties.minor}",
-    ] + ([f"part={part}"] if part is not None else [])
+    ] + ([f"part={part}", f"halves_recipe={HALVES_RECIPE}"] if part is not None else [])
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
@@ -194,21 +196,24 @@ class _EngineRun:
     def __init__(self, path: Path, inputs: Sequence[str], outputs: Sequence[str], device: torch.device,
                  stream: torch.cuda.Stream):
         trt = import_tensorrt()
-        self.engine, self.context = _deserialize_engine(trt, str(path))
+        self.engine, self.context = deserialize_engine(trt, str(path))
         tensors = {io.name: io for io in iter_engine_io(self.engine, trt)}
         if set(tensors) != {*inputs, *outputs}:
             raise RuntimeError(f"{Path(path).name} has the tensors {sorted(tensors)}, not {[*inputs, *outputs]}")
         self.stream = stream
-        self.inputs = {name: tuple(tensors[name].shape) for name in inputs}
-        self.outputs = [torch.empty(tuple(tensors[name].shape), dtype=_torch_dtype(trt.nptype(tensors[name].dtype)),
+        self.inputs = {name: (tuple(tensors[name].shape), torch_dtype(trt.nptype(tensors[name].dtype)))
+                       for name in inputs}
+        self.batch = int(tensors[inputs[0]].shape[0])
+        self.outputs = [torch.empty(tuple(tensors[name].shape), dtype=torch_dtype(trt.nptype(tensors[name].dtype)),
                                     device=device) for name in outputs]
         for name, buffer in zip(outputs, self.outputs):
             self.context.set_tensor_address(name, int(buffer.data_ptr()))
 
     def __call__(self, *values: torch.Tensor) -> Sequence[torch.Tensor]:
-        for (name, shape), value in zip(self.inputs.items(), values):
-            if tuple(value.shape) != shape or not value.is_contiguous():
-                raise RuntimeError(f"TensorRT input {name} must be a contiguous {shape}, not {tuple(value.shape)}")
+        for (name, (shape, dtype)), value in zip(self.inputs.items(), values):
+            if tuple(value.shape) != shape or value.dtype != dtype or not value.is_contiguous():
+                raise RuntimeError(f"TensorRT input {name} must be a contiguous {dtype} {shape}, "
+                                   f"not a {value.dtype} {tuple(value.shape)}")
             self.context.set_tensor_address(name, int(value.data_ptr()))
         current = torch.cuda.current_stream(self.stream.device)
         if current != self.stream:
@@ -218,10 +223,14 @@ class _EngineRun:
         return self.outputs
 
 
-def open_stream_engines(paths: Dict[str, Path], batch: int, device: torch.device) -> StreamHalves:
+def open_stream_engines(paths: Dict[str, Path], device: torch.device) -> StreamHalves:
     """The ``ENCODER`` and ``DECODER`` engines at `paths` (``ensure_stream_engines``) as the
-    prepass's ``StreamHalves``, both on one new stream (the prepass works on it)."""
+    prepass's ``StreamHalves``, both on one new stream (the prepass works on it), at the batch their
+    inputs were built for; halves of two batches are a RuntimeError."""
     stream = torch.cuda.Stream(device=device)
     encoder = _EngineRun(paths[ENCODER], ENCODER_INPUTS, FEATURE_NAMES, device, stream)
     decoder = _EngineRun(paths[DECODER], FEATURE_NAMES, (OUTPUT_NAME,), device, stream)
-    return StreamHalves(encode=encoder, decode=lambda *features: decoder(*features)[0], batch=batch, stream=stream)
+    if encoder.batch != decoder.batch:
+        raise RuntimeError(f"the encoder engine takes {encoder.batch} transitions a call, the decoder {decoder.batch} units")
+    return StreamHalves(encode=encoder, decode=lambda *features: decoder(*features)[0], batch=encoder.batch,
+                        stream=stream)
