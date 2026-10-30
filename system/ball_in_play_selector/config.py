@@ -157,10 +157,11 @@ class SelectorConfig:
     select_kinematic_motion_frac: float = 0.75
     select_kinematic_extent_frac: float = 0.05
     # A track that never comes within this many metres of our doubles sidelines, sideways on the
-    # ground (scoring.court_lateral_m), is a ball on a neighbouring court: our rally comes down to
-    # our court at a bounce or a racket, and a neighbouring court's nearest sideline is at least
-    # 3.66 m from ours (the ITF's minimum side run-off between courts). The near-court score term
-    # cannot tell: its margin (court_expand_px, 12% of the diagonal) reaches the next court.
+    # ground (court_geometry.sideline_distance_m, each point against its frame's court), is a ball
+    # on a neighbouring court: our rally comes down to our court at a bounce or a racket, and a
+    # neighbouring court's nearest sideline is at least 3.66 m from ours (the ITF's minimum side
+    # run-off between courts). The near-court score term cannot tell: its margin (court_expand_px,
+    # 12% of the diagonal) reaches the next court.
     select_off_court_lateral_m: float = 3.0
 
     def __post_init__(self) -> None:

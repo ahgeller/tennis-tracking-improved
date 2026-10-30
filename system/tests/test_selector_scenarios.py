@@ -5,7 +5,7 @@ fixtures reproduce measured tracks from real clips (noted per test); keep their
 numbers and expectations as they are: they are regressions, not tunable values.
 """
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -17,7 +17,8 @@ from ball_in_play_selector.core import (
     selected_tracks,
     trajectory_observations,
 )
-from ball_in_play_selector.scoring import court_lateral_m, score_tracks, select_timeline_chain, stitch_track_chain
+from ball_in_play_selector.scoring import score_tracks, select_timeline_chain, stitch_track_chain
+from tennis_tracker.court.court_geometry import build_ordered_court_polygon, doubles_corners, sideline_distance_m
 
 FRAME_SHAPE = (360, 640)
 WIDTH, HEIGHT = FRAME_SHAPE[1], FRAME_SHAPE[0]
@@ -576,10 +577,10 @@ def test_speed_reference_is_the_last_same_phase_observation():
     assert _speed_reference(_observations([10, 11, 13, 15, 17]), 18, 2).frame == 17
 
 
-# The VolyAvw court (sample/VolyAvw-cut-merged-1771797159395.mp4, its last valid keypoints) as the
-# pipeline hands it over: the ordered polygon TL, BL, BR, TR.
-_VOLY_COURT = np.array([[787.5, 199.3], [201.0, 632.8], [1827.0, 631.5], [1182.0, 197.9]],
-                       dtype=np.float32).reshape(-1, 1, 2)
+# The VolyAvw court (sample/VolyAvw-cut-merged-1771797159395.mp4, its last valid keypoints):
+# the doubles corners far left, far right, near left, near right, then the singles corners.
+_VOLY_KEYPOINTS = [787.5, 199.3, 1182.0, 197.9, 201.0, 632.8, 1827.0, 631.5,
+                   830.0, 199.0, 1140.0, 198.0, 420.0, 632.0, 1610.0, 631.0]
 
 
 def _flight(points: List[Tuple[float, float]], first_frame: int, steps: int) -> List[List[Detection]]:
@@ -595,22 +596,31 @@ def _flight(points: List[Tuple[float, float]], first_frame: int, steps: int) -> 
     return rows
 
 
-def _scored_at_volyavw(*flights: List[List[Detection]]) -> List[Track]:
+def _scored_at_volyavw(*flights: List[List[Detection]], court: Optional[List[float]] = None,
+                       court_by_frame: Optional[List[List[float]]] = None) -> List[Track]:
+    """The flights' tracks scored as the pipeline scores them, every frame showing ``court`` (the
+    VolyAvw court by default) unless ``court_by_frame`` gives each frame's; the court polygon is
+    the VolyAvw one either way."""
     cfg = _cfg(60.0, HD_WIDTH, HD_HEIGHT)
     total = max(row[0].frame for flight in flights for row in flight) + 1
     rows: List[List[Detection]] = [[] for _ in range(total)]
     for flight in flights:
         for row in flight:
             rows[row[0].frame] += row
-    return score_tracks(build_tracks(rows, cfg), cfg, court_poly=_VOLY_COURT, total_frames=total)
+    keypoints = court_by_frame or [court or _VOLY_KEYPOINTS] * total
+    return score_tracks(build_tracks(rows, cfg), cfg, court_poly=build_ordered_court_polygon(_VOLY_KEYPOINTS),
+                        total_frames=total, court_keypoints_by_frame=keypoints)
+
+
+_NEIGHBOUR = [(1673.0, 126.0), (1515.0, 208.0), (1497.0, 140.0)]
 
 
 def test_a_ball_on_the_neighbouring_court_is_not_selected():
     # The measured stream_s4 track 22 on VolyAvw (frames 2772-2865): a ball bouncing on the
     # court to the right, 8.7 m and more beyond our right sideline. The near-court score term
-    # gave it 0.86 (its margin reaches the next court; 0.77 for this sketch of it) and the chain chose it between two of
-    # our rallies; on our court the server was bouncing her ball.
-    [neighbour] = _scored_at_volyavw(_flight([(1673.0, 126.0), (1515.0, 208.0), (1497.0, 140.0)], 0, 30))
+    # gave it 0.86 (its margin reaches the next court; 0.77 for this sketch of it) and the
+    # chain chose it between two of our rallies; on our court the server was bouncing her ball.
+    [neighbour] = _scored_at_volyavw(_flight(_NEIGHBOUR, 0, 30))
     assert neighbour.score_value("inside_frac") > 0.7
     assert neighbour.score_value("court_lateral_min_m") > 8.0
     assert neighbour not in selected_tracks([neighbour])
@@ -630,20 +640,55 @@ def test_our_balls_beside_and_above_the_court_stay_selected():
     assert {track.first_frame for track in selected_tracks(tracks)} == {0, 200}
 
 
-def test_lateral_distance_is_read_on_the_ball_row_or_the_far_baseline_row():
-    corners = (np.array([787.5, 199.3]), np.array([1182.0, 197.9]), np.array([201.0, 632.8]),
-               np.array([1827.0, 631.5]))
-    assert court_lateral_m(1000.0, 400.0, corners) == 0.0
+def test_each_observation_is_measured_against_its_own_frames_court():
+    # The camera reframes halfway: the second half's court lies 1200 px to the right. A ball on
+    # our court in the first half is ours whatever the clip's last court says, and frames
+    # without keypoints of their own fall back to the last valid ones.
+    shifted = [value + 1200.0 if index % 2 == 0 else value for index, value in enumerate(_VOLY_KEYPOINTS)]
+    ours = _flight([(1000.0, 400.0), (1100.0, 300.0), (1150.0, 400.0)], 0, 30)
+    frames = len(ours) + 60
+    [track] = _scored_at_volyavw(ours, court_by_frame=[_VOLY_KEYPOINTS] * 60 + [shifted] * 60)
+    assert track.score_value("court_lateral_min_m") == 0.0 and track in selected_tracks([track])
+    [track] = _scored_at_volyavw(ours, court_by_frame=[[0.0] * 16] * 60 + [shifted] * (frames - 60))
+    assert track.score_value("court_lateral_min_m") > 3.0
+
+
+def test_a_court_missing_a_corner_vetoes_nothing():
+    # Without the far-left corner the court polygon falls back to a hull of the other keypoints,
+    # often four-sided too; read as corners it put a ball 1.6 m out at 3.1 m. Only keypoints 0-3
+    # are corners, and with one missing the track is not measured.
+    missing = [0.0, 0.0] + _VOLY_KEYPOINTS[2:]
+    assert doubles_corners(missing) is None
+    [neighbour] = _scored_at_volyavw(_flight(_NEIGHBOUR, 0, 30), court=missing)
+    assert neighbour.score_value("court_lateral_min_m") == 0.0
+    assert neighbour in selected_tracks([neighbour])
+
+
+def test_lateral_distance_is_read_on_the_ball_row_or_the_far_corner_row():
+    corners = doubles_corners(_VOLY_KEYPOINTS)
+    assert corners is not None
+    assert sideline_distance_m(corners, 1000.0, 400.0) == 0.0
     # On the near baseline the court is 1626 px wide: 148 px a metre.
-    assert abs(court_lateral_m(1827.0 + 148.2, 632.0, corners) - 1.0) < 0.01
-    # Above the far baseline, the far baseline's row (395 px wide, 36 px a metre) is used.
-    assert abs(court_lateral_m(1182.0 + 36.0, 60.0, corners) - court_lateral_m(1182.0 + 36.0, 198.6, corners)) < 1e-9
-    assert abs(court_lateral_m(1182.0 + 36.0, 60.0, corners) - 1.0) < 0.05
+    assert abs(sideline_distance_m(corners, 1827.0 + 148.2, 632.0) - 1.0) < 0.01
+    # Above the far right corner, that corner's row (395 px wide, 36 px a metre) is used.
+    assert sideline_distance_m(corners, 1218.0, 60.0) == sideline_distance_m(corners, 1218.0, 197.9)
+    assert abs(sideline_distance_m(corners, 1218.0, 60.0) - 1.0) < 0.05
 
 
-def test_without_a_four_corner_court_no_track_is_called_off_court():
+def test_a_tilted_far_baseline_is_read_on_each_sidelines_own_far_corner():
+    # The far right corner sits 100 px below the far left one. A ball 100 px right of the far
+    # right corner, halfway up the tilt, is read on that corner's row, where the court is 523 px
+    # wide (2.10 m); the mean far row put the sideline's extension above the corner (4.11 m).
+    corners = doubles_corners([700.0, 150.0, 1150.0, 250.0, 300.0, 700.0, 1600.0, 700.0])
+    assert corners is not None
+    assert abs(sideline_distance_m(corners, 1250.0, 200.0) - 100.0 * 10.97 / (1150.0 - 627.27)) < 0.01
+    assert sideline_distance_m(corners, 1250.0, 200.0) == sideline_distance_m(corners, 1250.0, 250.0)
+
+
+def test_without_court_keypoints_no_track_is_called_off_court():
     cfg = _cfg(60.0, HD_WIDTH, HD_HEIGHT)
-    rows = _flight([(1673.0, 126.0), (1515.0, 208.0), (1497.0, 140.0)], 0, 30)
-    [track] = score_tracks(build_tracks(rows, cfg), cfg, court_poly=None, total_frames=len(rows))
+    rows = _flight(_NEIGHBOUR, 0, 30)
+    [track] = score_tracks(build_tracks(rows, cfg), cfg, court_poly=build_ordered_court_polygon(_VOLY_KEYPOINTS),
+                           total_frames=len(rows))
     assert track.score_value("court_lateral_min_m") == 0.0
     assert track in selected_tracks([track])

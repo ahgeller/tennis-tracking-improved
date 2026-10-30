@@ -90,6 +90,7 @@ class ReplayScene(NamedTuple):
     total: int
     court_polygon: Optional[np.ndarray]
     player_boxes: List[Optional[Dict[str, Optional[List[float]]]]]
+    court_keypoints: List[Optional[List[float]]]
 
     @classmethod
     def of(cls, payload: TrackingJson) -> "ReplayScene":
@@ -98,7 +99,8 @@ class ReplayScene(NamedTuple):
         with contextlib.redirect_stdout(io.StringIO()):          # build_court_polygon reports what it built
             court_polygon, _ = build_court_polygon([row.get("court_keypoints") for row in frames])
         return cls(float(video["fps"]), int(video["width"]), int(video["height"]), int(video["total_frames"]),
-                   court_polygon, [row.get("player_boxes") for row in frames])
+                   court_polygon, [row.get("player_boxes") for row in frames],
+                   [row.get("court_keypoints") for row in frames])
 
 
 class Replay(NamedTuple):
@@ -121,7 +123,7 @@ def replay_chain(detections: List[List[Detection]], scene: ReplayScene) -> Repla
     with recorded_rows(detections):
         per_frame, chosen, tracks = select_ball_in_play(
             _raw_rows(detections), scene.fps, scene.width, scene.height, court_polygon=scene.court_polygon,
-            player_boxes_by_frame=scene.player_boxes)
+            player_boxes_by_frame=scene.player_boxes, court_keypoints_by_frame=scene.court_keypoints)
     return Replay(per_frame, tracks, chosen)
 
 

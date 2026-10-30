@@ -23,6 +23,8 @@ Point = Tuple[float, float]
 # A side guide: ``base`` is the court corner, ``anchor`` the corner shifted
 # outward by the alley width, ``dir`` the direction of the outer sideline.
 SideGuide = Dict[str, np.ndarray]
+# The doubles corners as ``(far_left, far_right, near_left, near_right)``.
+Corners = Tuple[Point, Point, Point, Point]
 GroundModel = Dict[str, np.ndarray]  # "H_i2c": image -> unit court, "H_c2i": the inverse
 
 # Keypoint indices in the detector's semantic order.
@@ -231,6 +233,54 @@ def build_ground_projection_model(kps: Optional[CourtKeypoints]) -> Optional[Gro
     except cv2.error:
         return None
     return {"H_i2c": image_to_court, "H_c2i": court_to_image}
+
+
+def doubles_corners(kps: Optional[CourtKeypoints]) -> Optional[Corners]:
+    """The four doubles corners, keypoints 0-3, or None unless all four are detected and the near
+    baseline lies below the far one.  Nothing else (a hull of the other keypoints) stands in for a
+    missing corner: a guessed corner would put the sidelines in the wrong place."""
+    far_left, far_right, near_left, near_right = (
+        court_keypoint(kps, index, require_finite=True)
+        for index in (KP_FAR_LEFT, KP_FAR_RIGHT, KP_NEAR_LEFT, KP_NEAR_RIGHT)
+    )
+    if far_left is None or far_right is None or near_left is None or near_right is None:
+        return None
+    if (near_left[1] + near_right[1]) - (far_left[1] + far_right[1]) < 2.0:
+        return None
+    return far_left, far_right, near_left, near_right
+
+
+def _x_on_line(top: Point, bottom: Point, row: float) -> float:
+    """The x of the line through two image points at image row ``row``."""
+    if abs(bottom[1] - top[1]) < 1e-6:
+        return 0.5 * (top[0] + bottom[0])
+    return top[0] + (row - top[1]) * (bottom[0] - top[0]) / (bottom[1] - top[1])
+
+
+def sideline_distance_m(corners: Corners, x: float, y: float) -> float:
+    """Metres sideways beyond the nearer doubles sideline at image point ``(x, y)``, 0 between them.
+
+    Read on the point's own image row, and the court there is 10.97 m wide.  A point above a
+    sideline's far corner is read on that corner's row instead, where the sideline ends: seen from
+    behind a baseline a ball in the air stands straight above its ground point, and above the far
+    corner nothing says how far back it is.  For such a point the value understates the distance
+    of a ball over ground beyond the baseline (it errs towards calling the ball ours).  For a ball
+    in the air lower in the picture, its ground point lies on a lower row, where the sidelines
+    spread and the distance shrinks, so the value is an upper bound: judge a whole flight by its
+    smallest value, which its bounces and contacts give.
+    """
+    far_left, far_right, near_left, near_right = corners
+
+    def edges(row: float) -> Tuple[float, float]:
+        return _x_on_line(far_left, near_left, row), _x_on_line(far_right, near_right, row)
+
+    left, right = edges(max(y, far_left[1]))
+    if x < left and right - left > 1.0:
+        return (left - x) * DOUBLES_WIDTH_M / (right - left)
+    left, right = edges(max(y, far_right[1]))
+    if x > right and right - left > 1.0:
+        return (x - right) * DOUBLES_WIDTH_M / (right - left)
+    return 0.0
 
 
 def last_valid_court_keypoints(kps_by_frame: Sequence[Optional[CourtKeypoints]],

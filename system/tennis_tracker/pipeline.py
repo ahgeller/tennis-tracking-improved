@@ -230,7 +230,8 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
         boost_masks=pass1.boost_masks,
         raw_motions=pass1.raw_motions,
         player_boxes_by_frame=pass1.player_boxes,
-        debug=cfg.print_selector_tracks)
+        debug=cfg.print_selector_tracks,
+        court_keypoints_by_frame=pass1.court_keypoints)
     timing.add("selector_select", select_t0)
 
     print(f"[selector] {len(all_tracks)} total tracks")

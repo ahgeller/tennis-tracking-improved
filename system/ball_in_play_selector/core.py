@@ -13,6 +13,7 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+from tennis_tracker.court.court_geometry import CourtKeypoints
 
 from .config import REFERENCE_DIAG_PX, SelectorConfig
 from .models import Detection, FrameResult, RawDetection, Source, Track
@@ -905,6 +906,7 @@ def select_ball_in_play(
     raw_motions: Optional[Sequence[Optional[MaskLike]]] = None,
     player_boxes_by_frame: Optional[PlayerBoxesByFrame] = None,
     debug: bool = False,
+    court_keypoints_by_frame: Optional[Sequence[Optional[CourtKeypoints]]] = None,
 ) -> Tuple[List[Optional[FrameResult]], Optional[Track], List[Track]]:
     """Select one ball trajectory from per-frame detector candidates.
 
@@ -912,6 +914,8 @@ def select_ball_in_play(
     source frame ``t``.  ``boost_masks`` / ``raw_motions`` are per-frame motion
     masks (``utils.PackedMask``, a full-frame uint8 array, or None),
     ``player_boxes_by_frame[t]`` a dict or list of player boxes.
+    ``court_keypoints_by_frame[t]`` is frame ``t``'s court keypoints (or None); a track is
+    measured against them for the neighbouring-court test, and without them nothing is vetoed.
 
     Returns ``(per_frame, chosen, tracks)``: one ``FrameResult`` or ``None`` per
     source frame, the stitched chosen track (``None`` when nothing qualified),
@@ -927,6 +931,7 @@ def select_ball_in_play(
         court_poly=court_polygon,
         player_boxes_by_frame=player_boxes_by_frame,
         total_frames=total,
+        court_keypoints_by_frame=court_keypoints_by_frame,
     )
     selected = select_timeline_chain(selected_tracks(tracks), cfg, total)
     for track in selected:
