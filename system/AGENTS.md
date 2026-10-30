@@ -80,16 +80,17 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   the bounces, candidates, kinematic bounces, contacts and legs found). `pass1.py`
   (with `frame_window.py`): decoding, background/motion state, ROI collection,
   detector calls; the fixed-shape per-frame GPU work (frame conversion, motion
-  planes, background update) replays from CUDA graphs (`Config.pass1_cuda_graphs`); frames
-  are decoded into pinned buffers and uploaded from them (`video_io.pinned_source`), and the
-  pass 2 frame cache keeps pageable copies. `pass2.py`: rendering pass. `export.py`: `RunResult`, what a
-  run returns, and the tracking JSON writer, whose `court_events` block carries
-  every event with its provenance (`{}` when they were not computed).
+  planes, background update) replays from CUDA graphs
+  (`Config.pass1_cuda_graphs`); frames are decoded into pinned buffers and
+  uploaded from them (`video_io.pinned_source`), and the pass 2 frame cache
+  keeps pageable copies. `pass2.py`: rendering pass. `export.py`: `RunResult`,
+  what a run returns, and the tracking JSON writer, whose `court_events` block
+  carries every event with its provenance (`{}` when they were not computed).
   `tracking_schema.py`: the tracking JSON's shape (TypedDicts, typing only),
   which the writer and the scorers share. `motion.py`, `roi_tracking.py`: CUDA
-  motion masks and ROI tracking; `motion_gpu.py` builds the same masks, bit for bit, with two
-  NVRTC kernels (`Config.motion_kernels`; the PyTorch ops in `motion.py` are the reference and the
-  fallback).
+  motion masks and ROI tracking; `motion_gpu.py` builds the same masks, bit for
+  bit, with two NVRTC kernels (`Config.motion_kernels`; the PyTorch ops in
+  `motion.py` are the reference and the fallback).
 - `tennis_tracker/court/`: `court_geometry.py`, keypoints, side guides, polygon,
   homography; the court-event stages, each reading one `CourtScene`:
   `court_scene.py` (`CourtScene`, the event types and the player-box queries),
@@ -140,9 +141,10 @@ GPU/version specific.
 
 `python -m pytest -q` (pytest required) runs every test: all suites live in
 `tests/` (`pytest.ini` sets `testpaths` and puts the root on the import path),
-use synthetic inputs only and need no GPU. `clean_tracker.py --self-test` runs
-the selector, court-event, ROI and GridTrackNet modules from `tests/` through
-pytest. Put new tests in `tests/` as plain pytest functions (fixtures and
+use synthetic inputs only; the tests that need a CUDA device (the kernels, the
+engines, the uploads) are skipped without one. `clean_tracker.py --self-test`
+runs the selector, court-event, ROI and GridTrackNet modules from `tests/`
+through pytest. Put new tests in `tests/` as plain pytest functions (fixtures and
 `parametrize`, not `unittest.TestCase`), shared synthetic fixtures in
 `tests/_helpers.py`. `audit/` keeps the review's reports and verification
 scripts; `audit/records/` holds their logs and results, and

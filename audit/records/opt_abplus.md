@@ -18,7 +18,12 @@ candidate `stream_s4` (`models/candidates/stream_s4_e60.pt`, conf 0.42).
 | commit | change | pass 1, shipped | pass 1, stream_s4 | outputs |
 |---|---|---|---|---|
 | 1b6b58f | motion masks with two NVRTC kernels | 11.83 [11.81-11.88] -> 10.21 [10.10-14.75] s | 12.74 [12.38-13.05] -> 10.94 [10.79-10.94] s | identical |
-| 8cbca6b | frames decoded into pinned memory | 10.0-10.6 -> 8.6-8.8 s (profile runs) | - | identical |
+| 8cbca6b | frames decoded into pinned memory | 10.89 [10.79-11.45] -> 9.23 [9.12-9.70] s | 11.51 [10.54-13.94] -> 10.68 [8.75-11.48] s | identical |
+| fc0e3f3, 68c01bb | review fixes (section 8) | - | - | identical |
+
+The two shipped rows come from different suites, each interleaved against its own base: the
+kernels row from section 1's, the pinned-decode row from section 8's (where the laptop ran in a
+slower state, so its absolute seconds are higher).
 
 ### End to end, AB (ae270b3) vs AB+ (HEAD)
 
@@ -119,9 +124,10 @@ closing must run every frame, or the model and every later mask change. Only the
   and variance stay equal over ten frames with and without its CUDA graphs; and two tests put
   pixels exactly on the foreground and temporal thresholds (and one float32 step either side). An
   FMA in the threshold, a reversed blur order or a dropped channel each fail them (checked by
-  mutation). Replacing the blur's division by a multiply by 1/9 was not caught: on these inputs
-  the two never round apart. For that step the evidence is the pomona dumps and the gate below,
-  bit for bit equal.
+  mutation). A third test (added in review) picks pixels whose 3x3 sum rounds differently divided
+  by nine and multiplied by a ninth and puts the gate's threshold there; replacing the division
+  with that multiply fails it. (PyTorch divides a CUDA tensor by a scalar as a multiply by the
+  reciprocal, so that test computes its reference on the host; `avg_pool2d` divides.)
 
 **Evidence.** Interleaved, locked, `clean_tracker.py --no-video --info`, 3 timed rounds each:
 
@@ -161,10 +167,20 @@ straight into a fresh pinned buffer from PyTorch's caching host allocator (OpenC
 buffer of the right shape and type), and `PinnedFrameUploader` copies from that buffer to the device
 instead of first `np.copyto` into its own pinned slot on pass 1's thread. The allocator keeps a
 buffer from reuse until its recorded copy is done. The pass 2 frame cache copies pinned frames out,
-so a cached clip does not pin gigabytes. Profile runs (shipped, locked, two runs each):
-`pass1 decode/slide` 0.59-0.61 -> 0.31-0.32 ms/frame and pass 1 10.0-10.6 -> 8.6-8.8 s; the rest of
-the gain is the reader thread no longer allocating a 6 MB frame per read. Test:
-`test_frames_decoded_into_pinned_memory_upload_from_it_and_leave_the_cache_pageable`.
+so a cached clip does not pin gigabytes. Interleaved against the kernels commit (section 8's suite,
+3 timed rounds, median [min-max] s):
+
+| | kernels shipped | + pinned shipped | kernels stream_s4 | + pinned stream_s4 |
+|---|---|---|---|---|
+| total | 17.60 [17.30-18.00] | 15.50 [15.30-16.80] | 18.30 [17.40-21.40] | 17.70 [15.10-18.80] |
+| pass 1 | 10.89 [10.79-11.45] | 9.23 [9.12-9.70] | 11.51 [10.54-13.94] | 10.68 [8.75-11.48] |
+| pass 1 decode/slide | 1.34 [1.33-1.38] | 0.68 [0.65-0.70] | 1.32 [1.22-1.53] | 0.75 [0.59-0.81] |
+
+The slide halves for both models. The rest of the shipped model's gain is the reader thread no
+longer allocating a 6 MB frame per read. The stream_s4 runs spread widely and overlap, so its pass 1
+gain (0.8 s at the median) is less certain than the shipped model's (1.7 s, separated). Tests:
+`test_frames_decoded_into_pinned_memory_upload_from_it_and_leave_the_cache_pageable` and
+`test_frames_of_another_size_end_the_pinned_reads_with_one_warning`.
 
 ## 3. Child-process prepass, re-evaluated
 
@@ -265,13 +281,60 @@ plugs into AB+:
   will need their own cache keys in `ball_trt`.
 - **Not built** here, by the brief.
 
+## 8. Review fixes (fc0e3f3, 68c01bb)
+
+Two reviewers read ae270b3..4b0a77b. They found no serious bug: bit parity held on real pomona
+frames at odd sizes, and the pinned buffers had neither a race nor a leak. Fixed:
+
+- **Box bounds.** The gate kernel indexes the frame without checks, where PyTorch's slices clamp.
+  ROIs are clipped to the size the container reports, so a clip that decodes at another size could
+  have made the kernel write past the frame. `MotionKernels.gate` now raises `ValueError` for a
+  box outside the frame, and `morph`'s shape check already refused a clamped crop. Test:
+  `test_a_box_outside_the_frame_is_refused_before_any_launch`.
+- **Fallback.** `load_kernel` turns a CUDA runtime error raised under it (a broken driver or
+  device) into `KernelUnavailable`, so pass 1 falls back to the PyTorch ops; other exception types
+  stay bugs and propagate. Only loading falls back: a launch that fails mid-clip raises (commented
+  in `pass1._load_motion_kernels`). Test:
+  `test_pass1_falls_back_to_pytorch_ops_when_the_kernels_cannot_load`.
+- **Pinned size mismatch.** When `pinned_shape` did not match the decoded frames, the reader
+  allocated a pinned buffer per frame that was never used. Now the first read that does not land
+  in the buffer ends the pinned reads, with one warning when the size differs.
+  `FrameCapture.read` takes the optional `image`; `OpenCVDecoder` passes it through and
+  `NvdecDecoder` ignores it (it has its own buffers).
+- **One code path.** `_raw_motion_cuda` and `_queue_masks` serve both paths. The shared preamble and
+  tail are written once, and only the per-box work branches. `BackgroundModel._motion_buffer_for`
+  makes the graphs' buffer. The probe's saturation scale (`255 * _PROBE_S_DIFF_SCALE`) is passed
+  in through `GateScalars` instead of hard-coded.
+- **Not done.** `video_io.py` was not added to `mypy.ini`: its writer has 5 existing type errors,
+  none of them in the new code.
+
+Verification after the fixes:
+
+- Pass 1's pomona dump is identical to AB's.
+- Suites: system 596 passed, 1 skipped; root 1323 passed, 1 skipped; mypy clean (18 and 5 files).
+- Gate: per-frame outputs identical to AB on every clip, both models. Shipped @0.40: recall 0.946, FA 98/518 (86 bridged, 12 false), landed line/other/player 39/60/47. stream_s4 @0.42: recall 0.947, FA 104/518 (86, 18), landed 32/59/50.
+- Timings: the suite in the table above. AB, the kernels commit and HEAD were interleaved, 3 timed
+  rounds, median [min-max] s:
+
+| | AB | kernels | HEAD |
+|---|---|---|---|
+| shipped total | 20.10 [19.40-21.30] | 17.60 [17.30-18.00] | 15.50 [15.30-16.80] |
+| shipped pass 1 | 13.61 [12.99-14.88] | 10.89 [10.79-11.45] | 9.23 [9.12-9.70] |
+| stream_s4 total | 22.10 [20.90-24.10] | 18.30 [17.40-21.40] | 17.70 [15.10-18.80] |
+| stream_s4 pass 1 | 14.97 [13.15-15.94] | 11.51 [10.54-13.94] | 10.68 [8.75-11.48] |
+
+This suite ran in a slower machine state than the final table at the top (AB shipped 20.1 s
+against 18.3 s there). The ratios agree: pass 1 is 32% faster for the shipped model and 29% for
+stream_s4.
+
 ## Files
 
 - New: this record; `system/tennis_tracker/motion_gpu.py`; `system/tests/test_motion_gpu.py`.
 - Changed: `system/tennis_tracker/motion.py` (kernel path, `BackgroundModel.motion_target`),
   `pass1.py` (kernel loading, pinned reader, cache copy), `config.py` (`motion_kernels`),
-  `video_io.py` (`pinned_source`, the reader's pinned decode, the uploader), `mypy.ini`,
-  `AGENTS.md`, `tests/test_frame_window.py`.
+  `video_io.py` (`pinned_source`, the reader's pinned decode, the uploader), `video_decode.py`
+  (`read(image)`), `cuda_kernels.py` (load failures), `mypy.ini`, `AGENTS.md`,
+  `tests/test_frame_window.py`.
 
 ## Open issues
 
