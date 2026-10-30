@@ -4,6 +4,7 @@ These were the selector half of ``clean_tracker.py --self-test``. Several
 fixtures reproduce measured tracks from real clips (noted per test); keep their
 numbers and expectations as they are: they are regressions, not tunable values.
 """
+import math
 from typing import List, Tuple
 
 import numpy as np
@@ -140,20 +141,34 @@ def test_direction_cosine_of_straight_and_reversed_paths():
     assert direction_cosine(*straight) == -1.0
 
 
-def test_refit_repairs_a_target_switch_and_relabels_the_moved_detections():
-    # The robust refit repairs a short target-switch block. The repair itself is
-    # unbounded, but a detection dragged that far is no longer where the detector
-    # fired, so it stops being reported as one: green in the overlay and scored
-    # against the detector both mean "raw observation".
+def test_refit_keeps_a_short_excursion_where_the_detector_put_it():
+    # A 1-2 frame excursion off the local fit is far more often the ball at a bounce or a
+    # contact than the detector on another object (the non-held-out clips, 2026-10-30), so the
+    # refit moves it no further than any strong detection and it stays a detection; the
+    # excursion barely weighs on its neighbours, which keep their line.
     smooth = [
         FrameResult(cx=float(frame * 10), cy=100.0, conf=0.9, source="det")
         for frame in range(15)
     ]
     smooth[7].cy = smooth[8].cy = 180.0
     refine_trajectory(smooth, 734.0)
-    assert max(abs(smooth[frame].cy - 100.0) for frame in (7, 8)) < 10.0
-    assert all(smooth[frame].source == "interp" for frame in (7, 8))
-    assert all(smooth[frame].source == "det" for frame in range(15) if frame not in (7, 8))
+    assert all(abs(smooth[frame].cy - 180.0) <= 3.0 + 1e-9 for frame in (7, 8))
+    assert all(abs(smooth[frame].cy - 100.0) < 1.0 for frame in range(15) if frame not in (7, 8))
+    assert all(result.source == "det" for result in smooth)
+    assert smooth[7].measurement == (70.0, 180.0)
+
+
+def test_refit_never_moves_a_bounce_vertex_off_its_detection():
+    # A fast V (a bounce at 30 px/frame) that the local fit rounds off: every strong detection
+    # stays within its bound of where the detector saw it.
+    vee = [
+        FrameResult(cx=float(frame * 20), cy=100.0 + 30.0 * (10 - abs(frame - 10)), conf=0.9, source="det")
+        for frame in range(21)
+    ]
+    raw = [(item.cx, item.cy) for item in vee]
+    refine_trajectory(vee, 734.0)
+    assert all(math.hypot(item.cx - x, item.cy - y) <= 3.0 + 1e-9 for item, (x, y) in zip(vee, raw))
+    assert all(item.source == "det" for item in vee)
 
 
 def test_subpixel_refit_does_not_relabel_detections():

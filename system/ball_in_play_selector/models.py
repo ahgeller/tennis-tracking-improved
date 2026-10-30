@@ -168,8 +168,8 @@ class Track:
 # What decided a frame's position:
 #   'det'    = a detector observation on the selected track
 #   'motion' = a motion blob near the predicted path (bounded correction)
-#   'interp' = a fitted position: bounded fill between anchors, or a detector
-#              point the trajectory refit relocated too far to still call raw
+#   'interp' = a fitted position: a bounded fill between anchors (the refit moves a
+#              detection a few pixels at most, so it stays 'det')
 Source = Literal["det", "motion", "interp"]
 
 # Where a frame's position stands relative to the detector's measurement:

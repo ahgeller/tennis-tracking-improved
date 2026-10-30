@@ -62,9 +62,9 @@ _TOP_REENTRY_FRAC = 0.15
 _SINGLE_HOLE_MAX_STEP_DIAG_FRAC = 0.015
 # A non-detector point further than max(120 px, 5.5% of the diagonal) from
 # its predecessor is dropped: better one missing row than a cross-court line.
-# The jump gate's floor, the kink and spike gates below and the relabel floor
-# are 1080p pixels, scaled to the clip's diagonal where they are read (``_px``).
-# The refit's bounds, Huber width and outlier floor are not: they describe the
+# The jump gate's floor and the kink and spike gates below are 1080p pixels,
+# scaled to the clip's diagonal where they are read (``_px``).
+# The refit's bounds and Huber width are not: they describe the
 # detector's error, which the replay says is the same count of native pixels at
 # 720p as at 1080p (scaling them cost 17 hits on the 720p clips, 2026-10-27).
 _JUMP_GATE_MIN_PX = 120.0
@@ -82,25 +82,24 @@ _REFINE_SOURCE_WEIGHT = {"det": 1.0, "motion": 0.30, "interp": 0.15}
 _REFINE_WEAK_DET_WEIGHT = 0.6
 _REFINE_SPIKE_WEIGHT = 0.02
 # Detector confidence that makes a point a full-weight anchor, and the one
-# past which it counts as a strong detection whose residual bounds the refit.
+# past which it counts as a strong detection, held to the tightest bound.
 _REFINE_FULL_WEIGHT_CONF = 0.70
 _REFINE_STRONG_DET_CONF = 0.55
 # Every point is fitted over at most this many neighbours on each side, with a
 # Huber loss that down-weights residuals beyond this many pixels.
 _REFINE_WINDOW = 10
 _REFINE_HUBER_PX = 4.0
-# How far the refit may move a point: a strong detection, a motion blob, a fill.
+# How far the refit may move a point: a strong detection, a motion blob, a fill
+# (a weak detection too). Every move is bounded: until 2026-10-30 a spike and a
+# strong detection off the local fit moved without a bound (meant to repair a
+# short target switch) and were relabelled 'interp' past ~44 px. On the 62
+# non-held-out clips (shipped model) those moves put 27 rows more than 30 px
+# from the label, 26 of them detections that had been within 10 px, for 2
+# repaired: they are bounces and contacts the fit cannot follow
+# (audit/records/opt_picker_rules.md).
 _REFIT_BOUND_STRONG_DET_PX = 3.0
 _REFIT_BOUND_MOTION_PX = 6.0
 _REFIT_BOUND_FILL_PX = 12.0
-# A strong detection whose residual exceeds max(9 px, 4x the median residual
-# of the other detector points) is off the path, so its move is unbounded.
-_REFIT_OUTLIER_MIN_PX = 9.0
-_REFIT_OUTLIER_RESIDUAL_MULT = 4.0
-# Past this much correction a "det" point is no longer where the detector
-# fired, so it stops being reported as one (~44 px at 1080p, never under 12).
-_REFINE_DET_RELABEL_FRAC = 0.02
-_REFINE_DET_RELABEL_MIN_PX = 12.0
 
 
 def _px(value_at_1080p: float, diag: float) -> float:
@@ -443,25 +442,9 @@ def _find_spikes(x: np.ndarray, y: np.ndarray, diag: float = REFERENCE_DIAG_PX) 
     return spikes
 
 
-def _refit_bound(
-    index: int,
-    spikes: np.ndarray,
-    is_strong_det: np.ndarray,
-    source: str,
-    residual: np.ndarray,
-    local: int,
-    base_w: np.ndarray,
-) -> Optional[float]:
-    """How far the refit may move point `index`; None means unbounded."""
-    if spikes[index]:
-        return None
-    if is_strong_det[index]:
-        det_mask = base_w >= _REFINE_WEAK_DET_WEIGHT     # the detector points of the window
-        det_mask[local] = False
-        if det_mask.any():
-            other_residual = float(np.median(residual[det_mask]))
-            if residual[local] > max(_REFIT_OUTLIER_MIN_PX, _REFIT_OUTLIER_RESIDUAL_MULT * other_residual):
-                return None
+def _refit_bound(strong_det: bool, source: str) -> float:
+    """How far the refit may move a point: a strong detection, a motion blob, anything else."""
+    if strong_det:
         return _REFIT_BOUND_STRONG_DET_PX
     if source == "motion":
         return _REFIT_BOUND_MOTION_PX
@@ -509,13 +492,11 @@ def _segment_bounds(m: int, kinks: Sequence[int]) -> Tuple[np.ndarray, np.ndarra
 
 def _local_fit(
     tt: np.ndarray, xx: np.ndarray, yy: np.ndarray, base_w: np.ndarray, degree: int
-) -> Tuple[float, float, np.ndarray]:
+) -> Tuple[float, float]:
     """Two rounds of a Huber-reweighted weighted polynomial fit; the fitted
-    position at ``tt == 0`` and the last round's residuals."""
-    count = len(tt)
-    robust = np.ones(count)
+    position at ``tt == 0``."""
+    robust = np.ones(len(tt))
     fit_x = fit_y = 0.0
-    residual = np.zeros(count)
     for _ in range(2):
         sqrt_w = np.sqrt(base_w * robust)
         design = np.vander(tt, degree + 1)
@@ -526,12 +507,12 @@ def _local_fit(
         residual = np.hypot(fitted[:, 0] - xx, fitted[:, 1] - yy)
         robust = np.minimum(1.0, _REFINE_HUBER_PX / np.maximum(residual, 1e-9))
         fit_x, fit_y = coeffs[-1, 0], coeffs[-1, 1]
-    return fit_x, fit_y, residual
+    return fit_x, fit_y
 
 
 def _refit_positions(
     points: Sequence[FrameResult], x: np.ndarray, y: np.ndarray, weights: np.ndarray,
-    is_strong_det: np.ndarray, spikes: np.ndarray, kinks: Sequence[int],
+    is_strong_det: np.ndarray, kinks: Sequence[int],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Every point refitted within its segment and window, moved at most its bound."""
     m = len(points)
@@ -548,13 +529,12 @@ def _refit_positions(
         if base_w.sum() <= 0.0:
             continue
         tt = np.arange(lo, hi + 1, dtype=np.float64) - i
-        fit_x, fit_y, residual = _local_fit(tt, x[lo:hi + 1], y[lo:hi + 1], base_w, 2 if count >= 6 else 1)
-        local = i - lo
-        bound = _refit_bound(i, spikes, is_strong_det, points[i].source, residual, local, base_w)
+        fit_x, fit_y = _local_fit(tt, x[lo:hi + 1], y[lo:hi + 1], base_w, 2 if count >= 6 else 1)
+        bound = _refit_bound(bool(is_strong_det[i]), points[i].source)
         dx = fit_x - x[i]
         dy = fit_y - y[i]
         distance = math.hypot(dx, dy)
-        if bound is not None and distance > bound:
+        if distance > bound:
             scale = bound / distance
             dx *= scale
             dy *= scale
@@ -569,27 +549,20 @@ def _refine_run(results: List[FrameResult], start: int, end: int, diag: float = 
     x = np.array([item.cx for item in points])
     y = np.array([item.cy for item in points])
     weights, is_strong_det = _refine_weights(points)
+    # A spike barely weighs on its neighbours' fit, but it is moved no further than any other
+    # point of its source: a 1-3 frame excursion off the local fit is far more often the ball at a
+    # bounce or a contact than the detector on another object.
     spikes = _find_spikes(x, y, diag)
     weights[spikes] = _REFINE_SPIKE_WEIGHT
-    is_strong_det[spikes] = False
     kinks = _find_trajectory_kinks(*_despiked(x, y, spikes), diag)
-    new_x, new_y = _refit_positions(points, x, y, weights, is_strong_det, spikes, kinks)
-
-    # Repairing a short target switch needs a large correction, so the move
-    # itself stays unbounded. Large relocations are labeled as fitted recovery;
-    # smaller detector-supported adjustments retain their source. The immutable
-    # measurement coordinates remain available separately in either case.
-    relabel_px = max(_px(_REFINE_DET_RELABEL_MIN_PX, diag), _REFINE_DET_RELABEL_FRAC * float(diag))
+    new_x, new_y = _refit_positions(points, x, y, weights, is_strong_det, kinks)
+    # Every move is bounded well inside the detector's own error, so a detection keeps its source;
+    # its immutable measurement coordinates stay available beside the fitted ones.
     for index, item in enumerate(points):
         if item.source == "det" and item.measurement is None:
             item.measurement = (float(item.cx), float(item.cy))
-        moved = math.hypot(new_x[index] - item.cx, new_y[index] - item.cy)
         item.cx = float(new_x[index])
         item.cy = float(new_y[index])
-        if item.source == "det" and moved > relabel_px:
-            item.source = "interp"
-            item.interpolated = True
-            item.source_reason = "refit_relocated_detection"
 
 
 def refine_trajectory(results: List[Optional[FrameResult]], diag: float = REFERENCE_DIAG_PX) -> None:
