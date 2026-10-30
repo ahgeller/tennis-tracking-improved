@@ -685,8 +685,15 @@ def _fill_gap(
     # Judged once for the whole gap, but re-read per frame below: a single
     # frame vetoed beside a player must not disqualify the rest of the gap.
     gap_pair_supported = _gap_is_supported(scene, observations, index, speed, direction_supported)
-    near_player_slow = speed < scene.near_player_fill_speed
+    # Without a blob, a straight fill is only drawn through a hole of one detector step (one
+    # missing frame at 30 FPS, two at 60): there it is the ball's line through a racket, the
+    # net or a bounce. Over a longer hole a fill without a single observation is a guess: on the
+    # 62 non-held-out clips (shipped model) such fills hit 22 labels for 54 false alarms, 19 of
+    # them off the ball's line (audit/records/opt_picker_rules.md). A blob still places the
+    # frames it is found on.
     cfg = scene.cfg
+    short_hole = gap - 1 <= cfg.detector_phase_stride
+    near_player_slow = speed < scene.near_player_fill_speed
     offset_x = offset_y = 0.0
     offset_active = False
     for frame in range(left.frame + 1, right.frame):
@@ -705,7 +712,7 @@ def _fill_gap(
         motion, search_radius = scene.motion_candidate(
             frame, base_x, base_y, area, frame - left.frame, speed
         )
-        pair_supported = gap_pair_supported and not vertex_in_gap
+        pair_supported = gap_pair_supported and short_hole and not vertex_in_gap
         motion_supported = (
             motion is not None
             and (direction_supported or gap == 2)

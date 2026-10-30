@@ -103,6 +103,27 @@ def test_first_internal_gap_is_filled_between_real_endpoints():
     assert results[1] is not None and results[2] is not None
 
 
+def test_a_hole_without_motion_is_bridged_only_for_one_detector_step():
+    # Without a blob, one missing step is the ball's line through a racket, the net or a bounce;
+    # two missing steps at 30 FPS are a guess, which on the non-held-out clips landed on more
+    # invisible labels than visible ones (audit/records/opt_picker_rules.md), so they stay empty.
+    detections, masks = _moving_ball(16)
+    for holes, filled in (((5,), True), ((5, 6), False)):
+        rows = [[] if frame in holes else row for frame, row in enumerate(detections)]
+        blank = [_empty_mask() if frame in holes else mask for frame, mask in enumerate(masks)]
+        results, _, _ = select_ball_in_play(rows, 30.0, WIDTH, HEIGHT, boost_masks=blank, raw_motions=blank)
+        assert all((results[frame] is not None) == filled for frame in holes), holes
+        assert all(results[frame].source == "interp" for frame in holes if filled)
+
+
+def test_two_missing_frames_at_60fps_are_one_detector_step():
+    detections, masks = _moving_ball(24)
+    rows = [[] if frame in (9, 10) else row for frame, row in enumerate(detections)]
+    blank = [_empty_mask() if frame in (9, 10) else mask for frame, mask in enumerate(masks)]
+    results, _, _ = select_ball_in_play(rows, 60.0, WIDTH, HEIGHT, boost_masks=blank, raw_motions=blank)
+    assert results[9] is not None and results[10] is not None
+
+
 def test_motion_backed_odd_frames_beside_a_player_are_kept_at_60fps():
     # At 60 FPS, a motion-backed frame between two sampled detections remains
     # usable beside a player; unobserved near-player gaps stay conservative.
