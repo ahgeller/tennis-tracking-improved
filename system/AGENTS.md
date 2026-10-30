@@ -40,7 +40,8 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   `ball_models`; untrained until the `train` branch runs them): `heatmap_lite.py`
   (`heatmap_lite`, HeatmapNet slimmed), `streamnet.py` (`stream_s4`: a shared encoder per
   frame transition, `encode_frame` once per frame and `decode` per unit from four cached
-  transitions, equal to the unit forward pass) and `wasbnet.py` (`wasb_5f`, WASB-SBDT's
+  transitions, equal to the unit forward pass; the prepass streams it through
+  `streaming_halves` unless `Config.ball_prepass_streaming` is off) and `wasbnet.py` (`wasb_5f`, WASB-SBDT's
   small HRNet at stride 4). `repvgg.py` holds their RepVGG blocks and the fold to plain
   convolutions: `ball_models.deployed(model)` is the inference form (export it, not the
   trainable one `load_ball_model` returns). Measurements: `audit/records/opt_detector_archs.md`
@@ -53,11 +54,12 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   overlapping units are averaged before one decode (`_UnitStream`, and
   `HeatRing` in `ball_gpu.py`); 5 is the old prepass, one unit per frame.
   `ball_gpu.py` is the prepass's device side (OpenCV's resize to the byte, the heat
-  ring, peaks, and the one kernel that turns NVDEC's NV12 pictures into the model
+  ring, peaks, `TransitionRing`, the cached transition features a streaming network's units are
+  decoded from, and the one kernel that turns NVDEC's NV12 pictures into the model
   input with the same bytes; `tennis_tracker/cuda_kernels.py` compiles such kernels
   with the NVRTC PyTorch ships and caches the cubins; `video_decode.py` is NVDEC
   and OpenCV decoding with OpenCV's pixels); `ball_trt.py` builds and caches the ball model's TensorRT engine
-  (`Config.ball_prepass_runtime`); `ball_prepass_process.py` runs the prepass in a
+  (`Config.ball_prepass_runtime`), or a streaming network's encoder and decoder engines; `ball_prepass_process.py` runs the prepass in a
   child process. The prepass runs before pass 1 by default
   (`audit/records/opt_ball_prepass.md` on the `optimization` branch has why).
   `engine_session.py`: the TensorRT session the ball, player

@@ -127,5 +127,6 @@ heatmap_s4 is unchanged.
 - The prepass does not yet use StreamNet's streaming API: `ball_detectors._prepass` would need a
   per-phase ring of four transition features (`encode_frame` once per frame, `decode` per unit).
   That is the prepass owner's code; `streamnet.stream_units` is the reference schedule.
+  Done on 2026-10-30: `opt_stream_prepass.md`.
 - The tracker's eager path loads the trainable form; call `ball_models.deployed(model)` after
   `load_ball_model` for inference (or export it) to get the fused graph.
