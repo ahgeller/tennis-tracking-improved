@@ -322,10 +322,6 @@ def _motion_candidate(
     return None
 
 
-def _segment_speed(first: Detection, second: Detection) -> float:
-    return math.hypot(second.cx - first.cx, second.cy - first.cy) / max(1, second.frame - first.frame)
-
-
 def _segment_cosine(a: Detection, b: Detection, c: Detection, d: Detection) -> float:
     """Cosine between the incoming segment a->b and the outgoing segment c->d."""
     ax, ay = b.cx - a.cx, b.cy - a.cy
@@ -630,36 +626,21 @@ def _place_detections(
 def _gap_is_supported(
     scene: _Scene, observations: List[Detection], index: int, speed: float, direction_supported: bool
 ) -> bool:
-    """Whether a straight fill between observations[index] and [index+1] is a safe claim."""
+    """Whether a straight fill without a blob between observations[index] and [index+1] is a safe
+    claim.
+
+    Only through a hole of one detector step (one missing frame at 30 FPS, two at 60): there it is
+    the ball's line through a racket, the net or a bounce. Over a longer hole a fill without a
+    single observation is a guess: on the 62 non-held-out clips (shipped model) such fills hit 22
+    labels for 54 false alarms, 19 of them off the ball's line (audit/records/opt_picker_rules.md).
+    A blob still places the frames it is found on.
+    """
     left, right = observations[index], observations[index + 1]
     gap = right.frame - left.frame
-    strong_anchors = left.conf >= _STRONG_ANCHOR_CONF and right.conf >= _STRONG_ANCHOR_CONF
-    # A long fill (> ~0.1 s) is a physics claim: both anchors must be
-    # corroborated by a same-track neighbour, and the ball may not change
-    # speed by more than the configured ratio across the gap.  A free-flying
-    # ball cannot triple its speed in the same direction; a detector jump to
-    # a static object after a long miss looks exactly like that.
-    isolation_frames = _isolation_frames(scene.fps)
-    if gap > isolation_frames:
-        corroborated = (
-            index > 0
-            and left.frame - observations[index - 1].frame <= isolation_frames
-            and index + 2 < len(observations)
-            and observations[index + 2].frame - right.frame <= isolation_frames
-        )
-        speed_consistent = all(
-            scene.cfg.fill_speed_ratio_min
-            <= speed / max(_segment_speed(first, second), 1e-6)
-            <= scene.cfg.fill_speed_ratio_max
-            for first, second in (
-                (observations[index - 1], left) if index > 0 else (None, None),
-                (right, observations[index + 2]) if index + 2 < len(observations) else (None, None),
-            )
-            if first is not None
-        )
-        strong_anchors = strong_anchors and corroborated and speed_consistent
     return (
-        strong_anchors
+        gap - 1 <= scene.cfg.detector_phase_stride
+        and left.conf >= _STRONG_ANCHOR_CONF
+        and right.conf >= _STRONG_ANCHOR_CONF
         and direction_supported
         and (gap == 2 or speed >= scene.min_fill_speed)
     )
@@ -691,15 +672,10 @@ def _fill_gap(
     )
     # Judged once for the whole gap, but re-read per frame below: a single
     # frame vetoed beside a player must not disqualify the rest of the gap.
-    gap_pair_supported = _gap_is_supported(scene, observations, index, speed, direction_supported)
-    # Without a blob, a straight fill is only drawn through a hole of one detector step (one
-    # missing frame at 30 FPS, two at 60): there it is the ball's line through a racket, the
-    # net or a bounce. Over a longer hole a fill without a single observation is a guess: on the
-    # 62 non-held-out clips (shipped model) such fills hit 22 labels for 54 false alarms, 19 of
-    # them off the ball's line (audit/records/opt_picker_rules.md). A blob still places the
-    # frames it is found on.
+    gap_pair_supported = (
+        _gap_is_supported(scene, observations, index, speed, direction_supported) and not vertex_in_gap
+    )
     cfg = scene.cfg
-    short_hole = gap - 1 <= cfg.detector_phase_stride
     near_player_slow = speed < scene.near_player_fill_speed
     offset_x = offset_y = 0.0
     offset_active = False
@@ -719,7 +695,7 @@ def _fill_gap(
         motion, search_radius = scene.motion_candidate(
             frame, base_x, base_y, area, frame - left.frame, speed
         )
-        pair_supported = gap_pair_supported and short_hole and not vertex_in_gap
+        pair_supported = gap_pair_supported
         motion_supported = (
             motion is not None
             and (direction_supported or gap == 2)

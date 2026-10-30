@@ -116,13 +116,6 @@ class SelectorConfig:
     # mask, so isolation from its own track does not condemn it.
     isolation_keep_conf: float = 0.80
 
-    # -- Bounded fill -----------------------------------------------------
-    # A long fill is a physics claim, so the ball may not change speed wildly
-    # across it.  2x was too tight: gravity alone shifts |v| near apex and a
-    # racket strike routinely exceeds it.
-    fill_speed_ratio_min: float = 0.35
-    fill_speed_ratio_max: float = 3.00
-
     # -- Projectile physics (gravity model) ---------------------------
     gravity_px_per_frame2: float = field(init=False)  # gravity in px/frame^2 at this fps/resolution
     gravity_base_ppf2_30fps: float = 0.55  # gravity at 30fps in px/frame^2 (tunable)
