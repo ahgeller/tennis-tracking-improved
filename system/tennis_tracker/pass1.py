@@ -20,8 +20,8 @@ import torch
 from ball_in_play_selector import PackedMask, RawDetection
 
 from .court.court_geometry import court_keypoints_key
-from .cuda_kernels import KernelUnavailable
 from .court.court_scene import PlayerBoxes
+from .cuda_kernels import KernelUnavailable
 from .engines.ball_detectors import FrameInput
 from .engines.player_detector import PlayerPending, interpolate_player_boxes
 from .frame_window import FrameWindow
@@ -480,6 +480,14 @@ def _use_cuda_graphs(cfg) -> bool:
     return bool(cfg.pass1_cuda_graphs) and not threaded_prepass
 
 
+def _pinned_frame_shape(ctx: RunContext) -> Optional[Tuple[int, int]]:
+    """The ``(height, width)`` pass 1's reader decodes into pinned buffers when the frames go to the
+    GPU, so their upload needs no copy into a pinned buffer on this thread; else None."""
+    if not (ctx.cfg.enable_preprocess and ctx.device.type == "cuda"):
+        return None
+    return ctx.video.height, ctx.video.width
+
+
 def _load_motion_kernels(cfg, device: torch.device) -> Optional[MotionKernels]:
     """The motion-mask kernels (``motion_gpu``) when ``cfg.motion_kernels`` asks for them and the
     device is a GPU, else None (the PyTorch ops build the same masks); a kernel that cannot be
@@ -489,7 +497,10 @@ def _load_motion_kernels(cfg, device: torch.device) -> Optional[MotionKernels]:
     try:
         return MotionKernels.load(device, Path(cfg.ball_engine_dir))
     except KernelUnavailable as error:
-        print(f"[pass 1] motion kernels unavailable, building the masks with PyTorch ops ({str(error).splitlines()[0]})")
+        # Only loading falls back: a launch that fails later, mid-clip, raises to the caller rather
+        # than switch paths half way through the masks.
+        reason = str(error).partition("\n")[0]
+        print(f"[pass 1] motion kernels unavailable, building the masks with PyTorch ops ({reason})")
         return None
 
 
@@ -497,10 +508,8 @@ def collect_pass1(ctx: RunContext) -> Pass1Result:
     """Decode the clip and collect per-frame evidence; raises RuntimeError on an empty clip."""
     cfg, timing = ctx.cfg, ctx.timing
     print("[preprocess] CUDA S+V motion path" if cfg.enable_preprocess else "[preprocess] disabled")
-    # The frames are decoded into pinned memory when they go to the GPU, so their upload needs no
-    # copy into a pinned buffer on this thread.
-    pinned_shape = (ctx.video.height, ctx.video.width) if cfg.enable_preprocess and ctx.device.type == "cuda" else None
-    reader = ThreadedFrameReader(ctx.capture, prefetch=max(2, cfg.frame_reader_prefetch), pinned_shape=pinned_shape)
+    reader = ThreadedFrameReader(ctx.capture, prefetch=max(2, cfg.frame_reader_prefetch),
+                                 pinned_shape=_pinned_frame_shape(ctx))
     first = reader.read()
     if first is None:
         reader.release()

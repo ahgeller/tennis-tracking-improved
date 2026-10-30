@@ -1,6 +1,4 @@
 """tennis_tracker.motion_gpu: the motion-mask kernels give the PyTorch path's bits (needs CUDA)."""
-from dataclasses import replace
-
 import numpy as np
 import pytest
 import torch
@@ -8,6 +6,7 @@ import torch
 from tennis_tracker.config import Config
 from tennis_tracker.frame_window import FrameWindow
 from tennis_tracker.motion import BackgroundModel, DetectorInputRequest, MASKS_ONLY, preprocess_frame_cuda
+from tennis_tracker.cuda_kernels import KernelUnavailable
 from tennis_tracker.motion_gpu import MotionKernels
 
 needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="the motion kernels run on a CUDA device")
@@ -51,6 +50,7 @@ def _answers(result, background):
 
 
 def _assert_same(a, b):
+    assert len(a) == len(b)
     for x, y in zip(a, b):
         if isinstance(x, np.ndarray) or isinstance(y, np.ndarray):
             np.testing.assert_array_equal(x, y)
@@ -138,8 +138,54 @@ def test_morph_sizes_match_the_pytorch_cleaning(kernels):
 def test_pass1_builds_the_masks_with_pytorch_ops_when_asked_or_off_the_gpu():
     from tennis_tracker.pass1 import _load_motion_kernels
 
-    assert _load_motion_kernels(replace(Config(), motion_kernels=False), torch.device("cuda", 0)) is None
+    assert _load_motion_kernels(Config(motion_kernels=False), torch.device("cuda", 0)) is None
+    assert _load_motion_kernels(Config(enable_preprocess=False), torch.device("cuda", 0)) is None
     assert _load_motion_kernels(Config(), torch.device("cpu")) is None
+
+
+def test_pass1_falls_back_to_pytorch_ops_when_the_kernels_cannot_load(monkeypatch, capsys):
+    """A kernel that NVRTC cannot build (or a CUDA setup it cannot load on) leaves pass 1 on the
+    PyTorch ops, with one line saying why."""
+    from tennis_tracker import cuda_kernels
+    from tennis_tracker.pass1 import _load_motion_kernels
+
+    def no_nvrtc(*args, **kwargs):
+        raise KernelUnavailable("cannot load the nvrtc library (test)\nsecond line")
+
+    monkeypatch.setattr(MotionKernels, "load", classmethod(no_nvrtc))
+    assert _load_motion_kernels(Config(), torch.device("cuda", 0)) is None
+    out = capsys.readouterr().out
+    assert "motion kernels unavailable" in out and "(test)" in out and "second line" not in out
+
+    # A CUDA runtime error under load_kernel (a broken driver) is a KernelUnavailable too.
+    monkeypatch.undo()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def broken(device):
+        raise RuntimeError("CUDA error: unknown error")
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", broken)
+    with pytest.raises(KernelUnavailable, match="RuntimeError: CUDA error"):
+        cuda_kernels.load_kernel("", "noop", torch.device("cuda", 0))
+    assert _load_motion_kernels(Config(), torch.device("cuda", 0)) is None
+
+
+@needs_cuda
+def test_a_box_outside_the_frame_is_refused_before_any_launch(kernels):
+    """The kernels do not bounds-check the frame, so a box past its edge (ROIs clipped to a size the
+    container reported, frames decoded at another) raises instead of writing past it."""
+    from tennis_tracker.motion import _gate_scalars
+
+    device = torch.device("cuda", 0)
+    planes = torch.zeros((3, H, W), dtype=torch.float32, device=device)
+    stats = torch.zeros((2, H, W), dtype=torch.float32, device=device)
+    gated = torch.zeros((H, W), dtype=torch.uint8, device=device)
+    for box in [(0, 0, W + 1, H), (0, 0, W, H + 1), (-1, 0, 10, 10), (10, 10, 10, 20), (5, 9, 20, 4)]:
+        with pytest.raises(ValueError, match="not inside"):
+            kernels.gate(planes, None, None, stats, stats, box, gated, None, _gate_scalars(Config()))
+    with pytest.raises(ValueError, match="one shape"):
+        kernels.morph(gated[0:10, W - 5:W + 5], torch.empty((10, 10), dtype=torch.uint8, device=device), 2, False)
+    assert not gated.any()
 
 
 def _planes(values):
@@ -177,7 +223,7 @@ def test_the_foreground_rounds_as_pytorch_does_at_the_threshold(kernels):
     assert on_threshold.sum() > 100 and expected.any() and not expected.all()
     gated = torch.zeros((H, W), dtype=torch.uint8, device=device)
     kernels.gate(frame.planes, None, None, background.mean, background.var, (0, 0, W, H), gated, None,
-                 scalars, temporal=False)
+                 scalars)
     assert torch.equal(gated.bool(), expected)
 
 
@@ -218,5 +264,48 @@ def test_the_temporal_gate_rounds_as_pytorch_does_at_its_thresholds(kernels, wit
         expected[y1:y2, x1:x2] = fg.foreground(curr, box) & temporal
         gated = torch.zeros((H, W), dtype=torch.uint8, device=device)
         kernels.gate(curr.planes, prev.planes, nxt.planes if with_next else None, mean, var, box, gated, None,
-                     _gate_scalars(cfg), temporal=True)
+                     _gate_scalars(cfg))
         assert torch.equal(gated.bool(), expected), f"hi={hi!r}"
+
+
+def _sum3_in_pool_order(delta):
+    """The 3x3 sums ``avg_pool2d`` divides by nine, added from 0 tap by tap in its row-major order."""
+    padded = torch.nn.functional.pad(delta, (1, 1, 1, 1))
+    h, w = delta.shape
+    total = torch.zeros_like(delta)
+    for dy in range(3):
+        for dx in range(3):
+            total = total + padded[dy:dy + h, dx:dx + w]
+    return total
+
+
+@needs_cuda
+def test_the_blur_divides_by_nine_rather_than_multiplying_by_a_ninth(kernels):
+    """Pixels whose 3x3 sum gives a different float32 divided by nine than multiplied by 1/9, with
+    the gate's ``hi`` on PyTorch's value there and one float32 step above it: only a kernel that
+    divides, as ``avg_pool2d`` does, puts every such pixel on PyTorch's side."""
+    from tennis_tracker.motion import _blur3, _gate_scalars, _probe_delta
+
+    device = torch.device("cuda", 0)
+    rng = np.random.default_rng(9)
+    prev, curr = (_planes(torch.from_numpy(rng.random((3, H, W), dtype=np.float32)).to(device)) for _ in range(2))
+    box = (0, 0, W, H)
+    dp = _blur3(_probe_delta(prev.planes, curr.planes))
+    # On the host: PyTorch divides a CUDA tensor by a scalar as a multiply by its reciprocal.
+    total = _sum3_in_pool_order(_probe_delta(prev.planes, curr.planes)).cpu().numpy()
+    divided, multiplied = total / np.float32(9.0), total * np.float32(1.0 / 9.0)
+    np.testing.assert_array_equal(dp.cpu().numpy(), divided)        # avg_pool2d's sums, divided
+    apart = np.argwhere(divided != multiplied)
+    assert len(apart) > 20                                           # the two roundings differ there
+    mean = torch.zeros((2, H, W), dtype=torch.float32, device=device)
+    for y, x in apart[:20].tolist():
+        value = np.float32(dp[y, x].item())
+        for hi in (float(value), float(np.nextafter(value, np.float32(np.inf)))):
+            cfg = Config(motion_thresh=0.0, motion_v_min=0.0, motion_raw_temporal_hi=hi)
+            background = BackgroundModel(cfg, device)
+            background.mean, background.var = mean, mean
+            expected = background.foreground(curr, box) & (dp >= hi)
+            gated = torch.zeros((H, W), dtype=torch.uint8, device=device)
+            kernels.gate(curr.planes, prev.planes, None, mean, mean, box, gated, None, _gate_scalars(cfg))
+            assert bool(gated[y, x]) == bool(expected[y, x]), f"pixel {(x, y)}, hi={hi!r}"
+            assert torch.equal(gated.bool(), expected)

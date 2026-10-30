@@ -23,17 +23,16 @@ from typing import List, Optional, Tuple
 import torch
 
 from .cuda_kernels import Kernel, load_kernel
-
-Box = Tuple[int, int, int, int]
+from .roi_tracking import Box
 
 # One thread per pixel of a box. ``temporal`` is 0 (no gate: the foreground is the motion), 1 (the
 # previous frame only) or 2 (the previous and the next frame). A pixel is only ever set, never
 # cleared, so boxes that overlap OR their answers as the PyTorch path does.
 _MOTION_GATE_SOURCE = r"""
 __device__ __forceinline__ float probe_delta(const float* earlier, const float* later, long long plane,
-                                             long long p) {
-    // max(|later - earlier| * scale) over gray, value, saturation; the scales are 255, 255, 318.75.
-    const float scale[3] = {255.0f, 255.0f, 318.75f};
+                                             long long p, float s_probe) {
+    // max(|later - earlier| * scale) over gray, value, saturation; the scales are 255, 255, s_probe.
+    const float scale[3] = {255.0f, 255.0f, s_probe};
     float best = 0.0f;
     for (int c = 0; c < 3; ++c) {
         const float d = __fmul_rn(fabsf(__fsub_rn(later[c * plane + p], earlier[c * plane + p])), scale[c]);
@@ -43,7 +42,7 @@ __device__ __forceinline__ float probe_delta(const float* earlier, const float* 
 }
 
 __device__ __forceinline__ float blurred_delta(const float* earlier, const float* later, long long plane, int width,
-                                               int x, int y, int x1, int y1, int x2, int y2) {
+                                               int x, int y, int x1, int y1, int x2, int y2, float s_probe) {
     // avg_pool2d's 3x3 mean with zero padding at the box's edges: the taps in the box, summed row by
     // row from the top left, divided by nine.
     float sum = 0.0f;
@@ -53,7 +52,7 @@ __device__ __forceinline__ float blurred_delta(const float* earlier, const float
         for (int dx = -1; dx <= 1; ++dx) {
             const int qx = x + dx;
             if (qx < x1 || qx >= x2) continue;
-            sum = __fadd_rn(sum, probe_delta(earlier, later, plane, (long long)qy * width + qx));
+            sum = __fadd_rn(sum, probe_delta(earlier, later, plane, (long long)qy * width + qx, s_probe));
         }
     }
     return __fdiv_rn(sum, 9.0f);
@@ -64,8 +63,8 @@ extern "C" __global__ void motion_gate(
         const float* __restrict__ mean, const float* __restrict__ var,
         unsigned char* __restrict__ gated, unsigned char* __restrict__ ungated,
         int height, int width, int x1, int y1, int x2, int y2,
-        float k_std_sq, float thresh_sq, float s_scale, float v_min, float hi, float lo, float very_hi,
-        int temporal) {
+        float k_std_sq, float thresh_sq, float s_scale, float v_min, float s_probe, float hi, float lo,
+        float very_hi, int temporal) {
     const int x = x1 + blockIdx.x * blockDim.x + threadIdx.x;
     const int y = y1 + blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= x2 || y >= y2) return;
@@ -83,11 +82,11 @@ extern "C" __global__ void motion_gate(
     if (ungated != 0) ungated[p] = 1;
     bool moving = true;
     if (temporal > 0) {
-        const float dp = blurred_delta(prev, curr, plane, width, x, y, x1, y1, x2, y2);
+        const float dp = blurred_delta(prev, curr, plane, width, x, y, x1, y1, x2, y2, s_probe);
         if (temporal == 1) {
             moving = dp >= hi;
         } else {
-            const float dn = blurred_delta(curr, next, plane, width, x, y, x1, y1, x2, y2);
+            const float dn = blurred_delta(curr, next, plane, width, x, y, x1, y1, x2, y2, s_probe);
             moving = (dp >= hi && dn >= lo) || (dn >= hi && dp >= lo) || dp >= very_hi;
         }
     }
@@ -131,22 +130,24 @@ def _grid(width: int, height: int) -> Tuple[int, int, int]:
 
 @dataclass(frozen=True)
 class GateScalars:
-    """The foreground and temporal-gate thresholds as the PyTorch path applies them, each the
-    float32 PyTorch casts the Python scalar to: the variance factor (``motion_k_std ** 2``), the
-    squared floor (``(motion_thresh / 255) ** 2``), the saturation threshold's widening, the value
-    floor (``motion_v_min / 255``) and the gate's ``hi``, ``lo`` and ``very_hi``."""
+    """The foreground and temporal-gate thresholds and scales as the PyTorch path applies them,
+    each the float32 PyTorch casts the Python scalar to: the variance factor (``motion_k_std ** 2``),
+    the squared floor (``(motion_thresh / 255) ** 2``), the saturation threshold's widening, the
+    value floor (``motion_v_min / 255``), the probe delta's saturation scale (``255 *
+    _PROBE_S_DIFF_SCALE``) and the gate's ``hi``, ``lo`` and ``very_hi``."""
 
     k_std_sq: float
     thresh_sq: float
     s_scale: float
     v_min: float
+    probe_s_scale: float
     hi: float
     lo: float
     very_hi: float
 
     def arguments(self) -> List[ctypes.c_float]:
         return [ctypes.c_float(value) for value in (self.k_std_sq, self.thresh_sq, self.s_scale, self.v_min,
-                                                    self.hi, self.lo, self.very_hi)]
+                                                    self.probe_s_scale, self.hi, self.lo, self.very_hi)]
 
 
 def _check_planes(tensor: torch.Tensor, planes: int, height: int, width: int) -> None:
@@ -154,12 +155,20 @@ def _check_planes(tensor: torch.Tensor, planes: int, height: int, width: int) ->
         raise ValueError(f"motion_gate reads contiguous ({planes}, {height}, {width}) float32 planes")
 
 
+def _check_box(box: Box, height: int, width: int) -> None:
+    """The kernels index the frame without bounds checks, so a box must lie inside it (PyTorch's
+    slices would clamp one that does not, the kernel would write past the frame)."""
+    x1, y1, x2, y2 = box
+    if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+        raise ValueError(f"motion box {box} is not inside the {width}x{height} frame")
+
+
 class MotionKernels:
     """``motion_gate`` and ``motion_morph`` loaded on one device, with the box-level launches."""
 
     def __init__(self, gate: Kernel, morph: Kernel) -> None:
-        self.gate_kernel = gate
-        self.morph_kernel = morph
+        self._gate_kernel = gate
+        self._morph_kernel = morph
 
     @classmethod
     def load(cls, device: torch.device, cache_dir: Optional[Path] = None) -> "MotionKernels":
@@ -170,26 +179,24 @@ class MotionKernels:
 
     def gate(self, curr: torch.Tensor, prev: Optional[torch.Tensor], nxt: Optional[torch.Tensor],
              mean: torch.Tensor, var: torch.Tensor, box: Box, gated: torch.Tensor, ungated: Optional[torch.Tensor],
-             scalars: GateScalars, temporal: bool) -> None:
+             scalars: GateScalars) -> None:
         """Set the moving pixels of `box` in the frame-sized uint8 `gated` (and the foreground in
         `ungated`, when given): ``curr``, ``prev`` and ``nxt`` are frames' ``(3, H, W)`` motion planes
-        (``GpuFrame.planes``), ``mean`` and ``var`` the background's ``(2, H, W)``; with `temporal`
-        the gate reads ``prev`` and, when there is one, ``nxt``."""
+        (``GpuFrame.planes``), ``mean`` and ``var`` the background's ``(2, H, W)``. Without ``prev``
+        the gate does not run and the foreground is the motion; with it, the gate reads ``prev`` and,
+        when there is one, ``nxt``. Raises ``ValueError`` on a box outside the frame or a plane of
+        another shape; a failed launch raises ``KernelUnavailable`` to the caller."""
         height, width = int(gated.shape[0]), int(gated.shape[1])
-        _check_planes(curr, 3, height, width)
-        _check_planes(mean, 2, height, width)
-        _check_planes(var, 2, height, width)
-        mode = 0
-        if temporal:
-            assert prev is not None
-            _check_planes(prev, 3, height, width)
-            mode = 1
-            if nxt is not None:
-                _check_planes(nxt, 3, height, width)
-                mode = 2
+        _check_box(box, height, width)
+        for tensor, planes in ((curr, 3), (mean, 2), (var, 2), (prev, 3), (nxt, 3)):
+            if tensor is not None:
+                _check_planes(tensor, planes, height, width)
+        if nxt is not None and prev is None:
+            raise ValueError("motion_gate reads the next frame only with the previous one")
+        mode = 0 if prev is None else 1 if nxt is None else 2
         x1, y1, x2, y2 = box
-        self.gate_kernel(_grid(x2 - x1, y2 - y1), _BLOCK, [
-            curr, prev if prev is not None else _NULL, nxt if nxt is not None and mode == 2 else _NULL, mean, var,
+        self._gate_kernel(_grid(x2 - x1, y2 - y1), _BLOCK, [
+            curr, prev if prev is not None else _NULL, nxt if nxt is not None else _NULL, mean, var,
             gated, ungated if ungated is not None else _NULL, height, width, x1, y1, x2, y2,
             *scalars.arguments(), mode])
 
@@ -197,11 +204,12 @@ class MotionKernels:
               merge: Optional[torch.Tensor] = None) -> None:
         """One dilation (or erosion) of the uint8 box `src` (a view, rows of any pitch) into `dst`,
         a contiguous tensor of its shape; the set pixels are also set in `merge` (a view of the same
-        shape) when it is given. Size 1 copies the box."""
+        shape) when it is given. Size 1 copies the box. The shapes are checked, so the kernel never
+        reads or writes past a box; a failed launch raises ``KernelUnavailable`` to the caller."""
         box_height, box_width = int(src.shape[0]), int(src.shape[1])
         for tensor in (src, dst) + ((merge,) if merge is not None else ()):
             if tensor.dtype != torch.uint8 or tuple(tensor.shape) != (box_height, box_width) or tensor.stride(1) != 1:
                 raise ValueError("motion_morph reads and writes uint8 boxes of one shape with unit column stride")
-        self.morph_kernel(_grid(box_width, box_height), _BLOCK, [
+        self._morph_kernel(_grid(box_width, box_height), _BLOCK, [
             src, src.stride(0), dst, dst.stride(0), merge if merge is not None else _NULL,
             merge.stride(0) if merge is not None else 0, box_width, box_height, int(size), int(erode)])

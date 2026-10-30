@@ -163,5 +163,9 @@ def load_kernel(source: str, name: str, device: torch.device, cache_dir: Optiona
                 except OSError:
                     pass                      # an unwritable cache only costs the next run a compile
         return Kernel(name, image, device)
-    except (OSError, AttributeError) as error:
-        raise KernelUnavailable(str(error)) from error
+    except KernelUnavailable:
+        raise
+    except (OSError, AttributeError, RuntimeError) as error:
+        # A missing library entry point, an unreadable cache or a CUDA runtime error from PyTorch
+        # (a broken driver or device) all mean the kernel cannot run here; other errors are bugs.
+        raise KernelUnavailable(f"{type(error).__name__}: {error}") from error
