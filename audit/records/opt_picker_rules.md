@@ -127,7 +127,8 @@ Vereinsduell, looked at frame by frame (no labels exist):
 - 5943-5963 (still output, 3.1 m by the metric, 1.9 m by the selector) is a ball just left of our
   far-left corner, above the side wall. The two disagree because this clip's per-frame court
   keypoints sit visibly off the painted lines (the far baseline about 20 px low); the metric reads
-  the frame's keypoints, the selector the scene's court polygon. Ambiguous; left alone.
+  the frame's keypoints, the selector the scene's court polygon. Ambiguous; left alone. (Since the
+  review fixes both read the frame's keypoints, and it is vetoed: see below.)
 - 34041 is one motion row after our own ball, tossed towards the bench (track 650), cut off from its
   track by a missing frame: a false flag of the metric's run grouping.
 
@@ -136,7 +137,8 @@ Vereinsduell, looked at frame by frame (no labels exist):
 ### 1. A track that never comes within 3 m of our sidelines is not selected (8528553)
 
 `score_tracks` records `court_lateral_min_m`, the closest the track's observations come to our
-doubles sidelines (same geometry as the metric, on the scene's court polygon), and
+doubles sidelines (same geometry as the metric; at 8528553 on the scene's court polygon, since
+the review fixes on each frame's own court), and
 `selected_tracks` vetoes the track past `select_off_court_lateral_m` = 3.0 (`selection['off_court']`).
 The near-court score term could not do it: `inside_frac` uses a margin of 0.12 x the image
 diagonal, which reaches the neighbouring court, so the VolyAvw neighbour track scored 0.86 there.
@@ -198,3 +200,74 @@ At HEAD: root `python -m pytest -q` in `tennis-analysis` 1325 passed, 10 skipped
 (5 files) and in `system/` (18 files). New scenario tests: the neighbour veto (4), fills over one
 detector step at 30 and 60 FPS (2), the refit noise floor (1), the two WIP refit tests, and
 `tests/test_off_court.py` (4).
+
+## Review fixes (f2bca2f..a70cf76)
+
+A review of 0cb0e6c..4d42276 found, and these commits fix:
+
+- **Missing-corner court** (f2bca2f). With a corner keypoint missing, `build_court_polygon` falls
+  back to a hull of the other keypoints, often four-sided, and the veto read it as the doubles
+  corners: on the golden keypoints without the far-left corner a ball 1.57 m out read 3.07 m.
+  Corners now come only from keypoints 0-3 (`court_geometry.doubles_corners`), and with one
+  missing nothing is measured or vetoed.
+- **Tilted far baseline** (f2bca2f). A point above the far baseline was read on the mean far row;
+  beside the lower far corner that put the sideline's extension above the corner (baseline
+  (700,150)-(1150,250), ball (1250,200): 4.11 m). Each sideline is now read on its own far
+  corner's row (2.10 m with near corners (300,700), (1600,700)).
+- **One polygon per clip** (f2bca2f). Every track was measured against the clip's last valid
+  court; a later reframing would have vetoed real rallies. Each observation is now measured
+  against its own frame's keypoints, the last valid ones as fallback, exactly as the metric does
+  (`select_ball_in_play(court_keypoints_by_frame=...)`; the pipeline and the replay pass theirs).
+- **Shared geometry** (f2bca2f, 8353a38). `doubles_corners` and `sideline_distance_m` live in
+  `system/tennis_tracker/court/court_geometry.py` with `DOUBLES_WIDTH_M`; the selector and
+  `tools/off_court.py` import them, so the veto and the metric cannot drift. The docstring's
+  "errs towards ours" claim is restated: it holds for a point above its far corner; a point in the
+  air lower down reads farther out than its ground point, which is why a track is judged by its
+  minimum.
+- **Dead code** (ad0ad44). The long-gap corroboration and speed-ratio branch of
+  `_gap_is_supported` could not change a result once a blob-less fill needs one detector step;
+  it and `fill_speed_ratio_min/max` are gone, and the one-step rule lives in
+  `_gap_is_supported`.
+- **Tests** (82014a6, a70cf76, 8353a38). The bounce-vertex test passed on the old code; it now uses
+  a one-frame vertex the old refit pulled 12 px. A three-frame blob-less hole at 60 FPS must stay
+  empty. Both fail on 0cb0e6c. The pipeline golden gains a one-frame occlusion (frame 33,
+  bridged as interp) beside the three-frame one that stays empty; its stale "coasts" comment is
+  fixed. `tests/test_off_court.py` covers the frame's own court before the fallback, a run that
+  starts with a fitted row, and `main()`.
+- **Style.** Lines within each file's existing maximum, two blank lines around `_court_fractions`,
+  the corners prepared once per `score_tracks` call.
+
+### Re-verification at a70cf76
+
+Held-out gate, both models (`output/gate_review_ship`, `output/gate_review_s4`): identical to the
+option-A numbers above.
+
+| model | recall | wrong | FA (bridged/false) | median | custom | grid | prof |
+|---|---|---|---|---|---|---|---|
+| shipped @0.40 | 0.952 | 0.001 | 89 (79/10) | 1.0 px | .966 | .896 | .962 |
+| stream_s4 @0.42 | 0.953 | 0.001 | 95 (79/16) | 1.0 px | .971 | .913 | .952 |
+
+Off our court (the revised tool; present frames in brackets):
+
+| clip | shipped AB+ | shipped A | shipped A+review | stream_s4 AB+ | stream_s4 A | stream_s4 A+review |
+|---|---|---|---|---|---|---|
+| VolyAvw | 0 (2590) | 0 (2578) | 0 (2578) | 40 (2509) | 0 (2457) | 0 (2457) |
+| pomona | 0 (1075) | 0 (1075) | 0 (1075) | 0 (1090) | 0 (1090) | 0 (1090) |
+| PomonaPitzer | 0 (3110) | 0 (3108) | 0 (3108) | 0 (3142) | 0 (3142) | 0 (3142) |
+| Vereinsduell | 22 (34537) | 12 (34400) | 1 (34389) | 22 (32366) | 12 (32255) | 1 (32255) |
+
+VolyAvw windows are unchanged: 2772-2865 has no output for either model, and 1107-1137 is 26 (shipped)
+and 30 (stream_s4) frames, all on our court.
+
+Vereinsduell changed only at borderline tracks, all measured against this clip's misfitted
+per-frame court:
+- 5943-5963 (both models) now reads 3.1 m in the selector too, so it is vetoed.
+- stream_s4 9438-9450 (track 175) went from 3.02 m to 2.92 m and is output again, as on AB+. It
+  is a false detection on the fence banner above our far-left corner, not a ball on another court,
+  so the earlier veto only caught it by chance.
+- The one remaining flag (34041) is the metric's false flag described above.
+
+Tests at a70cf76:
+- Root suite (`tennis-analysis`): 1331 passed, 10 skipped, 1 failed (`test_ball_trt`, no `onnx`).
+- `system/` suite (`tennis-opt`): 609 passed.
+- mypy is clean in both.
