@@ -26,6 +26,7 @@ _NON_NEGATIVE_FIELDS = (
     "timeline_min_track_score", "timeline_coverage_weight", "timeline_score_weight",
     "timeline_max_gap_sec", "timeline_overlap_tol_frac", "timeline_small_gap_sec",
     "timeline_small_gap_jump_reject_frac", "trail_jump_break_growth_frac", "bounce_restitution",
+    "select_off_court_lateral_m",
 )
 # Frame counts the selector divides by or uses as loop bounds.
 _POSITIVE_FRAME_COUNT_FIELDS = ("trail_stitch_min_obs", "assoc_gate_growth_cap_frames")
@@ -155,6 +156,12 @@ class SelectorConfig:
     # demands real speed, not merely a wide footprint.
     select_kinematic_motion_frac: float = 0.75
     select_kinematic_extent_frac: float = 0.05
+    # A track that never comes within this many metres of our doubles sidelines, sideways on the
+    # ground (scoring.court_lateral_m), is a ball on a neighbouring court: our rally comes down to
+    # our court at a bounce or a racket, and a neighbouring court's nearest sideline is at least
+    # 3.66 m from ours (the ITF's minimum side run-off between courts). The near-court score term
+    # cannot tell: its margin (court_expand_px, 12% of the diagonal) reaches the next court.
+    select_off_court_lateral_m: float = 3.0
 
     def __post_init__(self) -> None:
         self.auto_scale()

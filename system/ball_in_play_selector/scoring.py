@@ -42,6 +42,9 @@ _HANDOVER_MIN_FRAMES = 2
 # near-player fraction, which only weakly multiplies the score.
 _NEAR_PLAYER_MARGIN_PX = 60
 _NEAR_PLAYER_MULT_FLOOR, _NEAR_PLAYER_MULT_RANGE = 0.70, 0.30
+# A doubles court is this wide; core.selected_tracks reads a track's sideways distance from
+# our court in metres (court_lateral_m).
+_DOUBLES_WIDTH_M = 10.97
 
 
 def _track_speed_stats(trk: Track) -> Tuple[float, float]:
@@ -427,6 +430,55 @@ def _court_fractions(
     n = len(track.observations)
     return near_court / n, strict_inside / n
 
+def _court_corners(court_poly: Optional[np.ndarray]) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """The court's (far left, far right, near left, near right) corners from a four-point polygon
+    in any order (the far pair is the upper one in the image), or None for any other polygon."""
+    if court_poly is None:
+        return None
+    points = np.asarray(court_poly, dtype=np.float64).reshape(-1, 2)
+    if len(points) != 4:
+        return None
+    by_row = points[np.argsort(points[:, 1], kind="stable")]
+    far = by_row[:2][np.argsort(by_row[:2, 0], kind="stable")]
+    near = by_row[2:][np.argsort(by_row[2:, 0], kind="stable")]
+    if near[:, 1].mean() - far[:, 1].mean() < 1.0:
+        return None
+    return far[0], far[1], near[0], near[1]
+
+
+def _x_on_row(top: np.ndarray, bottom: np.ndarray, row: float) -> float:
+    """The x of the line through two image points at image row ``row``."""
+    if abs(float(bottom[1] - top[1])) < 1e-6:
+        return float(0.5 * (top[0] + bottom[0]))
+    return float(top[0] + (row - top[1]) * (bottom[0] - top[0]) / (bottom[1] - top[1]))
+
+
+def court_lateral_m(x: float, y: float, corners: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]) -> float:
+    """Metres sideways beyond the nearer doubles sideline of the court (0 between them).
+
+    Measured on the point's own image row, or on the far baseline's row when the point is above
+    it: an airborne ball stands straight above its ground point in a view from behind a baseline,
+    so above the far baseline nothing says how far away it is, and the far row understates the
+    distance (errs towards calling the ball ours). The court is 10.97 m wide on every row.
+    """
+    far_left, far_right, near_left, near_right = corners
+    row = max(float(y), 0.5 * float(far_left[1] + far_right[1]))
+    left = _x_on_row(far_left, near_left, row)
+    right = _x_on_row(far_right, near_right, row)
+    if right - left <= 1.0:
+        return 0.0
+    return max(left - x, x - right, 0.0) * _DOUBLES_WIDTH_M / (right - left)
+
+
+def _court_lateral_min_m(track: Track, court_poly: Optional[np.ndarray]) -> float:
+    """How close the track ever comes to the court sideways: the smallest ``court_lateral_m`` of
+    its observations, 0 without a four-corner court (no evidence that it is elsewhere)."""
+    corners = _court_corners(court_poly)
+    if corners is None or not track.observations:
+        return 0.0
+    return min(court_lateral_m(obs.cx, obs.cy, corners) for obs in track.observations)
+
+
 def _near_player_fractions(
     track: Track,
     player_boxes_by_frame: Optional[PlayerBoxesByFrame],
@@ -492,6 +544,7 @@ def score_tracks(
         inside_frac, strict_inside_frac = _court_fractions(
             trk, court_poly, cfg.court_expand_px
         )
+        lateral_min_m = _court_lateral_min_m(trk, court_poly)
         motion_overlap = sum(1 for o in obs if o.on_motion) / max(n, 1)
         near_player_frac, near_player_court_frac = _near_player_fractions(
             trk, player_boxes_by_frame, court_poly, cfg.court_expand_px
@@ -527,6 +580,7 @@ def score_tracks(
             "span": span,
             "inside_frac": float(inside_frac),
             "inside_strict_frac": float(strict_inside_frac),
+            "court_lateral_min_m": float(lateral_min_m),
             "motion_evidence": float(motion_evidence),
             "motion_overlap": float(motion_overlap),
             "motion_kin_frac": float(motion_kin_frac),

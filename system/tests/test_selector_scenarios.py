@@ -16,7 +16,7 @@ from ball_in_play_selector.core import (
     selected_tracks,
     trajectory_observations,
 )
-from ball_in_play_selector.scoring import select_timeline_chain, stitch_track_chain
+from ball_in_play_selector.scoring import court_lateral_m, score_tracks, select_timeline_chain, stitch_track_chain
 
 FRAME_SHAPE = (360, 640)
 WIDTH, HEIGHT = FRAME_SHAPE[1], FRAME_SHAPE[0]
@@ -485,7 +485,7 @@ def test_the_selection_verdicts_and_the_timeline_are_recorded_and_exported():
     detections, masks = _moving_ball()
     results, chosen, tracks = select_ball_in_play(detections, 30.0, WIDTH, HEIGHT, boost_masks=masks)
     [track] = tracks
-    assert set(track.selection) == {"established", "reacquired", "airborne", "rolling"}
+    assert set(track.selection) == {"established", "reacquired", "airborne", "rolling", "off_court"}
     assert track.selection["established"] and track.in_timeline
     assert all(row.track_id == track.track_id for row in results if row is not None and row.source == "det")
 
@@ -527,3 +527,76 @@ def test_speed_reference_is_the_last_same_phase_observation():
     assert _speed_reference(observations, 14, 1).frame == 13
     assert _speed_reference(_observations([11, 13]), 14, 2).frame == 13
     assert _speed_reference(_observations([10, 11, 13, 15, 17]), 18, 2).frame == 17
+
+
+# The VolyAvw court (sample/VolyAvw-cut-merged-1771797159395.mp4, its last valid keypoints) as the
+# pipeline hands it over: the ordered polygon TL, BL, BR, TR.
+_VOLY_COURT = np.array([[787.5, 199.3], [201.0, 632.8], [1827.0, 631.5], [1182.0, 197.9]],
+                       dtype=np.float32).reshape(-1, 1, 2)
+
+
+def _flight(points: List[Tuple[float, float]], first_frame: int, steps: int) -> List[List[Detection]]:
+    """Confident on-mask detections moving linearly through ``points``, ``steps`` frames per leg."""
+    rows: List[List[Detection]] = []
+    frame = first_frame
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        for step in range(steps):
+            x = x0 + (x1 - x0) * step / steps
+            y = y0 + (y1 - y0) * step / steps
+            rows.append([Detection(frame, x, y, x - 3, y - 3, x + 3, y + 3, 0.9, 36.0, True)])
+            frame += 1
+    return rows
+
+
+def _scored_at_volyavw(*flights: List[List[Detection]]) -> List[Track]:
+    cfg = _cfg(60.0, HD_WIDTH, HD_HEIGHT)
+    total = max(row[0].frame for flight in flights for row in flight) + 1
+    rows: List[List[Detection]] = [[] for _ in range(total)]
+    for flight in flights:
+        for row in flight:
+            rows[row[0].frame] += row
+    return score_tracks(build_tracks(rows, cfg), cfg, court_poly=_VOLY_COURT, total_frames=total)
+
+
+def test_a_ball_on_the_neighbouring_court_is_not_selected():
+    # The measured stream_s4 track 22 on VolyAvw (frames 2772-2865): a ball bouncing on the
+    # court to the right, 8.7 m and more beyond our right sideline. The near-court score term
+    # gave it 0.86 (its margin reaches the next court; 0.77 for this sketch of it) and the chain chose it between two of
+    # our rallies; on our court the server was bouncing her ball.
+    [neighbour] = _scored_at_volyavw(_flight([(1673.0, 126.0), (1515.0, 208.0), (1497.0, 140.0)], 0, 30))
+    assert neighbour.score_value("inside_frac") > 0.7
+    assert neighbour.score_value("court_lateral_min_m") > 8.0
+    assert neighbour not in selected_tracks([neighbour])
+    assert neighbour.selection["established"] and neighbour.selection["off_court"]
+
+
+def test_our_balls_beside_and_above_the_court_stay_selected():
+    # A high ball over the far end that never comes below the far baseline in the picture
+    # (the labelled PomonaPitzer ball of frames 2012-2097, strictly inside 0% of the time), and
+    # a ball hit wide that flies out 5 m beyond our left sideline: each has a point near our
+    # lines, so neither is another court's.
+    high = _flight([(978.0, 175.0), (1000.0, 98.0), (1027.0, 160.0)], 0, 30)
+    wide = _flight([(700.0, 300.0), (300.0, 340.0), (20.0, 500.0)], 200, 30)
+    tracks = _scored_at_volyavw(high, wide)
+    assert len(tracks) == 2
+    assert all(track.score_value("court_lateral_min_m") < 1.0 for track in tracks)
+    assert {track.first_frame for track in selected_tracks(tracks)} == {0, 200}
+
+
+def test_lateral_distance_is_read_on_the_ball_row_or_the_far_baseline_row():
+    corners = (np.array([787.5, 199.3]), np.array([1182.0, 197.9]), np.array([201.0, 632.8]),
+               np.array([1827.0, 631.5]))
+    assert court_lateral_m(1000.0, 400.0, corners) == 0.0
+    # On the near baseline the court is 1626 px wide: 148 px a metre.
+    assert abs(court_lateral_m(1827.0 + 148.2, 632.0, corners) - 1.0) < 0.01
+    # Above the far baseline, the far baseline's row (395 px wide, 36 px a metre) is used.
+    assert abs(court_lateral_m(1182.0 + 36.0, 60.0, corners) - court_lateral_m(1182.0 + 36.0, 198.6, corners)) < 1e-9
+    assert abs(court_lateral_m(1182.0 + 36.0, 60.0, corners) - 1.0) < 0.05
+
+
+def test_without_a_four_corner_court_no_track_is_called_off_court():
+    cfg = _cfg(60.0, HD_WIDTH, HD_HEIGHT)
+    rows = _flight([(1673.0, 126.0), (1515.0, 208.0), (1497.0, 140.0)], 0, 30)
+    [track] = score_tracks(build_tracks(rows, cfg), cfg, court_poly=None, total_frames=len(rows))
+    assert track.score_value("court_lateral_min_m") == 0.0
+    assert track in selected_tracks([track])

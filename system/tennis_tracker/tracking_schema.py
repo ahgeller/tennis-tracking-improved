@@ -97,7 +97,7 @@ class TrackJson(TypedDict):
     last_obs_frame: int
     start: TrackStartJson
     end_reason: str                     # "max_gap" or "clip_end"
-    selection: Dict[str, bool]          # core.selected_tracks' tests: established, reacquired, airborne, rolling
+    selection: Dict[str, bool]          # core.selected_tracks' tests: established, reacquired, airborne, rolling; off_court vetoes
     in_timeline: bool                   # whether the timeline chain used it
     score_breakdown: Dict[str, float]
     observations: List[ObservationJson]

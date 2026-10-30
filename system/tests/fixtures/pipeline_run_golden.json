@@ -488,6 +488,7 @@
    "score_breakdown": {
     "additive_core": 104.0,
     "avg_speed_pxpf": 14.830349361024274,
+    "court_lateral_min_m": 0.0,
     "end_frac": 1.0,
     "end_frame": 39.0,
     "extent_px": 471.65878681234125,
@@ -514,6 +515,7 @@
    "selection": {
     "airborne": true,
     "established": true,
+    "off_court": false,
     "reacquired": false,
     "rolling": true
    },
@@ -4433,6 +4435,7 @@
     "score_breakdown": {
      "additive_core": 104.0,
      "avg_speed_pxpf": 14.830349361024274,
+     "court_lateral_min_m": 0.0,
      "end_frac": 1.0,
      "end_frame": 39.0,
      "extent_px": 471.65878681234125,
@@ -4459,6 +4462,7 @@
     "selection": {
      "airborne": true,
      "established": true,
+     "off_court": false,
      "reacquired": false,
      "rolling": true
     },
@@ -4495,6 +4499,7 @@
     "score_breakdown": {
      "additive_core": 1.0,
      "avg_speed_pxpf": 0.0,
+     "court_lateral_min_m": 0.0,
      "end_frac": 0.358974358974359,
      "end_frame": 14.0,
      "extent_px": 0.0,
@@ -4521,6 +4526,7 @@
     "selection": {
      "airborne": false,
      "established": false,
+     "off_court": false,
      "reacquired": false,
      "rolling": false
     },
@@ -5028,6 +5034,7 @@
    "score_breakdown": {
     "additive_core": 104.0,
     "avg_speed_pxpf": 14.830349361024274,
+    "court_lateral_min_m": 0.0,
     "end_frac": 1.0,
     "end_frame": 39.0,
     "extent_px": 471.65878681234125,
@@ -5054,6 +5061,7 @@
    "selection": {
     "airborne": true,
     "established": false,
+    "off_court": false,
     "reacquired": false,
     "rolling": false
    },
@@ -8895,6 +8903,7 @@
     "score_breakdown": {
      "additive_core": 104.0,
      "avg_speed_pxpf": 14.830349361024274,
+     "court_lateral_min_m": 0.0,
      "end_frac": 1.0,
      "end_frame": 39.0,
      "extent_px": 471.65878681234125,
@@ -8921,6 +8930,7 @@
     "selection": {
      "airborne": true,
      "established": false,
+     "off_court": false,
      "reacquired": false,
      "rolling": false
     },
@@ -8957,6 +8967,7 @@
     "score_breakdown": {
      "additive_core": 1.0,
      "avg_speed_pxpf": 0.0,
+     "court_lateral_min_m": 0.0,
      "end_frac": 0.358974358974359,
      "end_frame": 14.0,
      "extent_px": 0.0,
@@ -8983,6 +8994,7 @@
     "selection": {
      "airborne": false,
      "established": false,
+     "off_court": false,
      "reacquired": false,
      "rolling": false
     },

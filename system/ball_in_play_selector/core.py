@@ -109,7 +109,8 @@ def _px(value_at_1080p: float, diag: float) -> float:
 
 
 def selected_tracks(tracks: List[Track]) -> List[Track]:
-    """Keep established shots, reacquisitions, airborne balls, and slow in-court rolls.
+    """Keep established shots, reacquisitions, airborne balls, and slow in-court rolls, unless the
+    track stays beside a neighbouring court.
 
     Every threshold comes from each track's own ``cfg`` (already scaled to the
     clip's frame rate and resolution).
@@ -161,9 +162,11 @@ def selected_tracks(tracks: List[Track]) -> List[Track]:
             and extent_px >= cfg.select_rolling_extent_frac * cfg.diag
             and score_density >= cfg.select_rolling_score_density_min
         )
+        # Whatever its evidence, a ball that stays beside another court is not ours.
+        off_court = track.score_value("court_lateral_min_m") > cfg.select_off_court_lateral_m
         track.selection = {"established": established, "reacquired": reacquired,
-                           "airborne": airborne, "rolling": rolling}
-        if established or reacquired or airborne or rolling:
+                           "airborne": airborne, "rolling": rolling, "off_court": off_court}
+        if (established or reacquired or airborne or rolling) and not off_court:
             selected.append(track)
     return sorted(selected, key=lambda track: (track.first_frame, track.last_obs_frame))
 
