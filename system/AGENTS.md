@@ -85,7 +85,9 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   every event with its provenance (`{}` when they were not computed).
   `tracking_schema.py`: the tracking JSON's shape (TypedDicts, typing only),
   which the writer and the scorers share. `motion.py`, `roi_tracking.py`: CUDA
-  motion masks and ROI tracking.
+  motion masks and ROI tracking; `motion_gpu.py` builds the same masks, bit for bit, with two
+  NVRTC kernels (`Config.motion_kernels`; the PyTorch ops in `motion.py` are the reference and the
+  fallback).
 - `tennis_tracker/court/`: `court_geometry.py`, keypoints, side guides, polygon,
   homography; the court-event stages, each reading one `CourtScene`:
   `court_scene.py` (`CourtScene`, the event types and the player-box queries),

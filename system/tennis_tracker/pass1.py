@@ -12,6 +12,7 @@ import collections
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -19,6 +20,7 @@ import torch
 from ball_in_play_selector import PackedMask, RawDetection
 
 from .court.court_geometry import court_keypoints_key
+from .cuda_kernels import KernelUnavailable
 from .court.court_scene import PlayerBoxes
 from .engines.ball_detectors import FrameInput
 from .engines.player_detector import PlayerPending, interpolate_player_boxes
@@ -27,6 +29,7 @@ from .motion import (
     BackgroundModel, DetectorInputRequest, MotionMasks, PreprocessResult, build_court_side_protect_mask,
     preprocess_frame_cuda,
 )
+from .motion_gpu import MotionKernels
 from .run_context import RunContext
 from .roi_tracking import ROIMotionTracker
 from .video_io import ThreadedFrameReader, VideoWriter
@@ -195,6 +198,7 @@ class _Pass1Collector:
         self.window = window
         self.detector_input_writer = detector_input_writer
         self.background = BackgroundModel(self.cfg, ctx.device, cuda_graphs=_use_cuda_graphs(self.cfg))
+        self.motion_kernels = _load_motion_kernels(self.cfg, ctx.device)
         self.roi_tracker = ROIMotionTracker(self.cfg, self.video.width, self.video.height, self.video.fps)
         self.pre_cuda_perf: Optional[Dict[str, float]] = (
             {"pre_cuda_total": 0.0, "pre_cuda_raw_d2h": 0.0, "pre_cuda_cc_filter": 0.0}
@@ -279,7 +283,8 @@ class _Pass1Collector:
         else:
             self.result.fullframe_frames += 1
         pre = preprocess_frame_cuda(self.window, self.background, self.cfg, request=request,
-                                    rois=rois, protect_mask=protect_mask_cuda, perf=self.pre_cuda_perf)
+                                    rois=rois, protect_mask=protect_mask_cuda, perf=self.pre_cuda_perf,
+                                    kernels=self.motion_kernels)
         return pre, rois_visual
 
     def _detector_input_request(self, detect_this_frame: bool) -> DetectorInputRequest:
@@ -471,6 +476,19 @@ def _use_cuda_graphs(cfg) -> bool:
     would invalidate it (a prepass process has its own context)."""
     threaded_prepass = cfg.gridtracknet_prepass_background and not cfg.gridtracknet_prepass_process
     return bool(cfg.pass1_cuda_graphs) and not threaded_prepass
+
+
+def _load_motion_kernels(cfg, device: torch.device) -> Optional[MotionKernels]:
+    """The motion-mask kernels (``motion_gpu``) when ``cfg.motion_kernels`` asks for them and the
+    device is a GPU, else None (the PyTorch ops build the same masks); a kernel that cannot be
+    loaded is reported and the PyTorch ops run."""
+    if not (cfg.enable_preprocess and cfg.motion_kernels and device.type == "cuda"):
+        return None
+    try:
+        return MotionKernels.load(device, Path(cfg.ball_engine_dir))
+    except KernelUnavailable as error:
+        print(f"[pass 1] motion kernels unavailable, building the masks with PyTorch ops ({str(error).splitlines()[0]})")
+        return None
 
 
 def collect_pass1(ctx: RunContext) -> Pass1Result:

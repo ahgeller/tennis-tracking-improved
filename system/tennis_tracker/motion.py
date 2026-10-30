@@ -16,6 +16,7 @@ from ball_in_play_selector import PackedMask
 
 from .court.court_geometry import build_court_side_guides
 from .frame_window import FrameWindow, GpuFrame
+from .motion_gpu import GateScalars, MotionKernels
 
 
 class MotionSettings(Protocol):
@@ -437,12 +438,25 @@ class BackgroundModel:
         fg &= curr.v[y1:y2, x1:x2] > (cfg.motion_v_min / 255.0)
         return fg
 
+    def motion_target(self, height: int, width: int) -> torch.Tensor:
+        """A zeroed ``height`` x ``width`` boolean mask for this frame's cleaned motion to be written
+        into and then handed to ``remember_motion``; with CUDA graphs it is the one buffer the
+        recorded updates read, which ``remember_motion`` then takes without a copy."""
+        if not self.cuda_graphs:
+            return torch.zeros((height, width), dtype=torch.bool, device=self.device)
+        if self._motion_buffer is None or tuple(self._motion_buffer.shape) != (height, width):
+            self._motion_buffer = torch.zeros((height, width), dtype=torch.bool, device=self.device)
+            self._update_graphs.clear()
+        else:
+            self._motion_buffer.zero_()
+        return self._motion_buffer
+
     def remember_motion(self, raw_motion: Optional[torch.Tensor]) -> None:
         """Keep this frame's cleaned raw motion (a boolean frame-sized tensor, or None when there
         is none yet) for the next update's slow-adaptation mask.  The tensor is used as it is,
-        not copied: the caller hands over a fresh one each frame; with CUDA graphs it is copied
-        into the one buffer the recorded updates read."""
-        if self.cuda_graphs and raw_motion is not None:
+        not copied: the caller hands over a fresh one each frame (or ``motion_target``'s); with
+        CUDA graphs any other tensor is copied into the one buffer the recorded updates read."""
+        if self.cuda_graphs and raw_motion is not None and raw_motion is not self._motion_buffer:
             if self._motion_buffer is None or self._motion_buffer.shape != raw_motion.shape:
                 self._motion_buffer = torch.empty_like(raw_motion)
                 self._update_graphs.clear()
@@ -754,6 +768,76 @@ def _queue_masks(gated: torch.Tensor, wide_source: Optional[torch.Tensor], rois:
     return MotionMasks((h, w), boxes, rois is not None, cleaned, wide, cfg, perf)
 
 
+def _gate_scalars(cfg: MotionSettings) -> GateScalars:
+    """The thresholds ``BackgroundModel.foreground`` and ``_raw_motion_cuda`` apply, for the kernels."""
+    return GateScalars(k_std_sq=cfg.motion_k_std ** 2, thresh_sq=(cfg.motion_thresh / 255.0) ** 2,
+                       s_scale=_S_THRESHOLD_SCALE, v_min=cfg.motion_v_min / 255.0, hi=cfg.motion_raw_temporal_hi,
+                       lo=cfg.motion_raw_temporal_lo, very_hi=cfg.motion_raw_temporal_very_hi)
+
+
+def _raw_motion_kernels(kernels: MotionKernels, window: FrameWindow, background: BackgroundModel,
+                        cfg: MotionSettings, rois: Optional[List[Roi]], want_ungated: bool = True
+                        ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """``_raw_motion_cuda`` with ``motion_gpu``'s gate kernel: the same masks, one launch a box."""
+    if not background.ready:
+        return None, None
+    assert background.mean is not None and background.var is not None
+    curr = window.curr_gpu
+    assert curr is not None
+    h, w = int(curr.v.shape[0]), int(curr.v.shape[1])
+    prev, nxt = window.prev_gpu, window.next_gpu
+    gate = cfg.motion_raw_temporal_gate and prev is not None
+    gated = torch.zeros((h, w), dtype=torch.uint8, device=curr.v.device)
+    ungated = (torch.zeros((h, w), dtype=torch.uint8, device=curr.v.device)
+               if gate and want_ungated else None)
+    scalars = _gate_scalars(cfg)
+    for box in _motion_boxes(curr, rois):
+        kernels.gate(curr.planes, prev.planes if gate and prev is not None else None,
+                     nxt.planes if gate and nxt is not None else None, background.mean, background.var, box,
+                     gated, ungated, scalars, temporal=gate)
+    gated_mask = gated.view(torch.bool)
+    if not gate:
+        return gated_mask, gated_mask
+    return gated_mask, ungated.view(torch.bool) if ungated is not None else None
+
+
+def _cleaning_passes(cfg: MotionSettings) -> List[Tuple[int, bool]]:
+    """``_clean_raw_motion_cuda``'s steps as ``(size, erode)`` passes: a closing (dilate, then erode)
+    and an opening (erode, then dilate); a copy (a size-1 pass) when neither applies."""
+    passes: List[Tuple[int, bool]] = []
+    if cfg.motion_raw_close_size > 1:
+        passes += [(cfg.motion_raw_close_size, False), (cfg.motion_raw_close_size, True)]
+    if cfg.motion_raw_open_size > 1:
+        passes += [(cfg.motion_raw_open_size, True), (cfg.motion_raw_open_size, False)]
+    return passes or [(1, False)]
+
+
+def _queue_masks_kernels(kernels: MotionKernels, gated: torch.Tensor, wide_source: Optional[torch.Tensor],
+                         rois: Optional[List[Roi]], curr: GpuFrame, background: BackgroundModel,
+                         cfg: MotionSettings, perf: Optional[Dict[str, float]]) -> MotionMasks:
+    """``_queue_masks`` with ``motion_gpu``'s morphology kernel: each box is cleaned pass by pass,
+    the last pass writing the box's mask and setting its pixels in the background's slow-adaptation
+    mask (``BackgroundModel.motion_target``)."""
+    boxes = _motion_boxes(curr, rois)
+    h, w = int(gated.shape[0]), int(gated.shape[1])
+    gated_u8 = gated.view(torch.uint8)
+    remembered = background.motion_target(h, w)
+    remembered_u8 = remembered.view(torch.uint8)
+    passes = _cleaning_passes(cfg)
+    cleaned: List[torch.Tensor] = []
+    for x1, y1, x2, y2 in boxes:
+        src = gated_u8[y1:y2, x1:x2]
+        for index, (size, erode) in enumerate(passes):
+            dst = torch.empty((y2 - y1, x2 - x1), dtype=torch.uint8, device=gated.device)
+            last = index == len(passes) - 1
+            kernels.morph(src, dst, size, erode, merge=remembered_u8[y1:y2, x1:x2] if last else None)
+            src = dst
+        cleaned.append(src.view(torch.bool))
+    background.remember_motion(remembered)
+    wide = [wide_source[y1:y2, x1:x2] for x1, y1, x2, y2 in boxes] if wide_source is not None else None
+    return MotionMasks((h, w), boxes, rois is not None, cleaned, wide, cfg, perf)
+
+
 def _bgr_u8_hwc(t_chw: torch.Tensor) -> torch.Tensor:
     """A CHW float [0,1] frame as the HWC uint8 tensor the detector input writer takes."""
     return torch.clamp(t_chw * 255.0, 0, 255).byte().permute(1, 2, 0).contiguous()
@@ -834,7 +918,8 @@ def preprocess_frame_cuda(window: FrameWindow, background: BackgroundModel, cfg:
                           request: DetectorInputRequest = DetectorInputRequest(cpu=True),
                           rois: Optional[List[Roi]] = None,
                           protect_mask: Optional[torch.Tensor] = None,
-                          perf: Optional[Dict[str, float]] = None) -> PreprocessResult:
+                          perf: Optional[Dict[str, float]] = None,
+                          kernels: Optional[MotionKernels] = None) -> PreprocessResult:
     """Motion masks for the current frame of ``window`` and the detector input ``request`` asks for.
 
     ``rois`` limits the motion computation to those ``(x1, y1, x2, y2)``
@@ -846,21 +931,30 @@ def preprocess_frame_cuda(window: FrameWindow, background: BackgroundModel, cfg:
     ``perf`` accumulates ``pre_cuda_total`` (all of the motion work, the
     host side of the masks included), ``pre_cuda_raw_d2h`` (waiting for the
     masks' copy) and ``pre_cuda_cc_filter`` (their connected components)
-    seconds when given.
+    seconds when given.  With ``kernels`` the masks are built by ``motion_gpu``'s kernels, which
+    give the same bits as the PyTorch ops in a few launches.
     """
     perf_t0 = time.perf_counter() if perf is not None else 0.0
     frame = window.curr
     curr = window.curr_gpu
     assert curr is not None
 
-    raw_motion, raw_motion_ungated = _raw_motion_cuda(window, background, cfg, rois, want_ungated=request.wide_boost)
+    if kernels is not None:
+        raw_motion, raw_motion_ungated = _raw_motion_kernels(kernels, window, background, cfg, rois,
+                                                             want_ungated=request.wide_boost)
+    else:
+        raw_motion, raw_motion_ungated = _raw_motion_cuda(window, background, cfg, rois,
+                                                          want_ungated=request.wide_boost)
     masks: Optional[MotionMasks] = None
     if raw_motion is None:
         background.remember_motion(None)
     else:
         wide_source = (raw_motion_ungated if request.wide_boost and raw_motion_ungated is not None
                        and raw_motion_ungated is not raw_motion else None)
-        masks = _queue_masks(raw_motion, wide_source, rois, curr, background, cfg, perf)
+        if kernels is not None:
+            masks = _queue_masks_kernels(kernels, raw_motion, wide_source, rois, curr, background, cfg, perf)
+        else:
+            masks = _queue_masks(raw_motion, wide_source, rois, curr, background, cfg, perf)
     if perf is not None:
         perf["pre_cuda_total"] = perf.get("pre_cuda_total", 0.0) + (time.perf_counter() - perf_t0)
 

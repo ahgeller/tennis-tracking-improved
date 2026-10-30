@@ -62,6 +62,10 @@ class Config:
     # (frame_window.GraphedFrameConversion). Off while the prepass runs on a worker thread, whose
     # CUDA work would break a capture.
     pass1_cuda_graphs: bool = True
+    # Build pass 1's motion masks with two CUDA kernels (tennis_tracker/motion_gpu.py) instead of some
+    # forty PyTorch ops a box: the same bits, a few launches (audit/records/opt_abplus.md). Off, or
+    # when NVRTC cannot build them, the PyTorch ops run.
+    motion_kernels: bool = True
 
     # Player & court detection
     player_model_path: Optional[str] = str(PLAYER_ENGINE)
