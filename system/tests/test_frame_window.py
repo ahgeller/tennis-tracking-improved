@@ -197,3 +197,36 @@ def test_the_graphed_background_update_is_the_eager_one_bit_for_bit():
         graphed.remember_motion(motion)
         eager.remember_motion(motion)
     assert graphed.cuda_graphs and len(graphed._update_graphs) == 4
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_frames_decoded_into_pinned_memory_upload_from_it_and_leave_the_cache_pageable(tmp_path):
+    """``ThreadedFrameReader(pinned_shape=...)`` decodes OpenCV's frames into pinned buffers, the
+    same pixels as a plain read; the uploader copies them to the device from there, bit for bit,
+    and the pass 2 frame cache keeps pageable copies."""
+    import cv2
+
+    from tennis_tracker.pass1 import FrameCache
+    from tennis_tracker.video_io import PinnedFrameUploader, ThreadedFrameReader, pinned_source
+
+    path = tmp_path / "clip.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (96, 54))
+    for index in range(5):
+        writer.write(_random_frame(index, 54, 96))
+    writer.release()
+    device = torch.device("cuda:0")
+    reader = ThreadedFrameReader(cv2.VideoCapture(str(path)), prefetch=2, pinned_shape=(54, 96))
+    plain = cv2.VideoCapture(str(path))
+    uploader = PinnedFrameUploader(54, 96, device)
+    cache = FrameCache(10)
+    frames = []
+    while (frame := reader.read()) is not None:
+        ok, expected = plain.read()
+        assert ok and np.array_equal(frame, expected) and pinned_source(frame) is not None
+        assert torch.equal(uploader.upload_hwc_u8(frame).cpu(), torch.from_numpy(expected))
+        cache.add(frame)
+        frames.append(frame)
+    reader.release()
+    assert len(frames) == 5 and len({f.ctypes.data for f in frames}) == 5     # one buffer a frame
+    assert all(pinned_source(f) is None and np.array_equal(f, g) for f, g in zip(cache.frames, frames))
+    assert pinned_source(_random_frame(0, 54, 96)) is None

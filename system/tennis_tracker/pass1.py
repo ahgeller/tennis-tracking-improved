@@ -32,7 +32,7 @@ from .motion import (
 from .motion_gpu import MotionKernels
 from .run_context import RunContext
 from .roi_tracking import ROIMotionTracker
-from .video_io import ThreadedFrameReader, VideoWriter
+from .video_io import ThreadedFrameReader, VideoWriter, pinned_source
 
 Box = Tuple[int, int, int, int]
 
@@ -150,7 +150,9 @@ class FrameCache:
         if self.full:
             return
         try:
-            self.frames.append(frame)
+            # A frame decoded into pinned memory is copied out of it: the clip's frames would
+            # otherwise hold gigabytes of page-locked RAM.
+            self.frames.append(frame.copy() if pinned_source(frame) is not None else frame)
         except MemoryError:
             self.capacity = len(self.frames)
             print(f"[pass 1] RAM frame cache stopped at {self.capacity} frames (MemoryError)")
@@ -495,7 +497,10 @@ def collect_pass1(ctx: RunContext) -> Pass1Result:
     """Decode the clip and collect per-frame evidence; raises RuntimeError on an empty clip."""
     cfg, timing = ctx.cfg, ctx.timing
     print("[preprocess] CUDA S+V motion path" if cfg.enable_preprocess else "[preprocess] disabled")
-    reader = ThreadedFrameReader(ctx.capture, prefetch=max(2, cfg.frame_reader_prefetch))
+    # The frames are decoded into pinned memory when they go to the GPU, so their upload needs no
+    # copy into a pinned buffer on this thread.
+    pinned_shape = (ctx.video.height, ctx.video.width) if cfg.enable_preprocess and ctx.device.type == "cuda" else None
+    reader = ThreadedFrameReader(ctx.capture, prefetch=max(2, cfg.frame_reader_prefetch), pinned_shape=pinned_shape)
     first = reader.read()
     if first is None:
         reader.release()

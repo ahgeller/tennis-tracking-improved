@@ -71,6 +71,16 @@ _UPLOAD_SLOTS = 3
 BGR_TO_GRAY = (0.114, 0.587, 0.299)
 
 
+def pinned_source(frame: np.ndarray) -> Optional[torch.Tensor]:
+    """The pinned tensor `frame` was decoded into (``ThreadedFrameReader(pinned=True)``), when it
+    is one: the uploader copies from it straight to the device. Else None."""
+    base = frame.base
+    if (isinstance(base, torch.Tensor) and base.is_pinned() and tuple(base.shape) == frame.shape
+            and base.data_ptr() == frame.ctypes.data):
+        return base
+    return None
+
+
 class PinnedFrameUploader:
     """Uploads decoded BGR frames through pinned host buffers.
 
@@ -109,7 +119,13 @@ class PinnedFrameUploader:
     @torch.no_grad()
     def upload_into(self, frame_bgr: np.ndarray, target: torch.Tensor) -> None:
         """Copy ``frame_bgr`` (this uploader's size) into the HWC uint8 device tensor ``target``
-        through a pinned buffer; the copy is ordered on the current stream and may still be in flight."""
+        through a pinned buffer (the frame's own when it was decoded into one); the copy is ordered
+        on the current stream and may still be in flight."""
+        source = pinned_source(frame_bgr)
+        if source is not None:
+            # PyTorch's host allocator keeps the buffer from reuse until this copy is done.
+            target.copy_(source, non_blocking=True)
+            return
         slot = self._slot
         self._slot = (self._slot + 1) % len(self._pinned_u8)
         done = self._copy_done[slot]
@@ -397,8 +413,9 @@ class ThreadedFrameReader:
     from aborts the process.
     """
 
-    def __init__(self, cap: FrameCapture, prefetch: int = 4):
+    def __init__(self, cap: FrameCapture, prefetch: int = 4, pinned_shape: Optional[Tuple[int, int]] = None):
         self._cap = cap
+        self._pinned_shape = pinned_shape
         self._q: queue.Queue = queue.Queue(maxsize=prefetch)
         self._done = False
         self._stop = threading.Event()
@@ -420,13 +437,22 @@ class ThreadedFrameReader:
     def _read_loop(self) -> None:
         try:
             while not self._stop.is_set():
-                ret, frame = self._cap.read()
+                ret, frame = self._read()
                 if not ret or not self._put(frame):
                     break
         except BaseException as error:  # noqa: BLE001 - handed to read() on the consumer thread
             self._error = error
         finally:
             self._put(None)
+
+    def _read(self) -> Tuple[bool, Any]:
+        """The capture's next frame; with ``pinned_shape``, decoded into a fresh pinned buffer from
+        PyTorch's caching host allocator, which ``PinnedFrameUploader`` copies to the device as it
+        is (OpenCV writes into a buffer of the frame's shape and type, and allocates one otherwise)."""
+        if self._pinned_shape is None:
+            return self._cap.read()
+        h, w = self._pinned_shape
+        return self._cap.read(torch.empty((h, w, 3), dtype=torch.uint8, pin_memory=True).numpy())
 
     def read(self) -> Optional[np.ndarray]:
         if self._done:
