@@ -203,6 +203,17 @@ def test_subpixel_refit_does_not_relabel_detections():
     assert all(result.source == "det" for result in nudged)
 
 
+def test_detections_already_on_their_line_stay_measurements():
+    # A fit that lands on a point to within floating-point noise leaves it where the detector put
+    # it, so position_kind does not depend on the BLAS build.
+    line = [
+        FrameResult(cx=37.1 + frame * 11.3, cy=200.7 - frame * 3.9, conf=0.9, source="det")
+        for frame in range(15)
+    ]
+    refine_trajectory(line, 734.0)
+    assert all(result.position_kind == "measurement" for result in line)
+
+
 def test_one_motion_hit_after_loss_supports_one_point_not_a_tail():
     # One broad motion hit may support one physics point, never a blue tail
     # across later frames where the ball has disappeared.

@@ -2894,7 +2894,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -2907,8 +2907,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 438.4615384615386,
-    "y": 179.28994082840248
+    "x": 438.46153846153845,
+    "y": 179.2899408284024
    },
    {
     "bbox": [
@@ -2975,7 +2975,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -2988,7 +2988,7 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 449.7435897435894,
+    "x": 449.7435897435897,
     "y": 189.1255752794214
    },
    {
@@ -3056,7 +3056,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -3069,7 +3069,7 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 461.0256410256408,
+    "x": 461.025641025641,
     "y": 199.85535831689677
    },
    {
@@ -3137,7 +3137,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -3150,8 +3150,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 472.3076923076919,
-    "y": 211.47928994082835
+    "x": 472.3076923076923,
+    "y": 211.4792899408284
    },
    {
     "bbox": [
@@ -3218,7 +3218,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -3231,8 +3231,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 483.58974358974365,
-    "y": 223.9973701512163
+    "x": 483.5897435897436,
+    "y": 223.99737015121633
    },
    {
     "bbox": [
@@ -3299,7 +3299,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -3312,8 +3312,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 494.87179487179503,
-    "y": 237.40959894806048
+    "x": 494.87179487179486,
+    "y": 237.4095989480605
    },
    {
     "bbox": [
@@ -3380,7 +3380,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -3394,7 +3394,7 @@
     "source": "det",
     "track_id": 0,
     "x": 506.1538461538462,
-    "y": 251.71597633136102
+    "y": 251.715976331361
    },
    {
     "bbox": [
@@ -3461,7 +3461,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -3475,7 +3475,7 @@
     "source": "det",
     "track_id": 0,
     "x": 517.4358974358975,
-    "y": 266.9165023011177
+    "y": 266.91650230111765
    },
    {
     "bbox": [
@@ -3542,7 +3542,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -3555,8 +3555,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 528.7179487179488,
-    "y": 283.0111768573308
+    "x": 528.7179487179487,
+    "y": 283.01117685733067
    },
    {
     "bbox": [
@@ -3623,7 +3623,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -3636,8 +3636,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 540.0000000000002,
-    "y": 300.0000000000002
+    "x": 540.0,
+    "y": 300.0
    }
   ],
   "last_valid_court_keypoints": [
@@ -5084,7 +5084,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5097,8 +5097,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 99.99999999999999,
-    "y": 299.9999999999999
+    "x": 100.0,
+    "y": 300.0
    },
    {
     "bbox": [
@@ -5165,7 +5165,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5179,7 +5179,7 @@
     "source": "det",
     "track_id": 0,
     "x": 111.28205128205128,
-    "y": 283.01117685733067
+    "y": 283.0111768573307
    },
    {
     "bbox": [
@@ -5246,7 +5246,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5259,8 +5259,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 122.5641025641026,
-    "y": 266.91650230111776
+    "x": 122.56410256410257,
+    "y": 266.9165023011177
    },
    {
     "bbox": [
@@ -5327,7 +5327,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5340,8 +5340,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 133.8461538461539,
-    "y": 251.71597633136096
+    "x": 133.84615384615384,
+    "y": 251.71597633136093
    },
    {
     "bbox": [
@@ -5408,7 +5408,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5421,8 +5421,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 145.1282051282052,
-    "y": 237.40959894806065
+    "x": 145.12820512820514,
+    "y": 237.40959894806048
    },
    {
     "bbox": [
@@ -5570,7 +5570,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5583,8 +5583,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 167.69230769230765,
-    "y": 211.4792899408283
+    "x": 167.69230769230768,
+    "y": 211.47928994082838
    },
    {
     "bbox": [
@@ -5651,7 +5651,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5664,8 +5664,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 178.97435897435892,
-    "y": 199.85535831689674
+    "x": 178.97435897435898,
+    "y": 199.8553583168968
    },
    {
     "bbox": [
@@ -5732,7 +5732,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5745,8 +5745,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 190.25641025641022,
-    "y": 189.1255752794214
+    "x": 190.25641025641025,
+    "y": 189.12557527942144
    },
    {
     "court_keypoints": [
@@ -7334,7 +7334,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -7347,8 +7347,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 438.4615384615386,
-    "y": 179.28994082840248
+    "x": 438.46153846153845,
+    "y": 179.2899408284024
    },
    {
     "bbox": [
@@ -7415,7 +7415,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -7428,7 +7428,7 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 449.7435897435894,
+    "x": 449.7435897435897,
     "y": 189.1255752794214
    },
    {
@@ -7496,7 +7496,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -7509,7 +7509,7 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 461.0256410256408,
+    "x": 461.025641025641,
     "y": 199.85535831689677
    },
    {
@@ -7577,7 +7577,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -7590,8 +7590,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 472.3076923076919,
-    "y": 211.47928994082835
+    "x": 472.3076923076923,
+    "y": 211.4792899408284
    },
    {
     "bbox": [
@@ -7658,7 +7658,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -7671,8 +7671,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 483.58974358974365,
-    "y": 223.9973701512163
+    "x": 483.5897435897436,
+    "y": 223.99737015121633
    },
    {
     "bbox": [
@@ -7739,7 +7739,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -7752,8 +7752,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 494.87179487179503,
-    "y": 237.40959894806048
+    "x": 494.87179487179486,
+    "y": 237.4095989480605
    },
    {
     "bbox": [
@@ -7820,7 +7820,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -7834,7 +7834,7 @@
     "source": "det",
     "track_id": 0,
     "x": 506.1538461538462,
-    "y": 251.71597633136102
+    "y": 251.715976331361
    },
    {
     "bbox": [
@@ -7901,7 +7901,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -7915,7 +7915,7 @@
     "source": "det",
     "track_id": 0,
     "x": 517.4358974358975,
-    "y": 266.9165023011177
+    "y": 266.91650230111765
    },
    {
     "bbox": [
@@ -7982,7 +7982,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -7995,8 +7995,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 528.7179487179488,
-    "y": 283.0111768573308
+    "x": 528.7179487179487,
+    "y": 283.01117685733067
    },
    {
     "bbox": [
@@ -8063,7 +8063,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -8076,8 +8076,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 540.0000000000002,
-    "y": 300.0000000000002
+    "x": 540.0,
+    "y": 300.0
    }
   ],
   "last_valid_court_keypoints": [
@@ -8124,8 +8124,8 @@
      "search": {
       "radius": 33.04360755123447,
       "source": "previous_position",
-      "x": 190.25641025641022,
-      "y": 189.1255752794214
+      "x": 190.25641025641025,
+      "y": 189.12557527942144
      },
      "selected_position": {
       "x": null,
@@ -8145,8 +8145,8 @@
      "search": {
       "radius": 33.04360755123447,
       "source": "previous_position",
-      "x": 190.25641025641022,
-      "y": 189.1255752794214
+      "x": 190.25641025641025,
+      "y": 189.12557527942144
      },
      "selected_position": {
       "x": null,

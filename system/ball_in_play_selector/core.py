@@ -100,6 +100,10 @@ _REFINE_HUBER_PX = 4.0
 _REFIT_BOUND_STRONG_DET_PX = 3.0
 _REFIT_BOUND_MOTION_PX = 6.0
 _REFIT_BOUND_FILL_PX = 12.0
+# A fit that lands within this of a point (a point already on its neighbours' line) leaves it
+# exactly where it is: the residue is floating-point noise that differs between BLAS builds, and
+# it would flip the point's position_kind from 'measurement' to 'filtered'.
+_REFIT_NOISE_PX = 1e-6
 
 
 def _px(value_at_1080p: float, diag: float) -> float:
@@ -534,6 +538,8 @@ def _refit_positions(
         dx = fit_x - x[i]
         dy = fit_y - y[i]
         distance = math.hypot(dx, dy)
+        if distance < _REFIT_NOISE_PX:
+            continue
         if distance > bound:
             scale = bound / distance
             dx *= scale
