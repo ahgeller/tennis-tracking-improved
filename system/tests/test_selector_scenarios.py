@@ -125,6 +125,15 @@ def test_two_missing_frames_at_60fps_are_one_detector_step():
     assert results[9] is not None and results[10] is not None
 
 
+def test_three_missing_frames_at_60fps_without_a_blob_stay_empty():
+    detections, masks = _moving_ball(24)
+    rows = [[] if frame in (9, 10, 11) else row for frame, row in enumerate(detections)]
+    blank = [_empty_mask() if frame in (9, 10, 11) else mask for frame, mask in enumerate(masks)]
+    results, _, _ = select_ball_in_play(rows, 60.0, WIDTH, HEIGHT, boost_masks=blank, raw_motions=blank)
+    assert results[8] is not None and results[12] is not None
+    assert all(results[frame] is None for frame in (9, 10, 11))
+
+
 def test_motion_backed_odd_frames_beside_a_player_are_kept_at_60fps():
     # At 60 FPS, a motion-backed frame between two sampled detections remains
     # usable beside a player; unobserved near-player gaps stay conservative.
@@ -181,16 +190,18 @@ def test_refit_keeps_a_short_excursion_where_the_detector_put_it():
 
 
 def test_refit_never_moves_a_bounce_vertex_off_its_detection():
-    # A fast V (a bounce at 30 px/frame) that the local fit rounds off: every strong detection
-    # stays within its bound of where the detector saw it.
-    vee = [
-        FrameResult(cx=float(frame * 20), cy=100.0 + 30.0 * (10 - abs(frame - 10)), conf=0.9, source="det")
+    # A one-frame vertex 40 px off its neighbours' line (a bounce or a contact the local fit
+    # cannot follow, too short to split the run at a kink): the old unbounded spike move pulled it
+    # 12 px towards the line; now every strong detection stays within 3 px of where it was seen.
+    line = [
+        FrameResult(cx=float(frame * 20), cy=100.0 + 3.0 * frame, conf=0.9, source="det")
         for frame in range(21)
     ]
-    raw = [(item.cx, item.cy) for item in vee]
-    refine_trajectory(vee, 734.0)
-    assert all(math.hypot(item.cx - x, item.cy - y) <= 3.0 + 1e-9 for item, (x, y) in zip(vee, raw))
-    assert all(item.source == "det" for item in vee)
+    line[10].cy += 40.0
+    raw = [(item.cx, item.cy) for item in line]
+    refine_trajectory(line, 734.0)
+    assert all(math.hypot(item.cx - x, item.cy - y) <= 3.0 + 1e-9 for item, (x, y) in zip(line, raw))
+    assert all(item.source == "det" for item in line)
 
 
 def test_subpixel_refit_does_not_relabel_detections():
