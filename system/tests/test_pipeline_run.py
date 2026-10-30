@@ -86,10 +86,11 @@ STATIC_DISTRACTOR = (322, 48)        # bright blob above the far baseline; never
 BALL_RADIUS_PX = 4.0
 DET_BOX_RADIUS_PX = 6.0
 # Detector dropouts: frames 9/10/19 still show the ball, so the selector can
-# recover them from the motion mask; frames 27-29 also hide it in the video
-# (an occlusion), so the selector has to coast through them.
-DROPOUT_FRAMES = {9, 10, 19, 27, 28, 29}
-OCCLUDED_FRAMES = {27, 28, 29}
+# recover them from the motion mask; frames 27-29 and 33 also hide it in the
+# video (occlusions, no blob). The one-frame hole at 33 is one detector step, so
+# a straight fill bridges it; the three-frame hole at 27-29 stays empty.
+DROPOUT_FRAMES = {9, 10, 19, 27, 28, 29, 33}
+OCCLUDED_FRAMES = {27, 28, 29, 33}
 FALSE_POSITIVE = {14: (452.0, 150.0, 0.57)}   # frame -> (x, y, conf) added beside the real ball
 
 
