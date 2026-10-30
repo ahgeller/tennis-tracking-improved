@@ -27,9 +27,9 @@ the whole time, and a neighbouring court's nearest doubles sideline is at least 
 (the ITF's minimum side run-off between courts), so a track whose output never comes within 3 m
 of our sidelines is on, or around, another court. A track's output is judged whole: a run cut
 by one missing frame can leave the wide end of our own rally on its own (PomonaPitzer frames
-871-897, a labelled ball flying out to the left, 4-5 m beyond the sideline). Measuring a point above the far baseline on the far baseline's
-row understates its distance (it is no nearer than that row), so the rule errs towards calling a
-track ours.
+871-897, a labelled ball flying out to the left, 4-5 m beyond the sideline). Measuring a
+point above the far baseline on the far baseline's row understates its distance (it is no
+nearer than that row), so the rule errs towards calling a track ours.
 
 **What it does not count.** A dead ball inside our own surroundings (one against our back fence,
 a ball a server bounces behind the baseline) is not on another court; ``--window`` reports how
