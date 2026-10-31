@@ -21,10 +21,9 @@ import torch
 
 from tennis_tracker import paths
 from tennis_tracker.ball_models import HEATMAP_S4, STREAM_S4
-from tennis_tracker.config import Config
+from tennis_tracker.config import AUTO, FOREGROUND, PROCESS, THREAD, Config
 from tennis_tracker.engines import ball_prepass_process
-from tennis_tracker.engines.ball_detectors import (AUTO, FOREGROUND, PROCESS, THREAD, GridTrackNetBallDetector,
-                                                   prepass_mode)
+from tennis_tracker.engines.ball_detectors import GridTrackNetBallDetector, prepass_mode
 from tennis_tracker.engines.ball_prepass_process import RemotePrepass
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,7 +73,10 @@ def test_the_default_detector_runs_its_prepass_in_a_process():
 def _gone(pid: int, within: float = CHILD_EXIT_S) -> bool:
     deadline = time.monotonic() + within
     while time.monotonic() < deadline:
-        if not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+        try:
+            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                return True
+        except psutil.NoSuchProcess:        # gone, also between a check and the next
             return True
         time.sleep(0.1)
     return False
@@ -181,6 +183,65 @@ def test_the_child_exits_when_its_parent_is_killed(tmp_path):
         assert _gone(child)
     finally:
         parent.kill()
+
+
+def _parent_script(body: str, timeout: float = 90.0) -> str:
+    """Run `body` in a fresh interpreter (a RemotePrepass over weights that do not exist, as
+    `remote`, and `tmp` its folder) and return what it printed; a hang fails at `timeout`."""
+    code = textwrap.dedent("""
+        import socket, sys, tempfile, threading, time
+        from pathlib import Path
+        from tennis_tracker.config import Config
+        from tennis_tracker.engines import ball_prepass_process as bpp
+        tmp = Path(tempfile.mkdtemp())
+        ended, box = threading.Event(), {}
+
+        def on_end(error):
+            box["error"] = error
+            ended.set()
+
+        def closes_within(seconds):
+            done = threading.Event()
+            threading.Thread(target=lambda: (remote.close(), done.set()), daemon=True).start()
+            return done.wait(seconds)
+    """) + textwrap.dedent(body)
+    done = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+    assert done.returncode == 0, done.stderr
+    return done.stdout
+
+
+@pytest.mark.parametrize("stray", ["leaves at once", "stays silent"])
+def test_a_stray_client_on_the_port_does_not_keep_the_child_from_connecting(stray):
+    """A port scan (connect and go) or a client that never speaks is dropped after the handshake
+    fails or times out; the child still connects, its answer arrives, and close returns."""
+    out = _parent_script(f"""
+        remote = bpp.RemotePrepass(str(tmp / "missing.pt"), Config(device="0"))
+        stray = socket.create_connection(remote._address)
+        if {stray == "leaves at once"!r}:
+            stray.close()
+        remote.run(tmp / "clip.mp4", 30.0, 64, 48, 10, lambda message: None, on_end)
+        print("ended", ended.wait(60), "missing.pt" in str(box.get("error")))
+        print("closed", closes_within(20))
+    """)
+    assert "ended True True" in out and "closed True" in out
+
+
+def test_close_returns_while_a_silent_client_holds_the_handshake_and_the_child_never_connects():
+    """The child exits without connecting while a stray holds the acceptor in its handshake: close
+    still returns, since nothing in it waits on a client."""
+    out = _parent_script("""
+        bpp._MODULE = "this"                    # a child that prints and exits without connecting
+        remote = bpp.RemotePrepass(str(tmp / "missing.pt"), Config(device="0"))
+        stray = socket.create_connection(remote._address)
+        time.sleep(1.0)
+        started = time.monotonic()
+        print("closed", closes_within(20), "acceptor", remote._acceptor.is_alive())
+        remote2 = bpp.RemotePrepass(str(tmp / "missing.pt"), Config(device="0"))
+        remote2.run(tmp / "clip.mp4", 30.0, 64, 48, 10, lambda message: None, on_end)
+        print("ended", ended.wait(30), "before it connected" in str(box.get("error")))
+        remote2.close()
+    """)
+    assert "closed True acceptor False" in out and "ended True True" in out
 
 
 # --- the same answers ----------------------------------------------------------------------
