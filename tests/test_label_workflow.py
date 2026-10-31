@@ -1236,9 +1236,10 @@ TOOL_HANDLERS = ("save", "confirm", "move", "jump", "jump_disputed", "take_sugge
                  "nudge", "zoom_key", "toggle_fullscreen", "remember_settings", "toggle_follow", "cycle_filter",
                  "toggle_inset", "follow_ball", "toggle_landing", "toggle_hit", "cycle_hitter", "toggle_rally",
                  "jump_candidate", "reject_candidates")
-VIEW_HANDLERS = {GridView: {"toggle": "toggle_grid", "toggle_size": "toggle_grid_size", "confirm_page": "confirm_grid",
-                            "page": "grid_page", "step": "grid_step", "select": "grid_select", "prepare": "prepare_grid"},
-                 SheetView: {"toggle": "toggle_sheet", "page": "sheet_page"}}
+VIEW_HANDLERS = {GridView: {"toggle": "toggle_grid", "open": "open_grid", "toggle_size": "toggle_grid_size",
+                            "confirm_page": "confirm_grid", "page": "grid_page", "step": "grid_step", "select": "grid_select",
+                            "prepare": "prepare_grid"},
+                 SheetView: {"toggle": "toggle_sheet", "close": "close_sheet", "page": "sheet_page"}}
 
 
 @contextmanager
@@ -1311,7 +1312,7 @@ GRID_BINDINGS = (
 )
 SHEET_BINDINGS = (
     [(key, [call.save()]) for key in keys("q", 27)]
-    + [(ord("w"), [call.toggle_sheet()]), (9, [call.toggle_sheet(), call.toggle_grid()])]
+    + [(ord("w"), [call.close_sheet()]), (9, [call.open_grid()])]
     + [(key, [call.sheet_page(1)]) for key in FORWARD] + [(key, [call.sheet_page(-1)]) for key in BACKWARD]
     + [(key, []) for key in keys(" ", 13, "c", "e", "y", "x", "v", "r", "1", "f", "b", "u", "i", "I", "+", "-",
                                  "m", "t", "g", "h", "o", "s", "z", ",", ".", "/", "[", "]", ";", "\\")]
@@ -1327,7 +1328,7 @@ def key_name(key: int) -> str:
 def press(mode, key, returns=None, shift=False, ready=True):
     """(the handler calls the key made, whether the tool wants to quit, the tool)."""
     tool = Tool([source("test")])
-    tool.grid_view.active, tool.sheet_view.active = mode == "grid", mode == "sheet"
+    tool.view = {"grid": tool.grid_view, "sheet": tool.sheet_view}.get(mode, tool.frame_view)
     calls = Mock()
     with every_handler_mocked() as mocks, \
             patch.object(Tool, "view_ready", return_value=ready), patch.object(Row, "undo"), \

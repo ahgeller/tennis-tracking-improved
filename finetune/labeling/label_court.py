@@ -22,16 +22,15 @@ import numpy as np
 from finetune.data.court_labels import COURT_POINTS, GROUND_POINTS, CourtPoints, engine_points
 from finetune.data.labels import LabelFormatError
 from finetune.labeling import label_window as win
-from finetune.labeling.label_draw import fit_picture, fit_text, hud_text
+from finetune.labeling.label_draw import fit_picture, fit_text
 from finetune.labeling.label_store import load_court
-from finetune.labeling.label_timeline import Timeline
-from finetune.labeling.label_window import KEY_SAVE, KEYS_CONFIRM, next_clip_key
+from finetune.labeling.label_view import ClipView
+from finetune.labeling.label_window import KEYS_CONFIRM
 from finetune.scoring.tracker_events import court_keypoints_by_frame, read_run
 from tennis_tracker.court.court_geometry import LINE_PAIRS_14
 
 if TYPE_CHECKING:
     from finetune.labeling.label_session import LabelSession
-    from finetune.labeling.label_source import Source
     from finetune.labeling.label_tool import Tool
 
 COURT_FRAMES = 5              # frames of each clip offered for labelling, evenly through it
@@ -48,14 +47,14 @@ SHORT_NAMES = {name: name.replace("_singles", " S").replace("_service", " svc").
                for name in COURT_POINTS}
 
 
-class CourtView:
+class CourtView(ClipView):
     """The court keypoints of one frame at a time, over the whole picture (module docstring)."""
 
+    title = "COURT"
+    tag = "court"
+
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
-        self.session = session
-        self.tool = tool
-        self.active = False
-        self.source: Optional["Source"] = None
+        super().__init__(session, tool)
         self.model: Dict[int, CourtPoints] = {}       # frame -> the run's points there
         self.frames: List[int] = []                   # the frames offered, in order
         self.position = 0
@@ -64,22 +63,15 @@ class CourtView:
         self.selected = 0                             # index into COURT_POINTS
         self.dragging = False
         self.hover: Optional[Tuple[float, float]] = None   # the mouse on the picture, for the loupe of a point not placed
-        self.revision = 0
-        self.message: Optional[str] = None
         self.mapping = (1.0, 0, 0)                    # scale, x and y offset of the picture on screen
         self.loupe_box: Optional[Tuple[int, int, int]] = None   # (x0, y0, size) of the loupe last drawn
-        self.cache_key: Optional[tuple] = None
-        self.cache: Optional[np.ndarray] = None
-        self.timeline = Timeline(session)
 
     # ---------------------------------------------------------------- opening a clip
-    def open(self) -> None:
-        self.active = True
-        self.tool.grid_view.active = self.tool.sheet_view.active = self.tool.player_view.active = False
-        self.tool.follow_ball()
-        source = self.source = self.session.source
-        self.model, self.drafts, self.history, self.message = {}, {}, {}, None
-        self.revision += 1
+    def load(self) -> None:
+        """The clip at the cursor: its labels, the run's points and the frames to offer."""
+        source = self.source
+        assert source is not None
+        self.model, self.drafts, self.history = {}, {}, {}
         try:
             if source.court is None:
                 source.remember(source.court_path)
@@ -208,23 +200,8 @@ class CourtView:
             self.session.set_cursor(source.start + local)
         self.revision += 1
 
-    def next_clip(self) -> None:
-        session = self.session
-        end = session.clip_bounds(session.cursor)[1]
-        if end >= len(session.rows):
-            print("[court] this is the last clip of the run")
-            return
-        session.set_cursor(end)
-        self.open()
-
     # ---------------------------------------------------------------- input
-    def handle_key(self, code: int, direction: int) -> None:
-        if next_clip_key(code):         # before n moves on: it is n with SHIFT
-            self.next_clip()
-            return
-        if code == KEY_SAVE:
-            self.tool.save()
-            return
+    def view_key(self, code: int, direction: int) -> None:
         if not self.frames:
             return
         nudges = {ord("i"): (0, -1), ord("k"): (0, 1), ord("j"): (-1, 0), ord("l"): (1, 0)}
@@ -287,28 +264,16 @@ class CourtView:
             self.dragging = False
 
     # ---------------------------------------------------------------- drawing
-    def render(self) -> np.ndarray:
-        session = self.session
-        key = (self.revision, session.view_w, session.view_h, session.hud_h, session.ui, session.dirty)
-        if key == self.cache_key and self.cache is not None:
-            return self.cache
-        canvas = np.zeros((session.view_h + session.hud_h, session.view_w, 3), np.uint8)
-        ui = session.ui
-        if not self.frames or self.source is None:
-            cv2.putText(canvas, fit_text(self.message or "no frames to label", session.view_w - int(40 * ui), 0.6 * ui, 1),
-                        (int(20 * ui), int(40 * ui)), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui, (255, 255, 255), 1, cv2.LINE_AA)
-            hud_text(canvas[session.view_h + session.timeline_h:], "COURT", "SHIFT+n: next clip   q: save/quit", ui)
-        else:
-            image = self.source.frame(self.frame)
-            picture, scale, off_x, off_y = fit_picture(image, session.view_w, session.view_h)
-            self.mapping = (scale, off_x, off_y)
-            canvas[off_y:off_y + picture.shape[0], off_x:off_x + picture.shape[1]] = picture
-            self.draw_court(canvas[:session.view_h])
-            self.draw_loupe(canvas[:session.view_h], image)
-            self.timeline.draw(canvas[session.view_h:session.view_h + session.timeline_h], session.view_h)
-            hud_text(canvas[session.view_h + session.timeline_h:], *self.hud_lines(), ui)
-        self.cache_key, self.cache = key, canvas
-        return canvas
+    def ready(self) -> bool:
+        return bool(self.frames)
+
+    def draw(self, canvas: np.ndarray) -> None:
+        image = self.source.frame(self.frame)
+        picture, scale, off_x, off_y = fit_picture(image, self.session.view_w, self.session.view_h)
+        self.mapping = (scale, off_x, off_y)
+        canvas[off_y:off_y + picture.shape[0], off_x:off_x + picture.shape[1]] = picture
+        self.draw_court(canvas)
+        self.draw_loupe(canvas, image)
 
     def draw_court(self, display: np.ndarray) -> None:
         """The court's lines between the points placed, then the points, the selected one ringed."""

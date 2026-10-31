@@ -36,17 +36,16 @@ import cv2
 import numpy as np
 
 from finetune.data.player_labels import NOT_PLAYER, PLAYERS, Box, PlayerBoxLabel, match_frame
-from finetune.labeling.label_draw import Colour, fit_picture, fit_text, hud_text
+from finetune.labeling.label_draw import Colour, fit_picture, fit_text
 from finetune.labeling.label_store import load_players
-from finetune.labeling.label_timeline import Timeline
-from finetune.labeling.label_window import KEY_SAVE, KEYS_CONFIRM, next_clip_key
+from finetune.labeling.label_view import ClipView
+from finetune.labeling.label_window import KEYS_CONFIRM
 from finetune.data.labels import LabelFormatError
 from finetune.scoring.tracker_events import (court_keypoints_by_frame, court_side, player_boxes_by_frame, read_run,
                                              run_fps)
 
 if TYPE_CHECKING:
     from finetune.labeling.label_session import LabelSession
-    from finetune.labeling.label_source import Source
     from finetune.labeling.label_tool import Tool
 
 SEGMENT_GAP_S = 0.5           # a track missing this long ends its segment
@@ -236,15 +235,15 @@ class CropReader:
         return not self.thread.is_alive()
 
 
-class PlayerView:
+class PlayerView(ClipView):
     """The segments of the clip at the cursor, one row each, with the whole frame of the selected
     one above them (see the module docstring)."""
 
+    title = "PLAYERS"
+    tag = "play"
+
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
-        self.session = session
-        self.tool = tool
-        self.active = False
-        self.source: Optional["Source"] = None
+        super().__init__(session, tool)
         self.segments: List[Segment] = []
         self.labels: Labels = {}                 # (frame, the run's track) -> the label of that box
         self.orphans: List[PlayerBoxLabel] = []  # stored labels no box of the run overlaps: written back as they are
@@ -255,29 +254,21 @@ class PlayerView:
         self.reader: Optional[CropReader] = None
         self.selected = 0
         self.first_row = 0                       # the segment at the top of the list
-        self.revision = 0                        # bumped on every change, for the render cache
-        self.message: Optional[str] = None       # why there is nothing to show
         self.fps = 30.0                          # the run's
         self.rows: List[Tuple[int, int, int]] = []               # (segment, y0, y1) of each row drawn
         self.crop_boxes: List[Tuple[int, int, int, int, int, int]] = []   # (segment, frame, x0, y0, x1, y1)
-        self.cache_key: Optional[tuple] = None
-        self.cache: Optional[np.ndarray] = None
-        self.timeline = Timeline(session)
 
     # ---------------------------------------------------------------- opening a clip
-    def open(self) -> None:
-        """Show the clip at the cursor: its segments, its labels, and the reader cutting its crops."""
-        self.active = True
+    def load(self) -> None:
+        """The clip at the cursor: its segments, its labels, and the reader cutting its crops."""
         self.close_reader()
-        self.tool.grid_view.active = self.tool.sheet_view.active = self.tool.court_view.active = False
-        self.tool.follow_ball()       # a new clip: the session takes its size
-        source = self.source = self.session.source
-        self.segments, self.labels, self.orphans, self.boxes_by_frame, self.message = [], {}, [], {}, None
+        source = self.source
+        assert source is not None
+        self.segments, self.labels, self.orphans, self.boxes_by_frame = [], {}, [], {}
         with self.crop_lock:
             self.crops = {}
         self.looks = {}
         self.selected = self.first_row = 0
-        self.revision += 1
         if source.run is None or not source.run.is_file():
             self.message = (f"no pipeline run for {source.clip}: open it with --candidates <run folder> "
                             "(evaluate_archive.py --mode pipeline --court --out-dir <run folder>)")
@@ -342,6 +333,10 @@ class PlayerView:
         if key not in self.looks:
             self.looks[key] = appearance(crops)
         return self.looks[key]
+
+    def close(self) -> None:
+        self.close_reader()       # leaving the view: no more crops to cut
+        super().close()
 
     def close_reader(self) -> None:
         if self.reader is not None:
@@ -434,23 +429,9 @@ class PlayerView:
             index += direction
         return None
 
-    def next_clip(self) -> None:
-        """The next clip of the run, when there is one."""
-        session = self.session
-        end = session.clip_bounds(session.cursor)[1]
-        if end >= len(session.rows):
-            print("[play] this is the last clip of the run")
-            return
-        session.set_cursor(end)
-        self.open()
-
     # ---------------------------------------------------------------- input
-    def handle_key(self, code: int, direction: int) -> None:
-        if next_clip_key(code):         # before n moves on: it is n with SHIFT
-            self.next_clip()
-        elif code == KEY_SAVE:
-            self.tool.save()
-        elif code in tuple(ord(str(k)) for k in range(1, len(PLAYERS) + 1)):
+    def view_key(self, code: int, direction: int) -> None:
+        if code in tuple(ord(str(k)) for k in range(1, len(PLAYERS) + 1)):
             self.assign(PLAYERS[code - ord("1")])
         elif code in (ord("0"), ord("v")):
             self.assign(NOT_PLAYER)
@@ -474,7 +455,7 @@ class PlayerView:
         elif direction:
             self.select(self.selected + direction)
 
-    def on_mouse(self, event: int, x: int, y: int) -> None:
+    def on_mouse(self, event: int, x: int, y: int, flags: int = 0) -> None:
         if event == cv2.EVENT_LBUTTONDOWN:
             for index, y0, y1 in self.rows:
                 if y0 <= y < y1:
@@ -487,27 +468,17 @@ class PlayerView:
                     return
 
     # ---------------------------------------------------------------- drawing
-    def render(self) -> np.ndarray:
-        session = self.session
+    def render_key(self) -> tuple:
         reader = self.reader
-        progress = (reader.done, reader.finished) if reader is not None else None
-        key = (self.revision, progress, session.view_w, session.view_h, session.hud_h, session.ui, session.dirty)
-        if key == self.cache_key and self.cache is not None:
-            return self.cache
-        canvas = np.zeros((session.view_h + session.hud_h, session.view_w, 3), np.uint8)
-        ui = session.ui
-        if self.message is not None or not self.segments:
-            cv2.putText(canvas, fit_text(self.message or "no segments", session.view_w - int(40 * ui), 0.6 * ui, 1),
-                        (int(20 * ui), int(40 * ui)), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui, (255, 255, 255), 1, cv2.LINE_AA)
-            hud_text(canvas[session.view_h + session.timeline_h:], "PLAYERS", "SHIFT+n: next clip   q: save/quit", ui)
-        else:
-            overview_h = int(session.view_h * OVERVIEW_SHARE)
-            self.draw_overview(canvas[:overview_h], overview_h)
-            self.draw_rows(canvas, overview_h)
-            self.timeline.draw(canvas[session.view_h:session.view_h + session.timeline_h], session.view_h)
-            hud_text(canvas[session.view_h + session.timeline_h:], *self.hud_lines(), ui)
-        self.cache_key, self.cache = key, canvas
-        return canvas
+        return super().render_key() + ((reader.done, reader.finished) if reader is not None else None,)
+
+    def ready(self) -> bool:
+        return self.message is None and bool(self.segments)
+
+    def draw(self, canvas: np.ndarray) -> None:
+        overview_h = int(self.session.view_h * OVERVIEW_SHARE)
+        self.draw_overview(canvas[:overview_h], overview_h)
+        self.draw_rows(canvas, overview_h)
 
     def draw_overview(self, strip: np.ndarray, height: int) -> None:
         """The selected segment's middle frame, whole, with every box the run had on it: the

@@ -48,6 +48,7 @@ from finetune.labeling.label_sheet import SheetView
 from finetune.labeling.label_source import Prefetcher, Source
 from finetune.labeling.label_saving import rescue_source, save_source
 from finetune.labeling.label_store import HitMark, Row, blank_hit, no_point, save_settings
+from finetune.labeling.label_view import View
 from finetune.labeling.label_window import WINDOW
 from finetune.data.labels import is_visible
 
@@ -67,6 +68,7 @@ class Tool:
         self.sheet_view = SheetView(session, self)      # w's trajectory sheet; see label_sheet
         self.player_view = PlayerView(session, self)    # --players: who each tracked person is; see label_players
         self.court_view = CourtView(session, self)      # --court: the court keypoints; see label_court
+        self.view: View = self.frame_view               # the view the window shows (label_view)
         self.pointer = MouseHandler(session, self)      # what clicks and the wheel do; see label_mouse
         self.keys = KeyHandler(session, self)           # what the keys do; see label_keys
         self.prefetcher = Prefetcher(session)           # decodes ahead of the cursor while idle; see label_source
@@ -87,7 +89,12 @@ class Tool:
     def overview(self) -> bool:
         """The grid, the trajectory sheet, the player and the court views: views with no single
         frame under a parked mouse."""
-        return self.grid_view.active or self.sheet_view.active or self.player_view.active or self.court_view.active
+        return self.view.overview
+
+    def switch_to(self, view: View) -> None:
+        """Put `view` in the window, centred on the cursor's ball as every view change is."""
+        self.view = view
+        self.follow_ball()
 
     # ---------------------------------------------------------------- the window
     def create_window(self) -> None:
@@ -286,14 +293,11 @@ class Tool:
                 s.marks, s.awaiting_hit, s.awaiting_candidate)
 
     def render(self) -> np.ndarray:
-        if self.player_view.active:
-            return self.player_view.render()
-        if self.court_view.active:
-            return self.court_view.render()
-        if self.sheet_view.active:
-            return self.sheet_view.render()
-        if self.grid_view.active:
-            return self.grid_view.render()
+        """The window as the view showing draws it."""
+        return self.view.render()
+
+    def render_frame(self) -> np.ndarray:
+        """The single-frame view (FrameView.render), cached on everything it is drawn from."""
         session = self.session
         session.centre_view()
         row = session.rows[session.cursor]
@@ -678,7 +682,7 @@ class Tool:
         too, but never the ball session's resume point or zoom."""
         session = self.session
         written = []
-        ball_view = not (self.player_view.active or self.court_view.active)
+        ball_view = self.view.ball_view
         for source in session.sources:
             if ball_view and source.start <= session.cursor < source.start + len(source.rows):
                 source.cursor, source.zoom = session.cursor - source.start, session.zoom

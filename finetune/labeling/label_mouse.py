@@ -31,24 +31,12 @@ class MouseHandler:
             if event == cv2.EVENT_MOUSEWHEEL:
                 self.settle_wheel(flags)
             return
-        if tool.court_view.active:
-            tool.court_view.on_mouse(cv2.EVENT_LBUTTONDOWN if event == cv2.EVENT_LBUTTONDBLCLK else event, x, y, flags)
-            return
-        if tool.player_view.active:
-            tool.player_view.on_mouse(cv2.EVENT_LBUTTONDOWN if event == cv2.EVENT_LBUTTONDBLCLK else event, x, y)
-            return
-        if tool.sheet_view.active:
-            tool.sheet_view.on_mouse(event, x, y)
-            return
         if event == cv2.EVENT_LBUTTONDBLCLK:
             # The second press of a quick double-click comes through as this instead of a press. With
             # the pointer parked on the same screen pixel frame after frame, click-click on two
             # consecutive frames is exactly that, and every second click used to be thrown away.
             event = cv2.EVENT_LBUTTONDOWN
-        if tool.grid_view.active:
-            tool.grid_view.on_mouse(event, x, y)
-            return
-        self.frame_event(event, x, y, flags)
+        tool.view.on_mouse(event, x, y, flags)
 
     def frame_event(self, event: int, x: int, y: int, flags: int) -> None:
         """An event on the single-frame view: the HUD's chips, the inset, a click placing the ball,

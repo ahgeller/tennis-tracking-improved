@@ -27,8 +27,8 @@ class KeyHandler:
 
     def handle(self, key: int) -> bool:
         """One key from waitKeyEx; True when the tool should quit. The guards and q are here; what
-        a key does belongs to the view showing it (SheetView, GridView, plain_key), and the grid and
-        the single frame then share common_key."""
+        a key does belongs to the view showing it (``Tool.view.handle_key``): the single frame's are
+        plain_key, and the grid and the single frame then share common_key."""
         tool = self.tool
         code = key & 0xFF if key < 0x10000 else key
         if win.non_character_key(code):
@@ -42,17 +42,7 @@ class KeyHandler:
         if code != ord("."):
             self.session.awaiting_hit = None       # ... and the hit (Tool.toggle_hit)
         self.session.awaiting_candidate = None     # a candidate's click is offered until the next key
-        direction = self.key_direction(key, code)
-        if tool.player_view.active:
-            tool.player_view.handle_key(code, direction)
-        elif tool.court_view.active:
-            tool.court_view.handle_key(code, direction)
-        elif tool.sheet_view.active:
-            tool.sheet_view.handle_key(code, direction)
-        elif tool.grid_view.active:
-            tool.grid_view.handle_key(code, direction) or self.common_key(code)
-        else:
-            self.plain_key(code, direction) or self.common_key(code)
+        tool.view.handle_key(code, self.key_direction(key, code))
         return False
 
     @staticmethod

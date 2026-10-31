@@ -15,6 +15,7 @@ import numpy as np
 from finetune.labeling.label_draw import HINT_TRUSTED, HINT_UNSURE, hud_text
 from finetune.labeling.label_store import Row
 from finetune.labeling.label_timeline import Timeline
+from finetune.labeling.label_view import View
 from finetune.labeling.label_window import KEY_TAB
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 SHEET_ROWS = 60           # label frames on one trajectory sheet (w)
 
 
-class SheetView:
+class SheetView(View):
     """The whole frame, dimmed, with every label of a stretch of SHEET_ROWS label frames drawn on
     it, joined in order, and the suggestions as small orange dots. The labels trace the ball's
     flight, so one that is off it - or a run of them following a player - is plain at a glance,
@@ -35,24 +36,19 @@ class SheetView:
     and the ball's streak is a pixel or two wide at this scale, under the labels anyway."""
 
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
-        self.session = session
-        self.tool = tool
-        self.active = False
+        super().__init__(session, tool)
         self.start = 0                          # the first row on the sheet
         self.points: List[Tuple[int, int, int]] = []   # (row index, view x, view y) of each label drawn
         self.cache_key: Optional[tuple] = None
         self.cache: Optional[np.ndarray] = None
         self.timeline = Timeline(session)       # the clip's timeline along the top of the HUD
 
-    def toggle(self) -> None:
+    def open(self) -> None:
         session = self.session
-        self.active = not self.active
-        if self.active:
-            self.tool.grid_view.active = False
-            first, end = session.clip_bounds(session.cursor)
-            self.start = max(first, min(session.cursor - SHEET_ROWS // 2, end - SHEET_ROWS))
-            self.cache_key = None
-        self.tool.follow_ball()
+        first, end = session.clip_bounds(session.cursor)
+        self.start = max(first, min(session.cursor - SHEET_ROWS // 2, end - SHEET_ROWS))
+        self.cache_key = None
+        super().open()
 
     def page(self, direction: int) -> None:
         first, end = self.session.clip_bounds(self.start)
@@ -62,22 +58,21 @@ class SheetView:
             self.session.set_cursor(start)   # leaving the sheet lands in the stretch it shows
             self.tool.follow_ball()
 
-    def on_mouse(self, event: int, x: int, y: int) -> None:
+    def on_mouse(self, event: int, x: int, y: int, flags: int = 0) -> None:
         if event == cv2.EVENT_RBUTTONDOWN:
-            self.toggle()
+            self.close()
         elif event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_LBUTTONDBLCLK) and self.points:
             index, px, py = min(self.points, key=lambda p: (p[1] - x) ** 2 + (p[2] - y) ** 2)
             if math.hypot(px - x, py - y) <= 14 * self.session.ui:
                 self.session.set_cursor(index)
-                self.active = False
-                self.tool.follow_ball()
+                self.close()
 
     def handle_key(self, code: int, direction: int) -> None:
         """The trajectory sheet only finds frames: its own few keys, nothing else."""
-        if code in (ord("w"), KEY_TAB):
-            self.toggle()
-            if code == KEY_TAB:
-                self.tool.grid_view.toggle()
+        if code == KEY_TAB:
+            self.tool.grid_view.open()
+        elif code == ord("w"):
+            self.close()
         elif direction:
             self.page(direction)
 

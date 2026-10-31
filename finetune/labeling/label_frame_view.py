@@ -22,6 +22,7 @@ from finetune.labeling.label_draw import (FILTERS, GHOST, HIT, LANDING, RALLY, C
                                           fit_text, hit, hit_badge, label_mark_colour, landing_badge, mark_plan, review_badge)
 from finetune.labeling.label_store import Row
 from finetune.labeling.label_timeline import KIND_COLOURS, Timeline
+from finetune.labeling.label_view import View
 from finetune.refiner.refine import Suggestion
 from finetune.data.detector_metrics import REFERENCE_HEIGHT
 
@@ -33,12 +34,24 @@ INSET_SHARE = 0.22        # width of the overview inset as a share of the view
 THUMBNAILS_KEPT = 64      # small copies of frames kept for the inset
 
 
-class FrameView:
+class FrameView(View):
     """The single-frame view's picture and HUD, drawn for the tool's current frame."""
 
+    overview = False
+
+    def render(self) -> np.ndarray:
+        return self.tool.render_frame()
+
+    def handle_key(self, code: int, direction: int) -> None:
+        keys = self.tool.keys
+        if not keys.plain_key(code, direction):
+            keys.common_key(code)
+
+    def on_mouse(self, event: int, x: int, y: int, flags: int = 0) -> None:
+        self.tool.pointer.frame_event(event, x, y, flags)
+
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
-        self.session = session
-        self.tool = tool
+        super().__init__(session, tool)
         self.inset_box = None         # where the inset is on screen, so a click in it can re-centre there
         self.inset_scale = 1.0        # frame px -> inset px
         self.centre_button = None     # where the HUD chip that toggles auto-centring is, in display pixels

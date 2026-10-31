@@ -16,6 +16,7 @@ import numpy as np
 from finetune.labeling.label_draw import (FILTERS, LANDING, ZOOM_STEP, draw_badge, draw_ticks, draw_tile_mark, enhance,
                                           fit_text, hit, landing_badge, mark_plan)
 from finetune.labeling.label_timeline import Timeline
+from finetune.labeling.label_view import View
 from finetune.labeling.label_window import KEYS_CONFIRM, KEYS_ZOOM_IN, KEYS_ZOOM_OUT
 from finetune.refiner.refine import Point, Suggestion
 
@@ -28,7 +29,7 @@ GRID_SIZES = (8, 16)
 Tile = Tuple[int, Tuple[int, int, int, int], float, float, float]   # row index, box, ox, oy, scale
 
 
-class GridView:
+class GridView(View):
     """A page of GRID_SIZES tiles, each a label frame enlarged about its ball, all of one clip.
 
     Holds which rows are on the page, where each tile was drawn (so a click lands on the right
@@ -36,9 +37,7 @@ class GridView:
     from, so an unchanged page costs nothing to show again."""
 
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
-        self.session = session
-        self.tool = tool
-        self.active = False
+        super().__init__(session, tool)
         self.indices: List[int] = []            # the rows on this page, in order
         self.centers: Dict[int, Point] = {}     # row index -> the frame point its tile is centred on
         self.tiles: List[Tile] = []             # what the last render drew, for clicks and confirm_page
@@ -57,12 +56,9 @@ class GridView:
         """The rows a page is filled from: the walk when there is one, else every row."""
         return self.session.walk if self.session.walk else list(range(len(self.session.rows)))
 
-    def toggle(self) -> None:
-        self.tool.sheet_view.active = False
-        self.active = not self.active
-        if self.active:
-            self.prepare(self.session.cursor)
-        self.tool.follow_ball()
+    def open(self) -> None:
+        super().open()
+        self.prepare(self.session.cursor)
 
     def prepare(self, start: int) -> None:
         """Fill the page from `start`: the next rows of the walk (or of every row) within the clip."""
@@ -223,7 +219,7 @@ class GridView:
         return title
 
     # ---------------------------------------------------------------- the hand
-    def on_mouse(self, event: int, x: int, y: int) -> None:
+    def on_mouse(self, event: int, x: int, y: int, flags: int = 0) -> None:
         if event not in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_LBUTTONDBLCLK, cv2.EVENT_RBUTTONDOWN):
             return
         session = self.session
@@ -231,8 +227,7 @@ class GridView:
             if hit(box, x, y):
                 session.set_cursor(index)
                 if event == cv2.EVENT_RBUTTONDOWN:
-                    self.active = False
-                    self.tool.follow_ball()
+                    self.close()
                 else:                 # +0.5: highgui floors the pointer to a pixel; aim at its middle
                     fx, fy = ox + (x + 0.5 - box[0]) / scale, oy + (y + 0.5 - box[1]) / scale
                     if 0 <= fx < session.width and 0 <= fy < session.height:
@@ -242,7 +237,12 @@ class GridView:
                             self.centers[index] = (session.rows[index].x, session.rows[index].y)
                 return
 
-    def handle_key(self, code: int, direction: int) -> bool:
+    def handle_key(self, code: int, direction: int) -> None:
+        """A key on a grid page: its own (grid_key), else as the single frame reads it."""
+        if not self.grid_key(code, direction):
+            self.tool.keys.common_key(code)
+
+    def grid_key(self, code: int, direction: int) -> bool:
         """What a key does on a grid page; False for a key the grid reads like the single frame."""
         if self.edit_key(code):
             return True
