@@ -223,6 +223,9 @@ class Pass1Collector:
         self._progress_frame, self._progress_elapsed = 0, 0.0   # where the last progress line was
         self._player_pending: Deque[PlayerPending] = collections.deque()   # launched, not yet finished
         self._players_tracked: List[bool] = []    # per committed frame: did the player tracker run on it
+        # Committed frames the player tracker skipped, with the ghosts found as each was committed:
+        # handed on (``committed``) with the next tracked frame, once their boxes are interpolated.
+        self._held: List[Tuple[int, List[Tuple[int, Box]]]] = []
 
     # -- per-frame steps -------------------------------------------------------
 
@@ -351,7 +354,8 @@ class Pass1Collector:
             out.rois[ghost_frame] = kept if kept else None
         out.rois.append(record.rois)
         out.ghost_rois.append([])
-        # A frame the player tracker skips (cfg.player_detect_interval) is filled after the loop.
+        # A frame the player tracker skips (cfg.player_detect_interval) holds the last tracked
+        # frame's boxes until the next tracked frame's are in (``_hand_on`` interpolates them).
         out.player_boxes.append(self.player_detector.player_boxes_by_slot())
         self._players_tracked.append(self.player_detector.tracks_frame(record.frame_index))
         out.court_keypoints.append(record.court_keypoints)
@@ -362,11 +366,33 @@ class Pass1Collector:
             elif record.detector_frame_cuda is not None:
                 self.detector_input_writer.write(record.detector_frame_cuda.detach().cpu().numpy())
         self.timing.add("pass1_store", t0)
-        self.committed(record.frame_index, found)
+        self._hand_on(record.frame_index, found)
+
+    def _hand_on(self, frame_index: int, ghosts: List[Tuple[int, Box]]) -> None:
+        """Hand committed frame `frame_index` on (``committed``) once its player boxes are final: a
+        frame the player tracker ran on at once, after the frames it skipped since the one before,
+        whose boxes are now interpolated between the two; a skipped frame waits for that."""
+        if not self._players_tracked[frame_index]:
+            self._held.append((frame_index, ghosts))
+            return
+        if self._held:
+            start = self._held[0][0] - 1                  # the tracked frame before the gap
+            span = slice(start, frame_index + 1)
+            self.result.player_boxes[span] = interpolate_player_boxes(
+                self.result.player_boxes[span], self._players_tracked[span])
+        self._release_held()
+        self.committed(frame_index, ghosts)
+
+    def _release_held(self) -> None:
+        for held_frame, held_ghosts in self._held:
+            self.committed(held_frame, held_ghosts)
+        self._held.clear()
 
     def committed(self, frame_index: int, ghosts: List[Tuple[int, Box]]) -> None:
-        """Called once frame `frame_index`'s evidence is stored, with the ghost ROIs ``(frame, box)``
-        added to earlier frames as it was; for a subclass that hands frames on (the live tracker)."""
+        """Called once frame `frame_index`'s evidence is final, its player boxes included, in frame
+        order, with the ghost ROIs ``(frame, box)`` added to earlier frames as it was committed; for a
+        subclass that hands frames on (the live tracker). A frame the player tracker skipped comes
+        with the next frame it ran on (``_hand_on``), so its boxes are the interpolated ones."""
 
     def _finish_pending(self, pending: PendingDetection) -> None:
         t0 = self.timing.start()
@@ -466,8 +492,9 @@ class Pass1Collector:
         if pending is not None:
             self._finish_pending(pending)
         self._finish_players(frame_index)
-        if not all(self._players_tracked):
-            self.result.player_boxes = interpolate_player_boxes(self.result.player_boxes, self._players_tracked)
+        # The frames the player tracker skipped have their boxes (``_hand_on``), except those after
+        # the last frame it ran on, which keep that frame's boxes.
+        self._release_held()
         return self.result
 
 

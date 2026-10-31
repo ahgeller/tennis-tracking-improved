@@ -881,3 +881,52 @@ def test_players_are_detected_every_other_frame_from_60_fps_and_interpolated_bet
     for frame, boxes in enumerate(result.player_boxes):
         shift = 2.0 * min(frame, last_tracked)          # after the last tracked frame, its box is held
         assert boxes == {1: [10.0 + shift, 20.0, 30.0 + shift, 60.0]}, frame
+
+
+class _HandedOn(pass1.Pass1Collector):
+    """Pass 1's collector recording what the commit hook is handed: each frame, its player boxes as
+    they stand at that moment, and the ghosts that came with it (what the live tracker feeds on)."""
+
+    handed: List[Tuple[int, Dict[int, List[float]], List[Any]]] = []
+
+    def committed(self, frame_index, ghosts):
+        _HandedOn.handed.append((frame_index, copy.deepcopy(self.result.player_boxes[frame_index]), list(ghosts)))
+
+
+@pytest.mark.parametrize("fps", [30.0, 60.0])
+def test_the_commit_hook_gets_every_frame_in_order_with_its_final_player_boxes(tmp_path, monkeypatch, fake_cuda, fps):
+    """A frame the player tracker skips is handed on with the next one it runs on, its boxes
+    already interpolated: the hook sees the boxes the run returns, frame by frame, in order."""
+    path = tmp_path / f"rally_{fps:g}fps.avi"
+    write_lossless_clip(path, synthetic_frames(), fps=fps)
+    install_fakes(monkeypatch)
+    _ScheduledPlayers.built = []
+    _HandedOn.handed = []
+    monkeypatch.setattr(pipeline, "PlayerDetector", _ScheduledPlayers)
+    monkeypatch.setattr(pass1, "Pass1Collector", _HandedOn)
+    result = pipeline.run(make_config(tmp_path, path, **JSON_ONLY_OVERRIDES))
+    assert [frame for frame, _, _ in _HandedOn.handed] == list(range(FRAMES))
+    assert [boxes for _, boxes, _ in _HandedOn.handed] == result.player_boxes
+
+
+def test_a_skipped_frame_is_held_with_its_ghosts_until_the_next_tracked_frame():
+    """``_hand_on`` on a schedule of every third frame: the skipped frames come out with the next
+    tracked one, in order, each with the ghosts found as it was committed; the tail with the end."""
+    collector = object.__new__(_HandedOn)
+    collector.result = pass1.Pass1Result()
+    collector._players_tracked, collector._held = [], []
+    _HandedOn.handed = []
+    tracked = [True, False, False, True, False]
+    calls = []
+    for frame, is_tracked in enumerate(tracked):
+        x = float(frame) if is_tracked else -1.0          # a skipped frame holds a placeholder
+        collector.result.player_boxes.append({7: [x, 0.0, x + 1.0, 2.0]})
+        collector._players_tracked.append(is_tracked)
+        ghosts = [(frame - 1, (frame, 0, frame + 1, 1))] if frame else []
+        collector._hand_on(frame, ghosts)
+        calls.append([f for f, _, _ in _HandedOn.handed])
+    assert calls == [[0], [0], [0], [0, 1, 2, 3], [0, 1, 2, 3]]
+    collector._release_held()
+    assert [f for f, _, _ in _HandedOn.handed] == [0, 1, 2, 3, 4]
+    assert [g for _, _, g in _HandedOn.handed] == [[]] + [[(f - 1, (f, 0, f + 1, 1))] for f in range(1, 5)]
+    assert [boxes[7][0] for _, boxes, _ in _HandedOn.handed] == pytest.approx([0.0, 1.0, 2.0, 3.0, -1.0])

@@ -14,7 +14,9 @@ number of frames later. Nothing waits for the whole clip.
    as the prepass's lookahead and the motion gate's next frame need, and no farther.
 4. Each frame pass 1 commits (``Pass1Collector.committed``) goes to the ``FixedLagSelector``,
    which commits every frame's output ``delay`` frames after it (``fixed_lag``), in its own process
-   by default (``selector_process``).
+   by default (``selector_process``). On a 60 FPS source the player tracker runs on every other
+   frame (``player_detector.player_detect_interval``), so a frame it skips is handed on with the
+   next one, its player boxes interpolated as offline: one frame later than the others.
 
 **Frame indices.** The prepass and pass 1 see the frames that were not dropped, numbered as they
 were processed: their motion, ROI tracking and the prepass's phases run on that sequence, so across
@@ -451,7 +453,7 @@ def _open_live(cfg: Config, options: LiveOptions) -> RunContext:
               f"({'given' if options.camera_fps else f'measured over {_CAMERA_FPS_FRAMES} frames'}; "
               f"it reports {reported:.2f})")
     court_detector = CourtDetector(cfg)
-    player_detector = PlayerDetector(cfg, court_keypoints=None)
+    player_detector = PlayerDetector(cfg, court_keypoints=None, fps=video.fps)
     print_platform_report(cfg, None)
     return RunContext(cfg=cfg, video=video, capture=capture, device=device, encoder=None, detector=detector,
                       court_detector=court_detector, player_detector=player_detector, timing=timing,

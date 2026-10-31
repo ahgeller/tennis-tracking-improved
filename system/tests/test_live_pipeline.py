@@ -12,19 +12,36 @@ from tennis_tracker.live.evidence import EMPTY_EVIDENCE, replay
 from tennis_tracker.live.fixed_lag import LagSettings
 from tennis_tracker.live.pipeline import LiveOptions, LiveStats, _LiveRun, _Pump, _stop_on_interrupt, camera_name
 from tennis_tracker.live.source import ArrivedFrame, DropPolicy, FrameQueue
+from tennis_tracker.motion import BoostMasks, DeferredBoost
 from tennis_tracker.pass1 import Pass1Result
 from tests._helpers import RALLY_FPS, RALLY_HEIGHT, RALLY_WIDTH, rally, same_row
 
 DROPPED = {40, 41, 90, 91, 92, 93}
 
 
-def _run_with_drops(selector_process=False):
+class _Deferred(DeferredBoost):
+    """A boost mask pass 1 left unfiltered (``motion.DeferredBoost``): resolves to `mask`, counted."""
+
+    resolved: list = []
+
+    def resolve(self):
+        _Deferred.resolved.append(self.union)
+        return self.boxes[0]
+
+
+def _run_with_drops(selector_process=False, deferred=False):
     """A ``_LiveRun`` fed as pass 1 feeds it, with the source frames in ``DROPPED`` never seen:
     pass 1 numbers the others 0, 1, 2... A ghost found as processed frame 60 was committed lies on
-    processed frame 55."""
+    processed frame 55. With `deferred`, pass 1's boost masks are stored as pass 1 stores them,
+    unfiltered (``BoostMasks`` of ``DeferredBoost``)."""
     detections, masks = rally()
     seen = [frame for frame in range(len(detections)) if frame not in DROPPED]
-    result = Pass1Result(detections=[detections[f] for f in seen], boost_masks=[masks[f] for f in seen],
+    boost_masks = [masks[f] for f in seen]
+    if deferred:
+        boost_masks = BoostMasks()
+        for processed, f in enumerate(seen):
+            boost_masks.append(None if masks[f] is None else _Deferred((0, 0), processed, [masks[f]], None, None, None))
+    result = Pass1Result(detections=[detections[f] for f in seen], boost_masks=boost_masks,
                          raw_motions=[masks[f] for f in seen], player_boxes=[{} for _ in seen],
                          court_keypoints=[None for _ in seen])
     pump = SimpleNamespace(source_index=seen, arrivals=[100.0 + f / RALLY_FPS for f in seen],
@@ -63,6 +80,22 @@ def test_after_a_drop_the_selector_and_the_record_see_source_frames():
     # Latencies are for frames that arrived; pass 1 kept none of its masks.
     assert len(run.stats.latencies_s) + run.stats.flushed_at_end == len(seen)
     assert all(mask is None for mask in result.boost_masks + result.raw_motions)
+
+
+def test_committing_a_frame_hands_on_its_boost_mask_filtered_once_and_keeps_none(quiet_spawn):
+    """Pass 1 stores each boost mask unfiltered until it is first read: committing a frame hands
+    the selector and the record its filtered mask, filtered once, and keeps nothing behind."""
+    eager, *_ = _run_with_drops()
+    for selector_process in (False, True):
+        _Deferred.resolved = []
+        run, seen, result, _, _ = _run_with_drops(selector_process=selector_process, deferred=True)
+        filled = [processed for processed, f in enumerate(seen) if rally()[1][f] is not None]
+        assert _Deferred.resolved == filled
+        assert not any(isinstance(mask, DeferredBoost) for mask in run.recorded.boost_masks)
+        assert all((a is None and b is None) or np.array_equal(a.unpack(), b.unpack())
+                   for a, b in zip(run.recorded.boost_masks, eager.recorded.boost_masks, strict=True))
+        assert all(same_row(a, b) for a, b in zip(run.committed, eager.committed))
+        assert all(mask is None for mask in result.boost_masks)
 
 
 def test_after_a_drop_the_selector_process_commits_what_the_selector_in_line_does(quiet_spawn):
