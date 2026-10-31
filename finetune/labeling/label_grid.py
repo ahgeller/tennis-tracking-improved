@@ -15,6 +15,7 @@ import numpy as np
 
 from finetune.labeling.label_draw import (FILTERS, LANDING, ZOOM_STEP, draw_badge, draw_ticks, draw_tile_mark, enhance,
                                           fit_text, hit, landing_badge, mark_plan)
+from finetune.labeling.label_timeline import Timeline
 from finetune.labeling.label_window import KEYS_CONFIRM, KEYS_ZOOM_IN, KEYS_ZOOM_OUT
 from finetune.refiner.refine import Point, Suggestion
 
@@ -45,6 +46,7 @@ class GridView:
         self.cache_key: Optional[tuple] = None
         self.zoom = 1.0
         self.size = GRID_SIZES[0]
+        self.timeline = Timeline(session)       # the clip's timeline along the top of the HUD
 
     def invalidate(self) -> None:
         """The next render draws afresh (the picture filter changed)."""
@@ -128,7 +130,8 @@ class GridView:
     def render(self) -> np.ndarray:
         session = self.session
         rows = session.rows
-        key = (session.view_w, session.view_h, self.zoom, self.size, session.cursor, session.dirty, session.hints.version,
+        key = (session.view_w, session.view_h, session.hud_h, self.zoom, self.size, session.cursor, session.dirty,
+               session.hints.version, session.marks,
                tuple((i, rows[i].x, rows[i].y, rows[i].visible, rows[i].reviewed, rows[i].edited, session.landing_for(i))
                      for i in self.indices))
         if key == self.cache_key:
@@ -161,13 +164,15 @@ class GridView:
         caption =(f"{session.source.clip} | click=center  right click=full frame  SPACE=confirm these {len(tiles)}"
                    f"{' (orange crosses are hints on offer)' if offers else ''}  a/d=page  TAB=single")
         thin = max(1, int(ui))
+        hud_top = session.view_h + session.timeline_h
+        self.timeline.draw(canvas[session.view_h:hud_top], session.view_h)
         cv2.putText(canvas, fit_text(caption, session.view_w - 12, .48 * ui, thin),
-                    (6, session.view_h + int(round(21 * ui))), cv2.FONT_HERSHEY_SIMPLEX, .48 * ui, (255, 255, 255), thin)
+                    (6, hud_top + int(round(21 * ui))), cv2.FONT_HERSHEY_SIMPLEX, .48 * ui, (255, 255, 255), thin)
         keys = ("1-9 or ,/. select | y: take hint | x: keep draft | i/j/k/l: 1px (SHIFT 0.25px) | u: undo | "
                 f"v: absent | /: landing | +/- zoom | z: {GRID_SIZES[(GRID_SIZES.index(self.size) + 1) % len(GRID_SIZES)]} tiles"
                 " | q: save/quit")
         cv2.putText(canvas, fit_text(keys, session.view_w - 12, .42 * ui, thin),
-                    (6, session.view_h + int(round(44 * ui))), cv2.FONT_HERSHEY_SIMPLEX, .42 * ui, (200, 200, 200), thin)
+                    (6, hud_top + int(round(44 * ui))), cv2.FONT_HERSHEY_SIMPLEX, .42 * ui, (200, 200, 200), thin)
         self.tiles = tiles
         session.shown_offers = offers
         self.cache_key, self.cache = key, canvas

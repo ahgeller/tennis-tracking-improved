@@ -155,10 +155,12 @@ def shift_held() -> bool:
 
 # Keys with no character of their own come back from this build as their bare virtual-key code,
 # and some of those codes are also printable keys the tool binds: F1..F12 are 112..123, which read
-# as p, q, r, s, t, u, v ...; Insert/Delete are 45/46 ('-', '.'); PgUp/PgDn/End/Home are 33..36.
-# The arrows (37..40) are wanted and handled as arrows. A letter is typed on a different key, so
-# asking the OS whether the virtual key itself is down tells the two apart.
-NON_CHARACTER_KEYS = set(range(0x70, 0x7C)) | {0x2D, 0x2E} | set(range(0x21, 0x25))
+# as p, q, r, s, t, u, v ...; Insert/Delete are 45/46 ('-', '.'); PgUp/PgDn/End/Home are 33..36;
+# Print Screen is 44 (','); the Windows and menu keys are 91..93 ('[', '\', ']'). The arrows
+# (37..40) are wanted and handled as arrows, which is why the tool binds no ' (39, the right
+# arrow's code). A character is typed on a different key, so asking the OS whether the virtual
+# key itself is down tells the two apart.
+NON_CHARACTER_KEYS = set(range(0x70, 0x7C)) | {0x2C, 0x2D, 0x2E} | set(range(0x21, 0x25)) | set(range(0x5B, 0x5E))
 
 
 def non_character_key(code: int) -> bool:

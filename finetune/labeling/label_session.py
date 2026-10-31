@@ -8,18 +8,21 @@ it - the edits, the navigation the keys name, the window and the loop - and the 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
 from finetune.data.bounce_labels import between_frames
+from finetune.labeling.label_candidates import Candidate, CandidateKind, is_answered
 from finetune.labeling.label_draw import FILTERS, ZOOM_STEP
 from finetune.labeling.label_hints import Suggestions
 from finetune.labeling.label_source import Source
 from finetune.labeling.label_store import Row
 from finetune.refiner.refine import Point, Suggestion
 
-HUD = 58
+HUD = 58                  # the HUD's two text lines and chips, at ui 1 ...
+TIMELINE = 12             # ... and the clip's timeline above them (label_timeline)
+VIEW_EPS = 1e-6           # view pixels: rounding noise to_view never floors across
 MAX_UPSCALE = 2.0         # cap on drawing the frame bigger than it is: past this it only costs time
 UI_REFERENCE = 1280.0     # view width the HUD text sizes were chosen for; bigger views scale up
 ZOOM_EASE = 0.34          # share of the remaining gap closed each redraw: a glide, not a jump
@@ -52,7 +55,8 @@ class LabelSession:
         self.base_scale = 1.0                  # replaced by fit once the window has a size
         self.view_w, self.view_h = self.width, self.height
         self.ui = 1.0                          # HUD/marker scale, so text stays readable when enlarged
-        self.hud_h = HUD
+        self.timeline_h = TIMELINE
+        self.hud_h = HUD + TIMELINE            # the timeline strip and the HUD under it
         self.zoom = 1.0
         self.zoom_target = 1.0
         self.anchor: Optional[Anchor] = None   # what the zoom glide holds still
@@ -71,7 +75,13 @@ class LabelSession:
         self.awaiting_landing: Optional[float] = None   # a landing with no ball label under it (its key in
                                                         # the clip's landings) waiting for the click that says
                                                         # where the ball touched the ground; see Tool.toggle_landing
+        self.awaiting_hit: Optional[float] = None       # the same for a hit (Tool.toggle_hit): where the racket met it
+        self.awaiting_candidate: Optional[Candidate] = None   # a landing or hit candidate between two label
+                                                              # frames, come to with ;, whose click confirms it
+                                                              # there (Tool.jump_candidate, Tool.place_candidate)
         self.disputed_key, self.disputed = None, 0   # disputed_count's cache
+        self.marks = 0                # bumped by every change to a clip's landings, hits, rallies or
+                                      # rejected candidates (not row fields): what render_state keys on
 
     # ---------------------------------------------------------------- the clip we are in
     @property
@@ -164,7 +174,8 @@ class LabelSession:
         of blur. True when the view's size changed."""
         old = (self.view_w, self.view_h, self.hud_h)
         self.ui = max(1.0, min(client_w / UI_REFERENCE, 2.5))
-        self.hud_h = int(round(HUD * self.ui))
+        self.timeline_h = int(round(TIMELINE * self.ui))
+        self.hud_h = int(round(HUD * self.ui)) + self.timeline_h
         room_h = max(120, client_h - self.hud_h)
         self.base_scale = max(0.2, min(client_w / self.width, room_h / self.height, MAX_UPSCALE))
         # The view is the whole client area, not just the frame at that scale: highgui keeps the
@@ -202,8 +213,10 @@ class LabelSession:
     # to the view pixel whose span holds it (floor, not round: round's ties go to even, which put a
     # ball dead centre a pixel off); render's warp is built on the same convention.
     def to_view(self, x: float, y: float) -> Tuple[int, int]:
-        return (math.floor((x - self.origin[0]) * self.scale),
-                math.floor((y - self.origin[1]) * self.scale))
+        # VIEW_EPS: a point the zoom glide holds on a pixel's edge lands a hair either side of it in
+        # floating point, and flooring that flipped it a whole pixel at some window sizes.
+        return (math.floor((x - self.origin[0]) * self.scale + VIEW_EPS),
+                math.floor((y - self.origin[1]) * self.scale + VIEW_EPS))
 
     def to_frame(self, vx: float, vy: float) -> Tuple[float, float]:
         return self.origin[0] + vx / self.scale, self.origin[1] + vy / self.scale
@@ -317,15 +330,153 @@ class LabelSession:
         """The landing row `index` wears, as its key in the clip's landings: one on its own frame,
         else one halfway between its frame and the previous or next row's (``between_frames``);
         None when there is neither."""
+        return self.mark_for(index, self.by_clip[self.rows[index].clip].landings)
+
+    def hit_for(self, index: int) -> Optional[float]:
+        """The hit row `index` wears, as its key in the clip's hits, worn as a landing is (landing_for)."""
+        return self.mark_for(index, self.by_clip[self.rows[index].clip].hits)
+
+    def mark_for(self, index: int, marks: Mapping[float, object]) -> Optional[float]:
+        """The key in `marks` (a clip's landings or hits) row `index` wears: its own frame, else the
+        frame halfway between it and the previous or next row (``between_frames``); None for neither."""
         row = self.rows[index]
-        landings = self.by_clip[row.clip].landings
-        if row.frame in landings:
+        if row.frame in marks:
             return row.frame
         for other in self.neighbour_frames(index):
             between = between_frames(row.frame, other)
-            if between in landings:
+            if between in marks:
                 return between
         return None
+
+    def toggle_mark(self, index: int, marks: Dict) -> Optional[float]:
+        """/ and .: put a mark on row `index`'s frame - or take off the one it wears. On the row
+        after (or before) a frame already marked, the two become one mark between them (3.5 between
+        frames 3 and 4; on a 60 FPS clip labelled every other frame, the unlabelled frame between).
+        The mark placed holds None. Returns its key, None when one was taken off."""
+        worn = self.mark_for(index, marks)
+        self.marks += 1
+        if worn is not None:
+            del marks[worn]           # on this frame, or between it and the next: unmarked either way
+            return None
+        row = self.rows[index]
+        placed: float = row.frame
+        for other in self.neighbour_frames(index):   # the previous row first: the one just marked
+            if other in marks:
+                del marks[other]
+                placed = between_frames(row.frame, other)
+                break
+        marks[placed] = None
+        return placed
+
+    def candidate_between(self, index: int, kind: CandidateKind) -> Optional[float]:
+        """The key a mark of `kind` takes on row `index` when the tracker's open candidate of that
+        kind on the row lies between its frame and the next (or previous) row's: the frame between
+        the two (``between_frames``), as a / pressed on both would put it. None when there is no
+        such candidate."""
+        row = self.rows[index]
+        for event in self.open_candidates(index):
+            if event.kind != kind or event.frame == row.frame:
+                continue
+            other = index + (1 if event.frame > row.frame else -1)
+            if 0 <= other < len(self.rows) and self.rows[other].clip == row.clip:
+                low, high = sorted((row.frame, self.rows[other].frame))
+                if low < event.frame < high:
+                    return between_frames(row.frame, self.rows[other].frame)
+        return None
+
+    # ---------------------------------------------------------------- rallies
+    def rally_mark(self, index: int) -> Optional[str]:
+        """"start" or "end" when row `index`'s frame starts or ends a rally, else None."""
+        row = self.rows[index]
+        source = self.by_clip[row.clip]
+        return "start" if row.frame in source.rally_starts else "end" if row.frame in source.rally_ends else None
+
+    def rally_at(self, index: int) -> Optional[Tuple[int, int]]:
+        """(which rally of the clip, how many starts it has) when row `index` lies within a rally:
+        from a start up to the next mark after it, that mark included when it is an end. None
+        outside every rally."""
+        row = self.rows[index]
+        source = self.by_clip[row.clip]
+        starts = sorted(source.rally_starts)
+        marks = sorted([(frame, 1) for frame in source.rally_starts] + [(frame, 0) for frame in source.rally_ends])
+        for position, (frame, is_start) in enumerate(marks):
+            if not is_start or frame > row.frame:
+                continue
+            following = marks[position + 1] if position + 1 < len(marks) else None
+            if following is None or row.frame < following[0] or (not following[1] and row.frame == following[0]):
+                return starts.index(frame) + 1, len(starts)
+        return None
+
+    # ---------------------------------------------------------------- candidates
+    def candidates_on(self, index: int) -> List[Candidate]:
+        """The tracker's candidates row `index` wears (the ones nearest its frame), answered or not."""
+        source = self.by_clip[self.rows[index].clip]
+        if source.candidates is None:
+            return []
+        return source.candidates.on_row(index - source.start)
+
+    @staticmethod
+    def label_frames(source) -> Dict[CandidateKind, Sequence[float]]:
+        """A clip's labelled frames by candidate kind: what answers a candidate."""
+        return {"landing": list(source.landings), "hit": list(source.hits),
+                "rally_start": list(source.rally_starts), "rally_end": list(source.rally_ends)}
+
+    def open_candidates(self, index: int) -> List[Candidate]:
+        """The candidates row `index` wears that nobody has answered yet (label_candidates.is_answered)."""
+        source = self.by_clip[self.rows[index].clip]
+        if source.candidates is None:
+            return []
+        labels = self.label_frames(source)
+        return [event for event in self.candidates_on(index)
+                if not is_answered(event, source.candidates.fps, labels, source.rejected)]
+
+    def open_candidate_rows(self, source) -> List[int]:
+        """The run's row indices of a clip's rows wearing a candidate nobody has answered yet."""
+        if source.candidates is None:
+            return []
+        labels = self.label_frames(source)
+        fps = source.candidates.fps
+        return sorted({source.start + row for event, row in zip(source.candidates.events, source.candidates.row_of)
+                       if not is_answered(event, fps, labels, source.rejected)})
+
+    def next_candidate(self, direction: int) -> Optional[int]:
+        """The next row that way, across the run's clips, wearing a candidate nobody has answered
+        yet; None when there is none."""
+        for source in (self.sources if direction > 0 else list(reversed(self.sources))):
+            ahead = [row for row in self.open_candidate_rows(source)
+                     if (row > self.cursor if direction > 0 else row < self.cursor)]
+            if ahead:
+                return ahead[0] if direction > 0 else ahead[-1]
+        return None
+
+    def open_candidate_count(self) -> int:
+        """How many of the run's candidates nobody has answered yet."""
+        total = 0
+        for source in self.sources:
+            if source.candidates is not None:
+                labels = self.label_frames(source)
+                total += sum(1 for event in source.candidates.events
+                             if not is_answered(event, source.candidates.fps, labels, source.rejected))
+        return total
+
+    def reject_candidates(self, index: int) -> int:
+        """Backslash: the candidates row `index` wears that nobody has answered are not events. Pressed on a
+        row whose candidates are all answered, the ones rejected here are open again. Returns how
+        many changed: positive rejected, negative reopened."""
+        source = self.by_clip[self.rows[index].clip]
+        open_now = self.open_candidates(index)
+        self.marks += 1
+        if open_now:
+            for event in open_now:
+                source.rejected.setdefault(event.kind, set()).add(event.frame)
+            return len(open_now)
+        reopened = 0
+        for event in self.candidates_on(index):
+            frames = source.rejected.get(event.kind, set())
+            if event.frame in frames:
+                frames.discard(event.frame)
+                reopened += 1
+        return -reopened
 
     # ---------------------------------------------------------------- suggestions
     def suggestion_for(self, index: int) -> Optional[Suggestion]:

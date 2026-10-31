@@ -1,18 +1,26 @@
-"""What the label tool reads and writes: a clip's rows, the review and flag sidecars, its landings
-and the settings file. The on-disk formats are those of ``finetune.data.labels`` and
-``finetune.data.bounce_labels``; this module turns them into ``Row`` objects and back. ``load_*``
-functions read and return; ``apply_*`` functions write what a sidecar says onto the rows they are
-given."""
+"""What the label tool reads and writes: a clip's rows, the review and flag sidecars, its landings,
+hits and rallies, the candidates rejected, the player and court labels, and the settings file.
+The on-disk formats are those of ``finetune.data.labels``, ``finetune.data.bounce_labels``,
+``finetune.data.event_labels``, ``finetune.data.player_labels`` and ``finetune.data.court_labels``;
+this module turns them into ``Row`` objects and the tool's maps and back. ``load_*`` functions read
+and return; ``apply_*`` functions write what a sidecar says onto the rows they are given; every
+``save_*`` of a clip's marks removes the file when nothing is left in it, since the scorers read
+any file, empty included, as the whole truth about its clip."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from finetune.data.bounce_labels import BounceLabel, read_bounce_labels, write_bounce_labels
+from finetune.data.court_labels import CourtLabel, CourtPoints, read_court_labels, write_court_labels
+from finetune.data.event_labels import (Hitter, HitLabel, RallyLabel, pair_rally_marks, read_hit_labels,
+                                        read_rally_labels, write_hit_labels, write_rally_labels)
 from finetune.data.fileio import write_atomic
-from finetune.data.labels import (FLAG_KINDS, FlagKind, Flags, LabelPoint, answered_point, format_point, frame_list,
-                                  is_visible, read_flags, read_label_rows, read_review, write_flags, write_label_cells)
+from finetune.data.labels import (FLAG_KINDS, FlagKind, Flags, LabelFormatError, LabelPoint, answered_point,
+                                  format_point, frame_list, is_visible, read_flags, read_json_object, read_label_rows,
+                                  read_review, write_flags, write_label_cells)
+from finetune.data.player_labels import PlayerBoxLabel, read_player_labels, write_player_labels
 from finetune.data.workspace import unsaved_csv
 
 if TYPE_CHECKING:
@@ -198,6 +206,102 @@ def save_landings(path: Path, landings: Landings) -> None:
     no landings marked must have no file."""
     if landings:
         write_bounce_labels(path, (BounceLabel(frame, point) for frame, point in landings.items()))
+    else:
+        path.unlink(missing_ok=True)
+
+
+# A clip's hits (``event_labels``), kept exactly as its landings are (the same keys, points None
+# until a click places one: ``Landings``), and apart from them who hit the ball, by the same keys,
+# for the hits where that was said.
+Hits = Landings
+Hitters = Dict[float, Hitter]
+
+
+def load_hits(path: Path) -> Tuple[Hits, Hitters]:
+    """The clip's hits and their hitters; none when there is no file. A damaged file is its
+    LabelFormatError."""
+    if not path.is_file():
+        return {}, {}
+    labels = read_hit_labels(path)
+    return ({label.frame: label.point for label in labels},
+            {label.frame: label.hitter for label in labels if label.hitter is not None})
+
+
+def save_hits(path: Path, hits: Hits, hitters: Hitters) -> None:
+    if hits:
+        write_hit_labels(path, (HitLabel(frame, point, hitters.get(frame)) for frame, point in hits.items()))
+    else:
+        path.unlink(missing_ok=True)
+
+
+def load_rallies(path: Path) -> Tuple[Set[int], Set[int]]:
+    """The frames the clip's rallies start on and end on (the tool marks the two apart and pairs
+    them on save, ``event_labels.pair_rally_marks``); none when there is no file."""
+    if not path.is_file():
+        return set(), set()
+    rallies = read_rally_labels(path)
+    return ({rally.start for rally in rallies if rally.start is not None},
+            {rally.end for rally in rallies if rally.end is not None})
+
+
+def save_rallies(path: Path, starts: Set[int], ends: Set[int]) -> None:
+    rallies: List[RallyLabel] = pair_rally_marks(starts, ends)
+    if rallies:
+        write_rally_labels(path, rallies)
+    else:
+        path.unlink(missing_ok=True)
+
+
+# The candidates rejected (``label_candidates``): candidate kind -> the frames of the ones rejected.
+Rejected = Dict[str, Set[int]]
+
+
+def load_event_review(path: Path) -> Rejected:
+    """The candidates the person labelling rejected, by kind; none when there is no file. A
+    damaged file is a LabelFormatError naming it: a record of what was judged is never replaced by
+    an empty one."""
+    state = read_json_object(path, "event review file")
+    if state is None:
+        return {}
+    rejected = state.get("rejected") or {}
+    if not isinstance(rejected, dict):
+        raise LabelFormatError(f"{path}: 'rejected' is not an object of frame lists")
+    return {str(kind): set(frame_list(rejected, kind, path)) for kind in rejected}
+
+
+def save_event_review(path: Path, rejected: Rejected) -> None:
+    kept = {kind: sorted(frames) for kind, frames in sorted(rejected.items()) if frames}
+    if kept:
+        write_atomic(path, json.dumps({"rejected": kept}, indent=1))
+    else:
+        path.unlink(missing_ok=True)
+
+
+def load_players(path: Path) -> List[PlayerBoxLabel]:
+    """The clip's player identity labels; none when there is no file."""
+    return read_player_labels(path) if path.is_file() else []
+
+
+def save_players(path: Path, labels: List[PlayerBoxLabel]) -> None:
+    if labels:
+        write_player_labels(path, labels)
+    else:
+        path.unlink(missing_ok=True)
+
+
+# A clip's court labels (``court_labels``): frame -> the points placed on it.
+CourtFrames = Dict[int, CourtPoints]
+
+
+def load_court(path: Path) -> CourtFrames:
+    """The clip's court labels; none when there is no file."""
+    return {label.frame: dict(label.points) for label in read_court_labels(path)} if path.is_file() else {}
+
+
+def save_court(path: Path, frames: CourtFrames) -> None:
+    labelled = [CourtLabel(frame, points) for frame, points in frames.items() if points]
+    if labelled:
+        write_court_labels(path, labelled)
     else:
         path.unlink(missing_ok=True)
 

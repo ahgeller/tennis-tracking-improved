@@ -31,6 +31,12 @@ class MouseHandler:
             if event == cv2.EVENT_MOUSEWHEEL:
                 self.settle_wheel(flags)
             return
+        if tool.court_view.active:
+            tool.court_view.on_mouse(cv2.EVENT_LBUTTONDOWN if event == cv2.EVENT_LBUTTONDBLCLK else event, x, y, flags)
+            return
+        if tool.player_view.active:
+            tool.player_view.on_mouse(cv2.EVENT_LBUTTONDOWN if event == cv2.EVENT_LBUTTONDBLCLK else event, x, y)
+            return
         if tool.sheet_view.active:
             tool.sheet_view.on_mouse(event, x, y)
             return
@@ -89,7 +95,9 @@ class MouseHandler:
     def place_click(self, x: int, y: int) -> None:
         """A left click on the picture: the ball is there, and the next frame comes up - or, while a
         landing with no ball label under it waits for its point (``Tool.toggle_landing``), the ball
-        touched the ground there, and the frame stays up."""
+        touched the ground there, and the frame stays up; the same for a hit waiting for its point
+        (``Tool.toggle_hit``) and for a candidate between two frames waiting for its confirming
+        click (``Tool.place_candidate``)."""
         session = self.session
         if session.frame_missing():
             return                                  # nothing to see, so nothing to label
@@ -98,6 +106,10 @@ class MouseHandler:
             return                                # a click in the black beyond the frame
         if session.awaiting_landing is not None:
             self.tool.place_landing(fx, fy)
+        elif session.awaiting_hit is not None:
+            self.tool.place_hit(fx, fy)
+        elif session.awaiting_candidate is not None:
+            self.tool.place_candidate(fx, fy)
         elif self.tool.set_point(fx, fy):
             self.tool.move(1)
 

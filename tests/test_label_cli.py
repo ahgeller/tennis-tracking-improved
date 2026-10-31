@@ -40,9 +40,21 @@ def test_qt_backend_says_what_to_install_when_the_windows_are_not_qts(capsys):
 def test_open_sources_keeps_the_names_and_drops_clips_that_are_not_ready(tmp_path):
     ready = source("b")
     with patch.object(label_cli, "expand_clip_ranges", return_value=["a", "b"]), \
-            patch.object(label_cli, "build_source", side_effect=lambda name, videos, labels: ready if name == "b" else None):
-        names, sources = open_sources(build_parser().parse_args(["a..b"]))
+            patch.object(label_cli, "build_source", side_effect=lambda name, videos, labels, candidates, model:
+                         ready if name == "b" else None):
+        names, sources = open_sources(build_parser().parse_args(["a..b", "--candidates", str(tmp_path / "none")]))
     assert names == ["a", "b"] and sources == [ready]
+
+
+def test_the_labels_default_to_the_label_home_and_a_run_folder_is_passed_only_when_it_is_there(tmp_path):
+    from finetune.data import workspace as ws
+
+    assert build_parser().parse_args(["a"]).labels == ws.label_home()
+    seen = []
+    with patch.object(label_cli, "expand_clip_ranges", return_value=["a"]),             patch.object(label_cli, "build_source", side_effect=lambda *args: seen.append(args[3:])):
+        open_sources(build_parser().parse_args(["a", "--candidates", str(tmp_path / "missing")]))
+        open_sources(build_parser().parse_args(["a", "--candidates", str(tmp_path), "--model", "m"]))
+    assert seen == [(None, "gridtracknet"), (tmp_path, "m")]
 
 
 def test_a_single_clip_resumes_where_it_was_and_a_run_at_the_first_unfinished_frame():

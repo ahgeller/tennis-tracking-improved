@@ -8,8 +8,10 @@ Every label frame comes up with the mark drawn and the mouse on it: SPACE if the
 ball, a click where the ball is if not, v if there is no ball. Every key, the grid and sheet
 views, and what the marks, hints and badges mean: finetune/labeling/LABEL_TOOL.md (the bar at the bottom
 of the window names the keys that matter on the frame you are on). Output is
-labels/<clip>_ball.csv, with progress in labels/<clip>_ball.review.json and the landings marked
-with / in labels/<clip>_bounces.csv, autosaved.
+labels/<clip>_ball.csv, with progress in labels/<clip>_ball.review.json, the landings marked
+with / in labels/<clip>_bounces.csv, the hits marked with . in labels/<clip>_hits.csv and the
+rallies marked with [ and ] in labels/<clip>_rallies.csv, autosaved. --players and --court open
+the player identity and court keypoint views (label_players, label_court).
 
 ``Tool`` is the actions - the edits and the navigation the keys name (``label_keys``), the window,
 the picture and the loop; the state they act on is one ``LabelSession`` (``label_session``), which
@@ -30,18 +32,22 @@ if __name__ == "__main__":          # run as a script: make the repository root 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     import finetune  # noqa: F401,E402  (which puts system/ on sys.path)
 
-from finetune.data.bounce_labels import between_frames
+from finetune.data.event_labels import HITTERS
 from finetune.labeling import label_window as win
+from finetune.labeling.label_candidates import nearest_row
 from finetune.labeling.label_cursor import CursorPlacer
 from finetune.labeling.label_draw import FILTERS
 from finetune.labeling.label_frame_view import FrameView
 from finetune.labeling.label_grid import GridView
 from finetune.labeling.label_keys import KeyHandler
 from finetune.labeling.label_mouse import MouseHandler
+from finetune.labeling.label_court import CourtView
+from finetune.labeling.label_players import PlayerView
 from finetune.labeling.label_session import LabelSession
 from finetune.labeling.label_sheet import SheetView
 from finetune.labeling.label_source import Prefetcher, Source
-from finetune.labeling.label_store import (Row, rescue_unsaved, save_flags, save_landings, save_review, save_rows,
+from finetune.labeling.label_store import (Row, rescue_unsaved, save_court, save_event_review, save_flags, save_hits,
+                                           save_landings, save_players, save_rallies, save_review, save_rows,
                                            save_settings)
 from finetune.labeling.label_window import WINDOW
 from finetune.data.labels import LabelFormatError, is_visible
@@ -60,6 +66,8 @@ class Tool:
         self.frame_view = FrameView(session, self)      # the single-frame picture and HUD; see label_frame_view
         self.grid_view = GridView(session, self)        # TAB's page of crops; see label_grid
         self.sheet_view = SheetView(session, self)      # w's trajectory sheet; see label_sheet
+        self.player_view = PlayerView(session, self)    # --players: who each tracked person is; see label_players
+        self.court_view = CourtView(session, self)      # --court: the court keypoints; see label_court
         self.pointer = MouseHandler(session, self)      # what clicks and the wheel do; see label_mouse
         self.keys = KeyHandler(session, self)           # what the keys do; see label_keys
         self.prefetcher = Prefetcher(session)           # decodes ahead of the cursor while idle; see label_source
@@ -78,8 +86,9 @@ class Tool:
 
     @property
     def overview(self) -> bool:
-        """The grid or the trajectory sheet: views with no single frame under a parked mouse."""
-        return self.grid_view.active or self.sheet_view.active
+        """The grid, the trajectory sheet, the player and the court views: views with no single
+        frame under a parked mouse."""
+        return self.grid_view.active or self.sheet_view.active or self.player_view.active or self.court_view.active
 
     # ---------------------------------------------------------------- the window
     def create_window(self) -> None:
@@ -265,16 +274,23 @@ class Tool:
         flags, trail and every counter in the HUD; the frame images are keyed by identity, which
         changes when one is decoded, evicted or replaced by a placeholder. The landings are the
         clip's, not the rows', so what the view reads of them is keyed by hand: the landing this
-        frame wears and its point, whether one is waiting for its click, and how many there are."""
+        frame wears and its point, whether one is waiting for its click, and how many there are. The
+        hits, rallies and candidates the HUD, the badges and the timeline read are keyed by
+        LabelSession.marks, which every change to them bumps."""
         s = self.session
         landings = s.source.landings
         landing = s.landing_for(s.cursor)
         return (Row.revision, s.cursor, s.origin, s.scale, s.zoom, s.view_w, s.view_h, s.hud_h, s.ui, s.width,
                 s.height, s.filter, s.inset, s.trail, s.follow, s.step, s.dirty, id(s.walk), len(s.walk), s.walk_pos,
                 s.ghost, len(s.sources), id(image), id(before), s.hints.version,
-                landing, landings.get(landing) if landing is not None else None, s.awaiting_landing, len(landings))
+                landing, landings.get(landing) if landing is not None else None, s.awaiting_landing, len(landings),
+                s.marks, s.awaiting_hit, s.awaiting_candidate)
 
     def render(self) -> np.ndarray:
+        if self.player_view.active:
+            return self.player_view.render()
+        if self.court_view.active:
+            return self.court_view.render()
         if self.sheet_view.active:
             return self.sheet_view.render()
         if self.grid_view.active:
@@ -398,23 +414,16 @@ class Tool:
         session.awaiting_landing = None
         if session.frame_missing():
             return                    # a black placeholder is not a frame the ball can be seen on
-        index = session.cursor
-        row = session.rows[index]
-        landings = session.source.landings
-        worn = session.landing_for(index)
-        if worn is not None:
-            del landings[worn]        # on this frame, or between it and the next: unmarked either way
-        else:
-            placed = row.frame
-            for other in session.neighbour_frames(index):   # the previous row first: the one just marked
-                if other in landings:
-                    del landings[other]
-                    placed = between_frames(row.frame, other)
-                    break
-            landings[placed] = None
-            if not self.overview and (placed != row.frame or not row.visible):
-                session.awaiting_landing = placed   # no ball label under it: ask where it touched the ground
+        placed = session.toggle_mark(session.cursor, session.source.landings)   # LabelSession.toggle_mark
+        if placed is not None and not self.overview and self.wants_point(placed):
+            session.awaiting_landing = placed   # no ball label under it: ask where it touched the ground
         session.dirty = session.source.dirty = True
+
+    def wants_point(self, placed: float) -> bool:
+        """Whether a mark at `placed` has no ball label to take its point from: it lies between two
+        frames, or this row says there is no ball."""
+        row = self.session.rows[self.session.cursor]
+        return placed != row.frame or not row.visible
 
     def place_landing(self, x: float, y: float) -> None:
         """The click a landing with no ball label under it waits for (toggle_landing): the ball
@@ -426,7 +435,146 @@ class Tool:
             return                    # removed since, or never there: nothing to place
         session.source.landings[landing] = (float(min(max(x, 0.0), session.width - 1.0)),
                                             float(min(max(y, 0.0), session.height - 1.0)))
+        session.marks += 1
         session.dirty = session.source.dirty = True
+
+    def toggle_hit(self) -> None:
+        """.: a racket hit the ball on this frame - or, pressed again, it did not. Exactly a
+        landing's model (toggle_landing): pressed on the frame after (or before) one already marked,
+        the contact lies between the two; a hit with no ball label under it (between two frames, or
+        on a frame with no ball) waits for a click on where the racket met the ball
+        (session.awaiting_hit, MouseHandler.place_click; any other key leaves it without a point,
+        and the scorer takes the ball labels either side, event_labels.resolve_hit_points). The
+        hitter comes from the tracker's hit candidate here when there is one (its player's side of
+        the net), shown on the HIT badge; `,` changes it. The key is its own undo."""
+        session = self.session
+        session.awaiting_hit = None
+        if session.frame_missing():
+            return
+        offered = [event.hitter for event in session.open_candidates(session.cursor)
+                   if event.kind == "hit" and event.hitter is not None]
+        placed = session.toggle_mark(session.cursor, session.source.hits)
+        if placed is None:
+            session.source.hitters = {frame: who for frame, who in session.source.hitters.items()
+                                      if frame in session.source.hits}
+        else:
+            if offered:
+                session.source.hitters[placed] = offered[0]
+            if not self.overview and self.wants_point(placed):
+                session.awaiting_hit = placed   # no ball label under it: ask where the racket met it
+        session.dirty = session.source.dirty = True
+
+    def place_hit(self, x: float, y: float) -> None:
+        """The click a hit with no ball label under it waits for (toggle_hit): the racket met the
+        ball at (x, y). The frame stays up."""
+        session = self.session
+        hit, session.awaiting_hit = session.awaiting_hit, None
+        if hit is None or hit not in session.source.hits:
+            return
+        session.source.hits[hit] = (float(min(max(x, 0.0), session.width - 1.0)),
+                                    float(min(max(y, 0.0), session.height - 1.0)))
+        session.marks += 1
+        session.dirty = session.source.dirty = True
+
+    def place_candidate(self, x: float, y: float) -> None:
+        """The click a landing or hit candidate between two label frames waits for once ; has come
+        to it (jump_candidate): the tracker was right, and the ball touched the ground (or met the
+        racket) at (x, y). The mark is placed between the two frames with that point, as / (or .)
+        on both frames and a click would place it; the frame stays up."""
+        session = self.session
+        event, session.awaiting_candidate = session.awaiting_candidate, None
+        if event is None or session.frame_missing():
+            return
+        kind = "landing" if event.kind == "landing" else "hit"
+        marks = session.source.landings if kind == "landing" else session.source.hits
+        between = session.candidate_between(session.cursor, kind)
+        if between is None or session.mark_for(session.cursor, marks) is not None:
+            return                    # answered or marked meanwhile: nothing to confirm
+        marks[between] = (float(min(max(x, 0.0), session.width - 1.0)), float(min(max(y, 0.0), session.height - 1.0)))
+        if kind == "hit" and event.hitter is not None:
+            session.source.hitters[between] = event.hitter
+        session.marks += 1
+        session.dirty = session.source.dirty = True
+
+    def cycle_hitter(self) -> None:
+        """,: who hit the ball on this frame's hit: near, far, not said, round again. A frame
+        without a hit is left alone (. marks one)."""
+        session = self.session
+        hit = session.hit_for(session.cursor)
+        if hit is None:
+            print("[hit ] no hit on this frame to name the hitter of: . marks one")
+            return
+        order = (None,) + HITTERS
+        hitter = order[(order.index(session.source.hitters.get(hit)) + 1) % len(order)]
+        if hitter is None:
+            session.source.hitters.pop(hit, None)
+        else:
+            session.source.hitters[hit] = hitter
+        session.marks += 1
+        session.dirty = session.source.dirty = True
+
+    def toggle_rally(self, kind: str) -> None:
+        """[ / ]: a rally starts / ends on this frame - or, pressed again, it does not. A frame is
+        never both: marking one way takes the other off. The marks pair up into rallies when they
+        are saved (event_labels.pair_rally_marks)."""
+        session = self.session
+        if session.frame_missing():
+            return
+        frame = session.rows[session.cursor].frame
+        source = session.source
+        marks, other = (source.rally_starts, source.rally_ends) if kind == "start" else (source.rally_ends, source.rally_starts)
+        if frame in marks:
+            marks.discard(frame)
+        else:
+            marks.add(frame)
+            other.discard(frame)
+        session.marks += 1
+        session.dirty = source.dirty = True
+
+    def reject_candidates(self) -> None:
+        """Backslash: the tracker's candidates on this frame are not events: they are rejected (kept in the
+        clip's event review file, so they do not come round again) and the next open candidate
+        comes up. On a frame whose candidates are all answered, the ones rejected here open again."""
+        session = self.session
+        changed = session.reject_candidates(session.cursor)
+        if changed == 0:
+            print("[cand] no candidate on this frame (; goes to the next one)")
+            return
+        session.dirty = session.source.dirty = True
+        if changed < 0:
+            print(f"[cand] {-changed} candidate(s) on frame {session.rows[session.cursor].frame} open again")
+            return
+        self.jump_candidate(1)
+
+    def jump_candidate(self, direction: int) -> bool:
+        """; / SHIFT+;: the next / previous frame wearing a candidate nobody has answered yet. False,
+        with a note, when there is none that way."""
+        session = self.session
+        index = session.next_candidate(direction)
+        if index is None:
+            left = session.open_candidate_count()
+            print("[cand] " + (f"no open candidate that way ({left} left the other way)" if left else
+                               "every candidate is answered" if any(s.candidates for s in session.sources) else
+                               "no candidates: open the clip with --candidates <pipeline run folder>"))
+            return False
+        session.direction = direction
+        session.set_cursor(index)
+        self.follow_ball()
+        if not self.overview:         # a landing or hit between two label frames: its click confirms it
+            session.awaiting_candidate = next(
+                (event for event in session.open_candidates(index) if event.kind in ("landing", "hit")
+                 and session.candidate_between(index, event.kind) is not None
+                 and session.mark_for(index, session.source.landings if event.kind == "landing"
+                                      else session.source.hits) is None), None)
+        return True
+
+    def go_to_frame(self, frame: float) -> None:
+        """Put the cursor on the label row of this clip nearest source frame `frame` (a click on the
+        timeline)."""
+        session = self.session
+        source = session.source
+        session.set_cursor(source.start + nearest_row([row.frame for row in source.rows], frame))
+        self.follow_ball()
 
     def confirm(self, take_offer: bool = True) -> None:
         """SPACE: the mark on screen is right. When that mark was a suggestion on offer, the label
@@ -509,7 +657,8 @@ class Tool:
     # ---------------------------------------------------------------- saving
     def save(self, quiet: bool = False) -> None:
         """Write back every clip that has changed - and only those, so an untouched clip is left alone:
-        its labels, its review and flag sidecars and its landings (label_store.save_landings).
+        its labels, its review and flag sidecars, its landings, hits and rallies, the candidates
+        rejected, and the player and court labels when their views have loaded them (label_store).
 
         The clip you are in gets its review file refreshed even with no edits, so quitting after
         only stepping through frames still resumes where you stopped rather than where you last
@@ -530,6 +679,13 @@ class Tool:
                 save_review(source.review, source.rows, source.cursor, session.zoom)
                 save_flags(source.suspects, source.rows)
                 save_landings(source.bounces, source.landings)
+                save_hits(source.hits_path, source.hits, source.hitters)
+                save_rallies(source.rallies_path, source.rally_starts, source.rally_ends)
+                save_event_review(source.events_review, source.rejected)
+                if source.players is not None:          # only what a view loaded is written back
+                    save_players(source.players_path, source.players)
+                if source.court is not None:
+                    save_court(source.court_path, source.court)
             except (OSError, LabelFormatError) as error:
                 # Another program has the file open, most likely (or a sidecar was damaged under
                 # us). Keep the edits in memory and keep going: the next autosave tries again, and
@@ -545,9 +701,12 @@ class Tool:
         self.last_save = time.monotonic()
         if not quiet and written:
             for source in written:
+                extras = [f"{len(marks)} {name}(s)" for name, marks in
+                          (("landing", source.landings), ("hit", source.hits), ("rally start", source.rally_starts),
+                           ("rally end", source.rally_ends)) if marks]
                 print(f"[save] {source.out_csv.name} ({sum(r.visible for r in source.rows)} visible, "
                       f"{sum(r.reviewed for r in source.rows)}/{len(source.rows)} reviewed"
-                      f"{f', {len(source.landings)} landing(s)' if source.landings else ''})")
+                      f"{''.join(', ' + extra for extra in extras)})")
 
     def rescue_unsaved(self) -> None:
         """At exit, the labels of every clip that still could not be written go beside the real
@@ -564,7 +723,7 @@ class Tool:
         self.follow_ball()            # first, so a run resumed mid-way draws with that clip's size
         self.show()
         cv2.waitKey(1)
-        if not self.grid_view.active:
+        if not self.overview:
             self.mouse.calibrate()
         session.hints.start(lambda: session.source)
         try:

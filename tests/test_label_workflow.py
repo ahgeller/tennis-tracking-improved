@@ -402,6 +402,11 @@ def clip_files(clip, folder):
     clip.review = folder / f"{clip.clip}_ball.review.json"
     clip.suspects = folder / f"{clip.clip}_ball.suspect.json"
     clip.bounces = folder / f"{clip.clip}_bounces.csv"
+    clip.hits_path = folder / f"{clip.clip}_hits.csv"
+    clip.rallies_path = folder / f"{clip.clip}_rallies.csv"
+    clip.events_review = folder / f"{clip.clip}_events.review.json"
+    clip.players_path = folder / f"{clip.clip}_players.csv"
+    clip.court_path = folder / f"{clip.clip}_court.csv"
     return clip
 
 
@@ -1226,7 +1231,8 @@ def test_a_no_ball_draft_with_a_sure_hint_offers_it():
 # grid's and the sheet's are mocked on their views under the names the table has always used.
 TOOL_HANDLERS = ("save", "confirm", "move", "jump", "jump_disputed", "take_suggestion", "mark_invisible", "accept_run",
                  "nudge", "zoom_key", "toggle_fullscreen", "remember_settings", "toggle_follow", "cycle_filter",
-                 "toggle_inset", "follow_ball", "toggle_landing")
+                 "toggle_inset", "follow_ball", "toggle_landing", "toggle_hit", "cycle_hitter", "toggle_rally",
+                 "jump_candidate", "reject_candidates")
 VIEW_HANDLERS = {GridView: {"toggle": "toggle_grid", "toggle_size": "toggle_grid_size", "confirm_page": "confirm_grid",
                             "page": "grid_page", "step": "grid_step", "select": "grid_select", "prepare": "prepare_grid"},
                  SheetView: {"toggle": "toggle_sheet", "page": "sheet_page"}}
@@ -1269,7 +1275,10 @@ PLAIN_BINDINGS = (
     + [(key, [call.move(1)]) for key in FORWARD] + [(key, [call.move(-1)]) for key in BACKWARD]
     + [(key, []) for key in keys("1", "2", "4", "6", "8")]       # the step, checked below
     + [(ord("f"), [call.jump(1)]), (ord("b"), [call.jump(-1)]), (ord("u"), [call.follow_ball()]),
-       (ord("/"), [call.toggle_landing()])]
+       (ord("/"), [call.toggle_landing()]), (ord("."), [call.toggle_hit()]), (ord(","), [call.cycle_hitter()]),
+       (ord("["), [call.toggle_rally("start")]), (ord("]"), [call.toggle_rally("end")]),
+       (ord(";"), [call.jump_candidate(1)]), (ord(":"), [call.jump_candidate(-1)]),
+       (ord("\\"), [call.reject_candidates()])]
     + nudges(1.0) + nudges(.25, "IJKL")
     + [(key, [call.zoom_key(1.0)]) for key in keys("+", "=")] + [(key, [call.zoom_key(-1.0)]) for key in keys("-", "_")]
     + [(ord("m"), [call.toggle_fullscreen()]), (ord("t"), [call.remember_settings()]), (ord("g"), [call.toggle_follow()]),
@@ -1291,6 +1300,7 @@ GRID_BINDINGS = (
        (ord("v"), [call.mark_invisible()]),
        (ord("f"), [call.jump(1), call.prepare_grid(0)]), (ord("b"), [call.jump(-1), call.prepare_grid(0)]),
        (ord("u"), [call.follow_ball()]), (ord("/"), [call.toggle_landing()])]
+    + [(key, []) for key in keys("[", "]", ";", ":", "\\")]       # the single frame's event keys: not here
     + nudges(1.0) + nudges(.25, "IJKL")
     + [(key, []) for key in keys("+", "=", "-", "_")]            # the grid's own zoom, checked below
     + [(ord("m"), [call.toggle_fullscreen()]), (ord("t"), [call.remember_settings()]), (ord("g"), [call.toggle_follow()]),
@@ -1301,7 +1311,7 @@ SHEET_BINDINGS = (
     + [(ord("w"), [call.toggle_sheet()]), (9, [call.toggle_sheet(), call.toggle_grid()])]
     + [(key, [call.sheet_page(1)]) for key in FORWARD] + [(key, [call.sheet_page(-1)]) for key in BACKWARD]
     + [(key, []) for key in keys(" ", 13, "c", "e", "y", "x", "v", "r", "1", "f", "b", "u", "i", "I", "+", "-",
-                                 "m", "t", "g", "h", "o", "s", "z", ",", ".", "/")]
+                                 "m", "t", "g", "h", "o", "s", "z", ",", ".", "/", "[", "]", ";", "\\")]
 )
 BINDINGS = {"plain": PLAIN_BINDINGS, "grid": GRID_BINDINGS, "sheet": SHEET_BINDINGS}
 

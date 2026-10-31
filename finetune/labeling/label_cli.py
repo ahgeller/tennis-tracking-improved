@@ -18,14 +18,28 @@ from finetune.labeling.label_source import Source, build_source, expand_clip_ran
 from finetune.labeling.label_store import SETTINGS_NAME, Settings, load_settings
 from finetune.labeling.label_tool import Tool
 from finetune.data import workspace as ws
+from finetune.scoring.tracker_events import RUN_MODEL
+
+CANDIDATES = ws.DEFAULT_WORKSPACE.parent / "output" / "label_candidates"   # the pipeline run candidates come from
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The command line; the folder defaults are the workspace's as it is now (``TENNIS_WORKSPACE``)."""
+    """The command line; the folder defaults are the workspace's as it is now (``TENNIS_WORKSPACE``),
+    except the labels: their default is the label home (``workspace.label_home``), the main
+    checkout's labels even when the tool is run from a worktree, so the work never lands in a copy."""
     parser = argparse.ArgumentParser(description=label_tool.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("clips", nargs="+", help="Clip stem(s), or a range like video22..video53")
     parser.add_argument("--videos", type=Path, default=ws.current().videos)
-    parser.add_argument("--labels", type=Path, default=ws.current().labels)
+    parser.add_argument("--labels", type=Path, default=ws.label_home(),
+                        help="Where the labels are read and written (default: the main checkout's, %(default)s)")
+    parser.add_argument("--candidates", type=Path, default=CANDIDATES,
+                        help="A pipeline run folder (evaluate_archive.py --mode pipeline --court --out-dir): its "
+                             "landings, hits and rallies are offered as candidates, its tracks and court keypoints "
+                             "feed --players and --court (default: %(default)s)")
+    parser.add_argument("--model", default=RUN_MODEL, help="The model name in the run's JSON names (default: %(default)s)")
+    views = parser.add_mutually_exclusive_group()
+    views.add_argument("--players", action="store_true", help="Say who each tracked person is, segment by segment")
+    views.add_argument("--court", action="store_true", help="Mark or correct the court keypoints on a few frames per clip")
     parser.add_argument("--zoom", type=float, default=None, help="Starting zoom (default: last used, else 2)")
     parser.add_argument("--grid", action="store_true", help="Review a page of enlarged ball crops together (z: 8 or 16); TAB toggles this view")
     parser.add_argument("--uncertain", action="store_true",
@@ -52,8 +66,11 @@ def open_sources(args: argparse.Namespace) -> Tuple[List[str], List[Source]]:
     """The clip names the command line expands to and the sources that are ready among them; a
     bad range is a ValueError naming it."""
     names = expand_clip_ranges(args.clips, args.labels)
-    sources = [source for source in (build_source(name, args.videos, args.labels) for name in names)
-               if source is not None]
+    candidates = args.candidates if args.candidates.is_dir() else None
+    if candidates is None:
+        print(f"[cand] no pipeline run at {args.candidates}: no candidates, and --players / --court start blank")
+    sources = [source for source in (build_source(name, args.videos, args.labels, candidates, args.model)
+                                     for name in names) if source is not None]
     return names, sources
 
 
@@ -81,8 +98,13 @@ def main() -> int:
     session.zoom_target = session.zoom
     tool.settings_path = args.labels / SETTINGS_NAME
     apply_settings(tool, load_settings(tool.settings_path))
+    print(f"[labels] {args.labels}")
     announce(session, sources, names, args.uncertain)
-    if args.grid:
+    if args.players:
+        tool.player_view.open()
+    elif args.court:
+        tool.court_view.open()
+    elif args.grid:
         tool.grid_view.toggle()
     tool.run()
     return 0

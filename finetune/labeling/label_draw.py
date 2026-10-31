@@ -22,6 +22,8 @@ DRAFT_MARK = (160, 160, 160)     # the draft label's ticks while the suggestion 
 GHOST = (255, 200, 0)            # the dashed guess on a frame with no ball, and its dot in the inset
 LANDING = (255, 190, 80)         # the badge of a frame marked as a landing (/), in the frame view and on its tile
 LANDING_BETWEEN = "LANDING 1/2"  # ... worn by both frames a landing lies between (Hershey fonts have no half sign)
+HIT = (90, 110, 250)             # the badge of a frame marked as a hit (.), and its tick on the timeline
+RALLY = (170, 190, 40)           # a rally's start and end badges (the [ and ] keys), and its bar on the timeline
 
 Colour = Tuple[int, int, int]
 
@@ -172,13 +174,50 @@ def landing_badge(landing: Optional[float], frame: int) -> Optional[str]:
     return "LANDING" if landing == frame else LANDING_BETWEEN
 
 
-def draw_landing_point(image: np.ndarray, px: int, py: int, ui: float) -> None:
-    """Where the ball touched the ground, as clicked for a landing with no ball label under it: a
-    small tilted cross in the landing colour, so it cannot be mistaken for the ball mark."""
+def hit_badge(hit: Optional[float], frame: int, hitter: Optional[str]) -> Optional[str]:
+    """The text of the HIT badge a frame wears for `hit` (``LabelSession.hit_for``): HIT on the
+    hit's own frame, HIT 1/2 when it lies between this frame and the next or previous one, with
+    the hitter after it when one was said; None when the frame wears none."""
+    if hit is None:
+        return None
+    text = "HIT" if hit == frame else "HIT 1/2"
+    return f"{text} {hitter.upper()}" if hitter else text
+
+
+def draw_outline_badge(image: np.ndarray, text: str, colour: Colour, ui: float,
+                       right_edge: Optional[int] = None) -> Tuple[int, int, int, int]:
+    """A badge drawn as an outline on a dark fill, in `colour`: what a suggestion wears beside the
+    filled badges of labels (draw_badge, whose placement it shares). Returns its box."""
+    (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui, 2)
+    if right_edge is None:
+        left = int(10 * ui)
+    else:
+        left = right_edge - text_w - int(26 * ui)
+    box = ((left, int(10 * ui)), (left + text_w + int(16 * ui), int(24 * ui) + text_h))
+    cv2.rectangle(image, box[0], box[1], (25, 25, 25), -1)
+    cv2.rectangle(image, box[0], box[1], colour, max(1, int(round(ui))))
+    cv2.putText(image, text, (left + int(8 * ui), int(17 * ui) + text_h), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui,
+                colour, 2, cv2.LINE_AA)
+    return box[0][0], box[0][1], box[1][0], box[1][1]
+
+
+def draw_landing_point(image: np.ndarray, px: int, py: int, ui: float, colour: Colour = LANDING) -> None:
+    """Where the ball touched the ground, as clicked for a landing with no ball label under it (or
+    met the racket, for a hit, in HIT): a small tilted cross, so it cannot be mistaken for the ball
+    mark."""
     size = max(6, int(round(7 * ui)))
     thin = max(1, int(round(ui)))
     cv2.drawMarker(image, (px, py), (0, 0, 0), cv2.MARKER_TILTED_CROSS, size + 2, thin + 2, cv2.LINE_AA)
-    cv2.drawMarker(image, (px, py), LANDING, cv2.MARKER_TILTED_CROSS, size, thin, cv2.LINE_AA)
+    cv2.drawMarker(image, (px, py), colour, cv2.MARKER_TILTED_CROSS, size, thin, cv2.LINE_AA)
+
+
+def draw_candidate_point(image: np.ndarray, px: int, py: int, ui: float, colour: Colour) -> None:
+    """Where the tracker put a landing or hit nobody has answered yet: a ring of short dashes in the
+    kind's colour, a suggestion beside the solid marks of labels."""
+    radius = max(7, int(round(9 * ui)))
+    thin = max(1, int(round(ui)))
+    for start in range(0, 360, 45):
+        cv2.ellipse(image, (px, py), (radius, radius), 0, start, start + 25, colour, thin, cv2.LINE_AA)
 
 
 def review_badge(row: Row) -> Optional[Tuple[str, Colour]]:
@@ -241,3 +280,23 @@ def fit_text(text: str, width: int, scale: float, thin: int) -> str:
     if original[len(text):len(text) + 1] not in (" ", "") and " " in text.strip():
         text = text[:text.rstrip().rfind(" ")]
     return text.rstrip()
+
+
+def fit_picture(image: np.ndarray, width: int, height: int) -> Tuple[np.ndarray, float, int, int]:
+    """`image` scaled to fit inside `width` x `height` with its aspect kept: the scaled picture, the
+    scale, and the offsets that centre it in the box."""
+    scale = min(width / image.shape[1], height / image.shape[0])
+    shown_w, shown_h = max(1, int(round(image.shape[1] * scale))), max(1, int(round(image.shape[0] * scale)))
+    resized = cv2.resize(image, (shown_w, shown_h), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+    return resized, shown_w / image.shape[1], (width - shown_w) // 2, (height - shown_h) // 2
+
+
+def hud_text(hud: np.ndarray, line1: str, line2: str, ui: float) -> None:
+    """The two text lines of an overview's HUD (the sheet's, the player and court views'), each cut
+    to the strip's width: the state in white, the keys under it in grey."""
+    thin = max(1, int(round(ui)))
+    width = hud.shape[1] - int(16 * ui)
+    cv2.putText(hud, fit_text(line1, width, 0.55 * ui, thin), (int(8 * ui), int(22 * ui)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55 * ui, (255, 255, 255), thin, cv2.LINE_AA)
+    cv2.putText(hud, fit_text(line2, width, 0.48 * ui, thin), (int(8 * ui), int(46 * ui)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48 * ui, (180, 180, 180), thin, cv2.LINE_AA)

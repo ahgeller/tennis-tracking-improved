@@ -31,7 +31,9 @@ def fake_source(clip: str, count: int = 6, width: int = 640, height: int = 360, 
         row.clip = clip
     capture = SimpleNamespace(release=lambda: None, isOpened=lambda: False)
     fields = dict(clip=clip, rows=rows, width=width, height=height, frame_cache={}, dirty=False, cursor=0, start=0,
-                  missing=set(), saved_cursor=0, capture=capture, position=0, release=lambda: None, landings={})
+                  missing=set(), saved_cursor=0, capture=capture, position=0, release=lambda: None, landings={},
+                  hits={}, hitters={}, rally_starts=set(), rally_ends=set(), rejected={}, candidates=None,
+                  players=None, court=None, run=None)
     return SimpleNamespace(**{**fields, **extra})
 
 

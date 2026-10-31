@@ -1,0 +1,258 @@
+"""The label tool's player identity view (--players) and court view (--court), headless: segments
+cut from a small pipeline run, who they are said to be, the court's points pre-filled from the run,
+moved and confirmed, and the files both are saved to. Every file is under tmp_path; no video is
+decoded (the crop reader is not started)."""
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import cv2
+import numpy as np
+import pytest
+
+from finetune.data.court_labels import GROUND_POINTS, read_court_labels
+from finetune.data.player_labels import PlayerBoxLabel, read_player_labels
+from finetune.labeling import label_players
+from finetune.labeling import label_window as win
+from finetune.labeling.label_players import Segment, appearance, cut_segments, split_at_labels
+from finetune.labeling.label_tool import Tool
+from _workspace_helpers import fake_source, fake_tool
+
+WIDTH, HEIGHT = 1280, 720
+
+
+def run_json(path: Path, frames: int = 40, court=None, tracks=None) -> Path:
+    """A pipeline run's JSON at 30 FPS: track 1 on every frame, track 2 from frame 0 to 9 and again
+    from 30 (a gap over 0.5 s), the court on every frame."""
+    rows = []
+    for frame in range(frames):
+        boxes = {"1": [100.0, 300.0, 160.0, 460.0]}
+        if frame < 10 or frame >= 30:
+            boxes["2"] = [700.0, 100.0, 740.0, 200.0]
+        if tracks is not None:
+            boxes = tracks(frame)
+        rows.append({"frame": frame, "player_boxes": boxes, "court_keypoints": court})
+    path.write_text(json.dumps({"video": {"fps": 30.0, "width": WIDTH, "height": HEIGHT}, "frames": rows,
+                                "court_events": {"contacts": [], "rally_legs": []}}), encoding="utf-8")
+    return path
+
+
+def clip(tmp_path, frames=40, court=None):
+    source = fake_source("clip", frames, WIDTH, HEIGHT)
+    source.run = run_json(tmp_path / "clip_gridtracknet.json", frames, court)
+    source.players_path, source.court_path = tmp_path / "clip_players.csv", tmp_path / "clip_court.csv"
+    for attribute, suffix in (("out_csv", "_ball.csv"), ("review", "_ball.review.json"), ("suspects", "_ball.suspect.json"),
+                              ("bounces", "_bounces.csv"), ("hits_path", "_hits.csv"), ("rallies_path", "_rallies.csv"),
+                              ("events_review", "_events.review.json")):
+        setattr(source, attribute, tmp_path / f"clip{suffix}")
+    source.video = tmp_path / "clip.mp4"
+    return source
+
+
+def press(tool, key, shift=False):
+    code = key if isinstance(key, int) else ord(key)
+    with patch.object(Tool, "view_ready", return_value=True), patch.object(win, "shift_held", return_value=shift), \
+            patch.object(win, "non_character_key", return_value=False):
+        tool.keys.handle(code)
+
+
+def mouse(tool, event, x, y, flags=0):
+    tool.pointer.on_mouse(event, x, y, flags, None)
+
+
+# --------------------------------------------------------------------------- segments
+
+def test_tracks_are_cut_into_segments_at_every_gap_over_half_a_second():
+    boxes = {frame: {"1": [0, 0, 1, 1]} for frame in range(20)}
+    for frame in (0, 1, 2, 30, 31):
+        boxes.setdefault(frame, {})["2"] = [5, 5, 6, 6]
+    segments = cut_segments(boxes, 30.0)
+    assert [(s.track, s.first, s.last) for s in segments] == [("1", 0, 19), ("2", 0, 2), ("2", 30, 31)]
+    assert segments[0].samples()[0] == 0 and segments[0].samples()[-1] == 19 and len(segments[0].samples()) == 12
+
+
+def test_a_segment_is_split_where_its_labels_change_identity():
+    segment = Segment("7", [0, 1, 2, 3, 4], {f: (0.0, 0.0, 1.0, 1.0) for f in range(5)})
+    labels = {(f, "7"): PlayerBoxLabel(f, "P1" if f < 2 else "P2", (0.0, 0.0, 1.0, 1.0), "7") for f in range(4)}
+    parts = split_at_labels([segment], labels)
+    assert [(p.first, p.last) for p in parts] == [(0, 1), (2, 3), (4, 4)]
+
+
+def test_appearance_tells_two_shirts_apart():
+    red = np.zeros((176, 80, 3), np.uint8)
+    red[:] = (40, 40, 220)
+    blue = np.zeros_like(red)
+    blue[:] = (220, 60, 40)
+    same = cv2.compareHist(appearance([red]), appearance([red, red]), cv2.HISTCMP_CORREL)
+    other = cv2.compareHist(appearance([red]), appearance([blue]), cv2.HISTCMP_CORREL)
+    assert same > 0.99 and other < 0.2 and appearance([]) is None
+
+
+# --------------------------------------------------------------------------- the player view
+
+def open_players(tmp_path):
+    source = clip(tmp_path)
+    tool = fake_tool(source)
+    with patch.object(label_players.CropReader, "start"):
+        tool.player_view.open()
+    return tool, source
+
+
+def test_the_player_view_shows_the_runs_segments_and_the_keys_say_who_they_are(tmp_path):
+    tool, source = open_players(tmp_path)
+    view = tool.player_view
+    assert tool.overview and [(s.track, s.first, s.last) for s in view.segments] == [("1", 0, 39), ("2", 0, 9), ("2", 30, 39)]
+    press(tool, "1")
+    assert view.identity(view.segments[0]) == "P1" and view.selected == 1        # and on to the next
+    assert len(source.players) == 40 and source.dirty
+    assert view.suggestion(1) == "P2"                                            # P1 is on court with it
+    press(tool, " ")
+    assert view.identity(view.segments[1]) == "P2"
+    press(tool, "0")
+    assert view.identity(view.segments[2]) == "none" and view.selected == 2      # the last one stays up
+    press(tool, "u")
+    assert view.identity(view.segments[2]) is None
+    canvas = tool.render()
+    assert canvas.shape == (tool.session.view_h + tool.session.hud_h, tool.session.view_w, 3)
+
+
+def test_player_labels_are_saved_per_box_and_a_split_comes_back_when_reopened(tmp_path):
+    tool, source = open_players(tmp_path)
+    view = tool.player_view
+    tool.render()
+    index, frame, x0, y0, x1, y1 = next(box for box in view.crop_boxes if box[0] == 0 and box[1] > 0)
+    mouse(tool, cv2.EVENT_RBUTTONDOWN, (x0 + x1) // 2, (y0 + y1) // 2)            # split track 1 at that crop
+    assert [(s.first, s.last) for s in view.segments[:2]] == [(0, frame - 1), (frame, 39)]
+    view.select(0)
+    press(tool, "1")
+    press(tool, "2")
+    tool.save(quiet=True)
+    saved = read_player_labels(source.players_path)
+    assert {label.player for label in saved if label.frame < frame} == {"P1"}
+    assert {label.player for label in saved if label.frame >= frame and label.track == "1"} == {"P2"}
+    assert saved[0].box == (100.0, 300.0, 160.0, 460.0) and saved[0].track == "1"
+    source.players = None
+    with patch.object(label_players.CropReader, "start"):
+        view.open()
+    assert [(s.track, s.first, s.last) for s in view.segments][:2] == [("1", 0, frame - 1), ("1", frame, 39)]
+    assert view.selected == 2                                                     # the first one not yet said
+
+
+def test_without_a_run_the_player_view_says_how_to_get_one(tmp_path):
+    source = clip(tmp_path)
+    source.run = None
+    tool = fake_tool(source)
+    tool.player_view.open()
+    assert tool.player_view.message and "--candidates" in tool.player_view.message
+    tool.render()
+    press(tool, "1")                                                              # nothing to assign: no harm
+    assert source.players is None
+
+
+# --------------------------------------------------------------------------- the court view
+
+COURT = [300, 200, 980, 200, 100, 650, 1180, 650, 380, 200, 180, 650, 900, 200, 1100, 650,
+         360, 280, 920, 280, 220, 560, 1060, 560, 640, 280, 640, 560]
+
+
+def open_court(tmp_path, court=COURT):
+    source = clip(tmp_path, court=court)
+    tool = fake_tool(source)
+    tool.court_view.open()
+    return tool, source
+
+
+def test_the_court_view_starts_from_the_runs_points_and_space_confirms_them(tmp_path):
+    tool, source = open_court(tmp_path)
+    view = tool.court_view
+    assert view.frames == [0, 10, 20, 29, 39] and view.frame == 0
+    assert view.points()["far_left"] == (300.0, 200.0) and len(view.points()) == 14
+    assert source.court == {}                                                    # shown, not labelled
+    press(tool, " ")
+    assert set(source.court[0]) == set(GROUND_POINTS) and view.frame == 10 and source.dirty
+    tool.save(quiet=True)
+    (label,) = read_court_labels(source.court_path)
+    assert label.frame == 0 and label.points["near_centre"] == (640.0, 560.0)
+
+
+def test_points_are_moved_by_nudge_drag_and_click_and_undone(tmp_path):
+    tool, _ = open_court(tmp_path)
+    view = tool.court_view
+    press(tool, "l")
+    press(tool, "k", shift=True)
+    assert view.points()["far_left"] == (301.0, 200.25)
+    press(tool, "u")
+    assert view.points()["far_left"] == (301.0, 200.0)
+    tool.render()
+    sx, sy = view.to_screen(*view.points()["near_right"])
+    mouse(tool, cv2.EVENT_LBUTTONDOWN, sx, sy)                                    # picks near_right up
+    mouse(tool, cv2.EVENT_MOUSEMOVE, sx - 20, sy - 10, cv2.EVENT_FLAG_LBUTTON)
+    mouse(tool, cv2.EVENT_LBUTTONUP, sx - 20, sy - 10)
+    moved = view.points()["near_right"]
+    assert view.selected == GROUND_POINTS.index("near_right") and moved[0] < 1180.0 and moved[1] < 650.0
+    press(tool, "u")                                                              # the whole drag is one step
+    assert view.points()["near_right"] == (1180.0, 650.0)
+    for _ in range(GROUND_POINTS.index("near_right"), 14):                       # select the left net post
+        press(tool, ".")
+    assert view.selected == 14
+    mouse(tool, cv2.EVENT_LBUTTONDOWN, 40, 40)                                    # a click away from every point
+    assert "net_post_left" in view.points()
+    press(tool, "v")                                                              # not visible after all
+    assert "net_post_left" not in view.points()
+
+
+def test_points_outside_the_picture_are_not_written_and_frames_copy_unlabel_and_reset(tmp_path):
+    court = list(COURT)
+    court[4:6] = [-40.0, 650.0]                                                   # near_left off the picture
+    tool, source = open_court(tmp_path, court)
+    view = tool.court_view
+    press(tool, " ")
+    assert "near_left" not in source.court[0] and len(source.court[0]) == 13
+    press(tool, "r")                                                              # frame 10: the model's points
+    press(tool, "y")                                                              # ... or the last labelled frame's
+    assert view.points() == source.court[0]
+    press(tool, " ")
+    press(tool, "p")
+    press(tool, "x")
+    assert sorted(source.court) == [0]
+    tool.save(quiet=True)
+    assert [label.frame for label in read_court_labels(source.court_path)] == [0]
+
+
+def test_a_clip_without_a_run_starts_from_blank_frames(tmp_path):
+    source = clip(tmp_path)
+    source.run = None
+    tool = fake_tool(source)
+    tool.court_view.open()
+    view = tool.court_view
+    assert view.points() == {} and len(view.frames) == 5
+    press(tool, " ")                                                              # nothing to keep
+    assert source.court == {}
+    tool.render()
+    assert np.asarray(tool.render()).ndim == 3
+    with pytest.raises(StopIteration):
+        next(iter(source.court))
+
+
+def test_space_suggests_the_identity_that_looks_most_alike_among_those_not_on_court_at_the_time(tmp_path):
+    tool, source = open_players(tmp_path)
+    view = tool.player_view
+    red = np.zeros((176, 80, 3), np.uint8)
+    red[:] = (40, 40, 220)
+    blue = np.zeros_like(red)
+    blue[:] = (220, 60, 40)
+
+    def segment(track, first, last, crop):
+        frames = list(range(first, last + 1))
+        part = Segment(track, frames, {f: (1.0, 1.0, 9.0, 9.0) for f in frames})
+        part.histogram = appearance([crop])
+        return part
+    view.segments = [segment("1", 0, 9, red), segment("2", 0, 9, blue), segment("3", 20, 29, blue),
+                     segment("4", 20, 29, red)]
+    view.select(0)
+    press(tool, "1")
+    press(tool, "2")
+    assert view.suggestion(2) == "P2" and view.suggestion(3) == "P1"
+    press(tool, " ")
+    assert view.identity(view.segments[2]) == "P2"
+    assert view.suggestion(3) == "P1"                                             # P2 is on court with it now

@@ -1,6 +1,6 @@
 """The label tool's single-frame view: the frame warped to the view's zoom and origin with the
-trail, the mark and the overview inset drawn on it, and the HUD bar under it with its two text
-lines and clickable chips.
+trail, the mark, the badges and the overview inset drawn on it, and the HUD bar under it: the
+clip's timeline (``label_timeline``) and the two text lines with their clickable chips.
 
 ``FrameView`` draws from the session's rows, cursor, view geometry and suggestions (the tool's
 ``render`` decides when a redraw is due, see ``Tool.render_state``) and asks the tool for the
@@ -16,10 +16,12 @@ from typing import TYPE_CHECKING, Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from finetune.labeling.label_draw import (FILTERS, GHOST, LANDING, ChipRow, draw_badge, draw_ghost, draw_landing_point,
-                                          draw_mark, draw_ticks, enhance, fit_text, hit, label_mark_colour, landing_badge,
-                                          mark_plan, review_badge)
+from finetune.labeling.label_candidates import CANDIDATE_KEYS, CANDIDATE_TEXT
+from finetune.labeling.label_draw import (FILTERS, GHOST, HIT, LANDING, RALLY, ChipRow, draw_badge, draw_candidate_point,
+                                          draw_ghost, draw_landing_point, draw_mark, draw_outline_badge, draw_ticks, enhance,
+                                          fit_text, hit, hit_badge, label_mark_colour, landing_badge, mark_plan, review_badge)
 from finetune.labeling.label_store import Row
+from finetune.labeling.label_timeline import KIND_COLOURS, Timeline
 from finetune.refiner.refine import Suggestion
 from finetune.data.detector_metrics import REFERENCE_HEIGHT
 
@@ -44,6 +46,7 @@ class FrameView:
         self.filter_button = None     # ... and the filter and inset chips
         self.inset_button = None
         self.thumbs: Dict[tuple, np.ndarray] = {}   # (clip, frame, width) -> small copy, for the inset
+        self.timeline = Timeline(session)           # the strip along the top of the HUD
 
     # ---------------------------------------------------------------- the picture
     def draw(self, image: np.ndarray, before: Optional[np.ndarray], mode: str, row: Row,
@@ -90,6 +93,13 @@ class FrameView:
         touched = session.source.landings.get(landing) if landing is not None else None
         if touched is not None:
             draw_landing_point(display, *session.to_view(*touched), session.ui)
+        worn_hit = session.hit_for(session.cursor)
+        contact = session.source.hits.get(worn_hit) if worn_hit is not None else None
+        if contact is not None:
+            draw_landing_point(display, *session.to_view(*contact), session.ui, HIT)
+        for event in session.open_candidates(session.cursor):
+            if event.point is not None:
+                draw_candidate_point(display, *session.to_view(*event.point), session.ui, KIND_COLOURS[event.kind])
         ui = session.ui
         thin = max(1, int(round(ui)))
         if session.trail:
@@ -148,17 +158,30 @@ class FrameView:
         self.inset_box = (left, top, left + width - 1, top + height - 1)
 
     def draw_badges(self, display: np.ndarray, row: Row) -> None:
-        """The row's review badge at the top right, the LANDING badge to its left on a frame marked
-        as one (/, LANDING 1/2 on either side of a landing between two frames), and the frames-left
-        counter at the top left."""
+        """The row's review badge at the top right; to its left the LANDING badge on a frame marked
+        as one (/, LANDING 1/2 on either side of a landing between two frames), the HIT badge (.,
+        with its hitter), RALLY START or RALLY END ([ and ]), and an outlined badge for each of the
+        tracker's candidates on the frame nobody has answered yet; the frames-left counter at the
+        top left."""
         session = self.session
+        ui = session.ui
         edge = session.view_w
         badge = review_badge(row)
         if badge is not None:
-            edge = draw_badge(display, badge[0], badge[1], (0, 0, 0), session.ui, right_edge=edge)[0]
+            edge = draw_badge(display, badge[0], badge[1], (0, 0, 0), ui, right_edge=edge)[0]
         landing = landing_badge(session.landing_for(session.cursor), row.frame)
         if landing is not None:
-            draw_badge(display, landing, LANDING, (0, 0, 0), session.ui, right_edge=edge)
+            edge = draw_badge(display, landing, LANDING, (0, 0, 0), ui, right_edge=edge)[0]
+        worn_hit = session.hit_for(session.cursor)
+        hit_text = hit_badge(worn_hit, row.frame, session.source.hitters.get(worn_hit) if worn_hit is not None else None)
+        if hit_text is not None:
+            edge = draw_badge(display, hit_text, HIT, (0, 0, 0), ui, right_edge=edge)[0]
+        rally = session.rally_mark(session.cursor)
+        if rally is not None:
+            edge = draw_badge(display, f"RALLY {rally.upper()}", RALLY, (0, 0, 0), ui, right_edge=edge)[0]
+        for event in session.open_candidates(session.cursor):
+            text = CANDIDATE_TEXT[event.kind] + (f" {event.hitter.upper()}" if event.hitter else "")
+            edge = draw_outline_badge(display, text, KIND_COLOURS[event.kind], ui, right_edge=edge)[0]
         remaining = len(session.rows) - sum(r.reviewed for r in session.rows)
         counter = "ALL DONE" if remaining == 0 else f"{remaining} LEFT"
         fill, text_colour = ((70, 190, 70), (0, 0, 0)) if remaining == 0 else ((50, 50, 50), (255, 255, 255))
@@ -201,48 +224,74 @@ class FrameView:
         return state
 
     def hud_lines(self, row: Row, hint: Optional[Suggestion], offer: Optional[Suggestion]) -> Tuple[str, str]:
-        """The two text lines of the HUD: this frame (its landing mark and the clip's landing count
-        among its state), and the counts with the keys that matter - or, while a landing with no
-        ball label under it waits for its point, the ask for the click."""
+        """The two text lines of the HUD: this frame (its landing, hit and rally marks, and the
+        clip's counts of them, among its state), and the counts with the keys that matter - the
+        candidate keys on a frame wearing a candidate nobody has answered, or, while a landing with
+        no ball label under it waits for its point, the ask for the click."""
         session = self.session
-        landings = session.source.landings
+        source = session.source
         tag = "EDITED" if row.edited else "ok" if row.reviewed else "unreviewed"
         landing = landing_badge(session.landing_for(session.cursor), row.frame)
         if landing is not None:
             tag += f"  {landing}"
+        worn_hit = session.hit_for(session.cursor)
+        hit_text = hit_badge(worn_hit, row.frame, source.hitters.get(worn_hit) if worn_hit is not None else None)
+        if hit_text is not None:
+            tag += f"  {hit_text}"
+        rally = session.rally_at(session.cursor)
+        if rally is not None:
+            tag += f"  rally {rally[0]}/{rally[1]}"
+        marks = f"landings {len(source.landings)}"
+        if source.hits or source.rally_starts or source.rally_ends:
+            marks += f"  hits {len(source.hits)}  rallies {len(source.rally_starts)}"
         line1 = (f"{self.hud_place()}  frame {row.frame}  {self.hud_state(row, hint, offer)}  "
-                 f"from {row.source} {row.conf:.2f}  {tag}  zoom x{session.zoom:.1f}  landings {len(landings)}"
+                 f"from {row.source} {row.conf:.2f}  {tag}  zoom x{session.zoom:.1f}  {marks}"
                  f"{'  *unsaved*' if session.dirty else ''}")
+        open_here = session.open_candidates(session.cursor)
         if session.awaiting_landing is not None:
             keys = "CLICK WHERE THE BALL BOUNCED  /=unmark  other key=no point"
+        elif session.awaiting_hit is not None:
+            keys = "CLICK WHERE THE RACKET MET THE BALL  .=unmark  other key=no point"
+        elif session.awaiting_candidate is not None:
+            event = session.awaiting_candidate
+            keys = (f"{CANDIDATE_TEXT[event.kind]} BETWEEN FRAMES: CLICK WHERE THE "
+                    f"{'BALL BOUNCED' if event.kind == 'landing' else 'RACKET MET IT'} TO MARK IT  \\=no  ;=next")
+        elif open_here:
+            asks = "  ".join(f"{CANDIDATE_TEXT[event.kind]} {CANDIDATE_KEYS[event.kind]}=yes" for event in open_here)
+            keys = asks + "  \\=no  ;=next"
         else:
             keys = ("SPACE=take hint  x=keep draft  v=invisible" if offer is not None else
-                    "SPACE=good  y=take hint  v=invisible") + "  /=landing  r=accept run  f=uncertain  q=quit"
+                    "SPACE=good  y=take hint  v=invisible") + "  /=landing  .=hit  r=accept run  f=uncertain  q=quit"
         return line1, f"{self.hud_counts()}{keys}"
 
     def hud_counts(self) -> str:
-        """How much of the run is reviewed, uncertain, flagged and disputed, as the HUD says it."""
+        """How much of the run is reviewed, uncertain, flagged and disputed, and how many of the
+        tracker's candidates are left, as the HUD says it."""
         rows = self.session.rows
         reviewed = sum(r.reviewed for r in rows)
         uncertain_left = sum(1 for r in rows if r.uncertain and not r.reviewed)
         flagged_left = sum(1 for r in rows if r.suspect)
         disputed = self.session.disputed_count()
+        candidates = self.session.open_candidate_count()
         return (f"reviewed {reviewed}/{len(rows)}  uncertain left {uncertain_left}  "
                 f"{('flagged left ' + str(flagged_left) + '   ') if flagged_left else '  '}"
-                f"{('hint differs ' + str(disputed) + ' (e)   ') if disputed else ''}")
+                f"{('hint differs ' + str(disputed) + ' (e)   ') if disputed else ''}"
+                f"{('candidates left ' + str(candidates) + ' (;)   ') if candidates else ''}")
 
     def draw_hud(self, canvas: np.ndarray, row: Row, hint: Optional[Suggestion], offer: Optional[Suggestion]) -> None:
-        """The two text lines and the clickable chips along the bottom of the single-frame view."""
+        """The timeline, and under it the two text lines and the clickable chips, along the bottom
+        of the single-frame view."""
         session = self.session
         ui = session.ui
         thin = max(1, int(round(ui)))
-        hud = canvas[session.view_h:]
+        self.timeline.draw(canvas[session.view_h:session.view_h + session.timeline_h], session.view_h)
+        hud = canvas[session.view_h + session.timeline_h:]
         hud[:] = 0
         line1, line2 = self.hud_lines(row, hint, offer)
         # Buttons along the right end of the bar, laid out right to left and measured before the
         # two text lines, so a long clip name or a narrow window cuts the text short instead of
         # running under them. Every box is kept for click_hud: they are all clickable.
-        chips = ChipRow(hud, session.hud_h, session.view_h, ui)
+        chips = ChipRow(hud, session.hud_h - session.timeline_h, session.view_h + session.timeline_h, ui)
         pad = chips.pad
         # Lit green means on; the words stay short so the text lines keep their room
         edge, self.centre_button = chips.chip(session.view_w - pad, "g  CENTRE", session.follow)
@@ -262,7 +311,12 @@ class FrameView:
 
     # ---------------------------------------------------------------- clicks on what was drawn
     def click_hud(self, x: int, y: int) -> None:
-        """A left click on the HUD bar: the chip under it, if any."""
+        """A left click on the HUD bar: the frame under it on the timeline, or the chip under it."""
+        if y < self.session.view_h + self.session.timeline_h:
+            frame = self.timeline.frame_at(x)
+            if frame is not None:
+                self.tool.go_to_frame(frame)
+            return
         if hit(self.centre_button, x, y):
             self.tool.toggle_follow()
         elif hit(self.filter_button, x, y):

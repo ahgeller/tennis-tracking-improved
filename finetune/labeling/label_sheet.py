@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from finetune.labeling.label_draw import HINT_TRUSTED, HINT_UNSURE, fit_text
+from finetune.labeling.label_draw import HINT_TRUSTED, HINT_UNSURE, hud_text
 from finetune.labeling.label_store import Row
+from finetune.labeling.label_timeline import Timeline
 from finetune.labeling.label_window import KEY_TAB
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ class SheetView:
         self.points: List[Tuple[int, int, int]] = []   # (row index, view x, view y) of each label drawn
         self.cache_key: Optional[tuple] = None
         self.cache: Optional[np.ndarray] = None
+        self.timeline = Timeline(session)       # the clip's timeline along the top of the HUD
 
     def toggle(self) -> None:
         session = self.session
@@ -85,12 +87,12 @@ class SheetView:
         end = session.clip_bounds(self.start)[1]
         indices = list(range(self.start, min(self.start + SHEET_ROWS, end)))
         key = (tuple(indices), Row.revision, session.hints.version, session.view_w, session.view_h, session.hud_h,
-               session.cursor, session.ui)
+               session.cursor, session.ui, session.marks)
         if key == self.cache_key:
             return self.cache
         selected = session.cursor
         base = session.source.frame(rows[selected].frame)
-        ui, thin = session.ui, max(1, int(round(session.ui)))
+        ui = session.ui
         scale = min(session.view_w / session.width, session.view_h / session.height)
         shown_w, shown_h = max(1, int(round(session.width * scale))), max(1, int(round(session.height * scale)))
         scale = shown_w / session.width                  # what resize really does, for the points
@@ -113,11 +115,8 @@ class SheetView:
                  f"{sum(r.visible for r in shown)} with a ball  reviewed {sum(r.reviewed for r in shown)}/{len(shown)}"
                  + (f"  hint differs {differs} (red)" if differs else ""))
         line2 = "click a point: open that frame   a/d: stretch before/after   w or right click: back   q: save/quit"
-        hud = canvas[session.view_h:]
-        cv2.putText(hud, fit_text(line1, session.view_w - int(16 * ui), 0.55 * ui, thin), (int(8 * ui), int(22 * ui)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55 * ui, (255, 255, 255), thin, cv2.LINE_AA)
-        cv2.putText(hud, fit_text(line2, session.view_w - int(16 * ui), 0.48 * ui, thin), (int(8 * ui), int(46 * ui)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48 * ui, (180, 180, 180), thin, cv2.LINE_AA)
+        self.timeline.draw(canvas[session.view_h:session.view_h + session.timeline_h], session.view_h)
+        hud_text(canvas[session.view_h + session.timeline_h:], line1, line2, ui)
         self.cache_key, self.cache = key, canvas
         return canvas
 
@@ -145,6 +144,7 @@ class SheetView:
         session = self.session
         ui, thin = session.ui, max(1, int(round(session.ui)))
         differs = 0
+        captions: List[Tuple[int, int, int, int]] = []   # boxes of the frame numbers drawn, never overlapped
         for index, px, py in self.points:
             row = session.rows[index]
             colour = (70, 210, 70) if row.reviewed else (0, 220, 255)
@@ -155,6 +155,12 @@ class SheetView:
             if index == selected:
                 cv2.circle(display, (px, py), int(round(12 * ui)), (255, 255, 255), thin, cv2.LINE_AA)
             if (index - self.start) % 10 == 0:
-                cv2.putText(display, str(row.frame), (px + int(6 * ui), py - int(6 * ui)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.42 * ui, (255, 255, 255), thin, cv2.LINE_AA)
+                text = str(row.frame)
+                (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.42 * ui, thin)
+                x0, y1 = px + int(6 * ui), py - int(6 * ui)
+                box = (x0, y1 - text_h, x0 + text_w, y1)
+                if not any(box[0] < b[2] and b[0] < box[2] and box[1] < b[3] and b[1] < box[3] for b in captions):
+                    captions.append(box)    # where the flight folds back, a caption over another is skipped
+                    cv2.putText(display, text, (x0, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.42 * ui, (255, 255, 255), thin,
+                                cv2.LINE_AA)
         return differs

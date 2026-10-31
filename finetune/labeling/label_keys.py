@@ -1,5 +1,6 @@
 """What the label tool's keys do: the guards every key passes, q, and the single-frame view's
-keys, with the keys the grid shares. The grid's and the sheet's own keys are in ``label_grid`` and ``label_sheet``.
+keys, with the keys the grid shares. The grid's, the sheet's, the player view's and the court view's
+own keys are in ``label_grid``, ``label_sheet``, ``label_players`` and ``label_court``.
 
 Every key names a tool action (``tool.confirm``, ``tool.move``, ``tool.jump``...) or a view's
 (``grid_view.toggle``, ``sheet_view.page``...): that is the surface the key table in the tests
@@ -38,8 +39,15 @@ class KeyHandler:
             return self.quit_key()
         if code != ord("/"):
             self.session.awaiting_landing = None   # any other key: the landing keeps no point (Tool.toggle_landing)
+        if code != ord("."):
+            self.session.awaiting_hit = None       # ... and the hit (Tool.toggle_hit)
+        self.session.awaiting_candidate = None     # a candidate's click is offered until the next key
         direction = self.key_direction(key, code)
-        if tool.sheet_view.active:
+        if tool.player_view.active:
+            tool.player_view.handle_key(code, direction)
+        elif tool.court_view.active:
+            tool.court_view.handle_key(code, direction)
+        elif tool.sheet_view.active:
             tool.sheet_view.handle_key(code, direction)
         elif tool.grid_view.active:
             tool.grid_view.handle_key(code, direction) or self.common_key(code)
@@ -77,6 +85,8 @@ class KeyHandler:
             return True
         if code == ord("e"):
             tool.seek_disputed()
+        elif self.event_key(code):
+            pass
         elif code in (ord("f"), ord("b")):
             tool.jump(1 if code == ord("f") else -1)
         elif direction:
@@ -109,6 +119,27 @@ class KeyHandler:
             accepted = tool.accept_run()
             print(f"[run ] accepted {accepted} confident frame(s); stopped at frame "
                   f"{self.session.rows[self.session.cursor].frame}")
+        else:
+            return False
+        return True
+
+    def event_key(self, code: int) -> bool:
+        """The single-frame keys for the court events beside the landing's /: . a hit, , its hitter,
+        [ and ] a rally's start and end, ; and SHIFT+; (or :) the next and previous candidate nobody
+        has answered, a backslash not an event. False for any other key."""
+        tool = self.tool
+        if code == ord("."):
+            tool.toggle_hit()
+        elif code == ord(","):
+            tool.cycle_hitter()
+        elif code in (ord("["), ord("]")):
+            tool.toggle_rally("start" if code == ord("[") else "end")
+        elif code == ord(";"):
+            tool.jump_candidate(-1 if win.shift_held() else 1)
+        elif code == ord(":"):
+            tool.jump_candidate(-1)
+        elif code == ord("\\"):
+            tool.reject_candidates()
         else:
             return False
         return True
