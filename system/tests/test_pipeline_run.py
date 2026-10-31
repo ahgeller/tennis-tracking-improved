@@ -50,7 +50,7 @@ from tennis_tracker import pass1, pass2, pipeline, utils, video_decode
 from tennis_tracker.config import Config
 from tennis_tracker.court.court_geometry import LINE_PAIRS_14
 from tennis_tracker.engines.court_detector import CourtDetector
-from tennis_tracker.engines.player_detector import player_detect_interval
+from tennis_tracker.engines.player_detector import effective_player_interval
 from tennis_tracker.export import RunResult
 from tennis_tracker.headless import headless_config
 
@@ -773,16 +773,13 @@ def test_a_video_run_probes_the_encoder_alongside_init_and_raises_what_the_probe
 
 
 class _ScheduledPlayers(FakePlayerDetector):
-    """The fake on the real schedule (``player_detect_interval`` for the clip's frame rate): it
+    """The fake on the real schedule (``effective_player_interval`` for the clip's frame rate): it
     launches only on the frames the tracker runs on, and its one player moves 2 px right a frame."""
-
-    built: List["_ScheduledPlayers"] = []
 
     def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None, *,
                  fps: Optional[float] = None):
         super().__init__(cfg, court_keypoints, fps=fps)
-        self.interval = player_detect_interval(cfg, fps)
-        _ScheduledPlayers.built.append(self)
+        self.interval = effective_player_interval(cfg, fps)
 
     def tracks_frame(self, frame_index: int) -> bool:
         return frame_index % self.interval == 0
@@ -806,10 +803,15 @@ def test_players_are_detected_every_other_frame_from_60_fps_and_interpolated_bet
     path = tmp_path / f"rally_{fps:g}fps.avi"
     write_lossless_clip(path, synthetic_frames(), fps=fps)
     install_fakes(monkeypatch)
-    _ScheduledPlayers.built = []
-    monkeypatch.setattr(pipeline, "PlayerDetector", _ScheduledPlayers)
+    built: List[_ScheduledPlayers] = []
+
+    def build(*args, **kwargs) -> _ScheduledPlayers:
+        built.append(_ScheduledPlayers(*args, **kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(pipeline, "PlayerDetector", build)
     result = pipeline.run(make_config(tmp_path, path, **JSON_ONLY_OVERRIDES))
-    (players,) = _ScheduledPlayers.built
+    (players,) = built
     assert players.fps == pytest.approx(fps, abs=0.01)
     every_other = fps >= 55.0
     assert players.start_calls == list(range(0, FRAMES, 2 if every_other else 1))

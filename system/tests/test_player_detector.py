@@ -11,7 +11,7 @@ import torch
 from tennis_tracker.config import Config
 from tennis_tracker.engines import player_detector
 from tennis_tracker.engines.player_detector import (
-    PlayerDetector, PlayerPending, _load_bytetrack, interpolate_player_boxes, player_detect_interval,
+    PlayerDetector, PlayerPending, _load_bytetrack, effective_player_interval, interpolate_player_boxes,
 )
 
 
@@ -110,11 +110,11 @@ def test_pending_defaults_to_a_coasting_frame():
     (None, 1, 1),                                 # a rate the container did not report
 ])
 def test_the_player_interval_is_every_other_frame_from_60_fps(fps, configured, expected):
-    assert player_detect_interval(Config(player_detect_interval=configured), fps) == expected
+    assert effective_player_interval(Config(player_detect_interval=configured), fps) == expected
 
 
 def test_the_every_other_frame_rule_can_be_turned_off():
-    assert player_detect_interval(Config(player_every_other_frame_fps=0.0), 60.0) == 1
+    assert effective_player_interval(Config(player_every_other_frame_fps=0.0), 60.0) == 1
 
 
 def test_a_disabled_detector_tracks_every_frame_so_nothing_is_interpolated():

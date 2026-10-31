@@ -351,7 +351,8 @@ class _Pass1Collector:
             out.rois[ghost_frame] = kept if kept else None
         out.rois.append(record.rois)
         out.ghost_rois.append([])
-        # A frame the player tracker skips (cfg.player_detect_interval) is filled after the loop.
+        # A frame the player tracker skips (``effective_player_interval``) gets its boxes after the
+        # loop, interpolated between the tracked frames around it.
         out.player_boxes.append(self.player_detector.player_boxes_by_slot())
         self._players_tracked.append(self.player_detector.tracks_frame(record.frame_index))
         out.court_keypoints.append(record.court_keypoints)
