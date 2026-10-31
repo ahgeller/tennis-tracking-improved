@@ -251,11 +251,12 @@ key closes the list.
 
 `--players` opens the player view on the first clip given: the tracker's person
 tracks from the run folder (`--candidates`), cut into *segments*, one track id until
-it drops out for over half a second. Each segment is a row of twelve crops taken
-evenly through it, under the whole frame with every tracked box drawn (the selected
-segment's thick, the others thin, each with a tag of its track id and identity). Every
-crop is shown whole in a cell of one size; with fewer segments than rows, the whole
-frame takes the room. Say who it is and the next segment comes up:
+it drops out for over half a second. Each segment is a row of crops taken evenly
+through it, as many as fit across the window, under the whole frame with every
+tracked box drawn (the selected segment's thick, the others thin, each with a tag of
+its track id and identity). Every crop is shown whole in a cell of one size, and only
+from frames where the box shows the person whole (not half off the picture's side);
+with fewer segments than rows, the whole frame takes the room. Say who it is and the next segment comes up:
 
 | key | what it does |
 |---|---|
