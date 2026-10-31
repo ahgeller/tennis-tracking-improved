@@ -13,7 +13,7 @@ import pytest
 from finetune.data.event_labels import HitLabel, RallyLabel, read_hit_labels, read_rally_labels
 from finetune.labeling import label_window as win
 from finetune.labeling.label_candidates import Candidate, ClipCandidates
-from finetune.labeling.label_draw import LANDING
+from finetune.labeling.label_draw import HIT, LANDING
 from finetune.labeling.label_store import (load_event_review, load_hits, load_rallies, save_event_review, save_hits,
                                            save_rallies)
 from finetune.labeling.label_tool import Tool
@@ -205,6 +205,28 @@ def test_a_candidate_between_two_frames_waits_for_the_click_that_confirms_it_the
     assert session.source.hits == {9: (pytest.approx(120.0, abs=1.0), pytest.approx(60.0, abs=1.0))}
     assert session.source.hitters == {9: "near"} and session.awaiting_candidate is None
     assert not any(row.edited for row in session.rows)                   # the click placed no ball label
+
+
+
+def test_a_backslash_never_leaves_a_between_candidate_waiting_for_a_habitual_click():
+    """The backslash moves on to the next candidate, but only ; (asked for) makes a click there
+    answer it: after a backslash a click is the ball label's, as everywhere else."""
+    tool = fake_tool(candidates_clip())
+    session = tool.session
+    press_key(tool, ";")                                                 # the landing at 6
+    press_key(tool, "\\")                                               # not one: on to the hit at 9
+    here = session.cursor
+    assert session.rows[here].frame in (8, 10) and session.awaiting_candidate is None
+    ask = tool.frame_view.hud_lines(session.rows[here], None, None)[1]
+    assert "CLICK WHERE" not in ask and ";=answer it here" in ask
+    press_key(tool, ";")                                                 # asked: now a click answers it, here
+    assert session.cursor == here and session.awaiting_candidate is not None
+    picture = tool.render()[:session.view_h]
+    banner = picture[:int(30 * session.ui)]
+    assert (banner == HIT).all(axis=2).mean() > 0.3                      # and the picture says so, unmissably
+    press_key(tool, "k")                                                 # any other key: not answered
+    assert session.awaiting_candidate is None
+    assert (tool.render()[:session.view_h][:int(30 * session.ui)] == HIT).all(axis=2).mean() < 0.05   # the badge alone
 
 
 def test_the_slash_on_a_frame_wearing_a_between_candidate_is_the_plain_landing_key():

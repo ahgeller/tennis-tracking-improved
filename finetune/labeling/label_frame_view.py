@@ -57,8 +57,26 @@ class FrameView:
         self.draw_marks(display, row, hint, offer)
         self.draw_inset(display, image, row, self.session.ui)
         self.draw_badges(display, row)
+        self.draw_candidate_banner(display)
         self.draw_hud(canvas, row, hint, offer)
         return canvas
+
+    def draw_candidate_banner(self, display: np.ndarray) -> None:
+        """While a click would confirm the tracker's candidate between two frames (; came to it,
+        session.awaiting_candidate), a band across the whole top of the picture in the event's
+        colour says so: the click places an event, not the ball label it places everywhere else."""
+        event = self.session.awaiting_candidate
+        if event is None:
+            return
+        ui = self.session.ui
+        height = int(round(34 * ui))
+        colour = KIND_COLOURS[event.kind]
+        cv2.rectangle(display, (0, 0), (display.shape[1] - 1, height), colour, -1)
+        what = "WHERE THE BALL BOUNCED" if event.kind == "landing" else "WHERE THE RACKET MET THE BALL"
+        text = fit_text(f"CLICK {what}: CONFIRMS THE TRACKER'S {CANDIDATE_TEXT[event.kind][:-1]} BETWEEN FRAMES"
+                        "   any key: no click", display.shape[1] - int(24 * ui), 0.6 * ui, 2)
+        cv2.putText(display, text, (int(12 * ui), int(round(24 * ui))), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui,
+                    (0, 0, 0), 2, cv2.LINE_AA)
 
     def warp_picture(self, image: np.ndarray, before: Optional[np.ndarray], mode: str) -> np.ndarray:
         """A fresh canvas for picture and HUD with the frame drawn into its top at the view's
@@ -257,6 +275,10 @@ class FrameView:
             event = session.awaiting_candidate
             keys = (f"{CANDIDATE_TEXT[event.kind]} BETWEEN FRAMES: CLICK WHERE THE "
                     f"{'BALL BOUNCED' if event.kind == 'landing' else 'RACKET MET IT'}  \\=no  ;=next")
+        elif session.candidate_stop == session.cursor and any(
+                session.candidate_between(session.cursor, event.kind) is not None for event in open_here):
+            keys = (" ".join(CANDIDATE_TEXT[event.kind] for event in open_here)
+                    + " BETWEEN FRAMES  ;=answer it here (then click)  \\=no")
         elif open_here:
             asks = "  ".join(f"{CANDIDATE_TEXT[event.kind]} {CANDIDATE_KEYS[event.kind]}=yes" for event in open_here)
             keys = asks + "  \\=no  ;=next"

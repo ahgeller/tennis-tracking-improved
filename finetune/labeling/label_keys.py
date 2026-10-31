@@ -135,9 +135,9 @@ class KeyHandler:
         elif code in (ord("["), ord("]")):
             tool.toggle_rally("start" if code == ord("[") else "end")
         elif code == ord(";"):
-            tool.jump_candidate(-1 if win.shift_held() else 1)
+            tool.answer_candidate(-1 if win.shift_held() else 1)
         elif code == ord(":"):
-            tool.jump_candidate(-1)
+            tool.answer_candidate(-1)
         elif code == ord("\\"):
             tool.reject_candidates()
         else:

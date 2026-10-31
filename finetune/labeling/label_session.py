@@ -78,6 +78,7 @@ class LabelSession:
         self.awaiting_candidate: Optional[Candidate] = None   # a landing or hit candidate between two label
                                                               # frames, come to with ;, whose click confirms it
                                                               # there (Tool.jump_candidate, Tool.place_candidate)
+        self.candidate_stop: Optional[int] = None   # the row a backslash moved on to, unarmed: ; answers it there
         self.disputed_key, self.disputed = None, 0   # disputed_count's cache
         self.marks = 0                # bumped by every change to a clip's landings, hits, rallies or
                                       # rejected candidates (not row fields): what render_state keys on

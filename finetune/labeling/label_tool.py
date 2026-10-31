@@ -543,11 +543,36 @@ class Tool:
         if changed < 0:
             print(f"[cand] {-changed} candidate(s) on frame {session.rows[session.cursor].frame} open again")
             return
-        self.jump_candidate(1)
+        self.jump_candidate(1, arm=False)   # never armed: a habitual click there is a ball label
 
-    def jump_candidate(self, direction: int) -> bool:
-        """; / SHIFT+;: the next / previous frame wearing a candidate nobody has answered yet. False,
-        with a note, when there is none that way."""
+    def answer_candidate(self, direction: int) -> bool:
+        """; / SHIFT+;: on to the next / previous candidate nobody has answered, a click there
+        confirming one between two frames (jump_candidate). On the frame a backslash moved on to,
+        wearing such a candidate, ; answers that one here first."""
+        session = self.session
+        if direction > 0 and session.candidate_stop == session.cursor and self.arm_candidate(session.cursor):
+            session.candidate_stop = None
+            return True
+        return self.jump_candidate(direction)
+
+    def arm_candidate(self, index: int) -> bool:
+        """Let the next click on the picture confirm the landing or hit candidate between two label
+        frames that row `index` wears (place_candidate), if it wears one not yet marked; whether it
+        does. The frame view says so across the top of the picture while it waits."""
+        session = self.session
+        if self.overview:
+            return False
+        session.awaiting_candidate = next(
+            (event for event in session.open_candidates(index) if event.kind in ("landing", "hit")
+             and session.candidate_between(index, event.kind) is not None
+             and session.mark_for(index, session.source.landings if event.kind == "landing"
+                                  else session.source.hits) is None), None)
+        return session.awaiting_candidate is not None
+
+    def jump_candidate(self, direction: int, arm: bool = True) -> bool:
+        """The next / previous frame wearing a candidate nobody has answered yet; with `arm` (;, not
+        the backslash's move on) a click there confirms one lying between two label frames
+        (arm_candidate). False, with a note, when there is none that way."""
         session = self.session
         index = session.next_candidate(direction)
         if index is None:
@@ -559,12 +584,11 @@ class Tool:
         session.direction = direction
         session.set_cursor(index)
         self.follow_ball()
-        if not self.overview:         # a landing or hit between two label frames: its click confirms it
-            session.awaiting_candidate = next(
-                (event for event in session.open_candidates(index) if event.kind in ("landing", "hit")
-                 and session.candidate_between(index, event.kind) is not None
-                 and session.mark_for(index, session.source.landings if event.kind == "landing"
-                                      else session.source.hits) is None), None)
+        if arm:
+            self.arm_candidate(index)
+            session.candidate_stop = None
+        else:
+            session.candidate_stop = index
         return True
 
     def go_to_frame(self, frame: float) -> None:

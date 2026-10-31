@@ -209,13 +209,16 @@ scorers never read it. To confirm one, mark the event with its own key (`/`, `.`
 `[` or `]`): the label answers it. A landing or hit candidate that falls between two
 label frames (on a 60 FPS clip labelled every other frame, the unlabelled frame
 between them) comes up, when `;` brings you to it, waiting for the click where it
-happened: the click places the landing (or the hit, with the tracker's hitter)
-between the two frames with that point, exactly as `/` (or `.`) on both frames and
-a click would. `/` and `.` themselves work on such a frame as they always do. A
-backslash rejects the candidates on the frame (kept in
+happened, and a band across the top of the picture in the event's colour says so:
+the click places the landing (or the hit) between the two frames with that point,
+exactly as `/` (or `.`) on both frames and a click would. Any other key, and the
+click is the ball label's again. `/` and `.` themselves work on such a frame as they
+always do. A backslash rejects the candidates on the frame (kept in
 `labels/<clip>_events.review.json`, so a rerun of the tracker that moves an event by
-a frame or two does not bring it back) and goes to the next. An event the tracker
-missed is marked with its key like any other.
+a frame or two does not bring it back) and goes to the next, but never waits for a
+click there: on a candidate between two frames the bar offers `;` to answer it, and
+only then does a click place it. An event the tracker missed is marked with its key
+like any other.
 
 `;` walks the candidates nobody has answered (with a label of its kind within 0.1 s,
 within a few seconds for a rally mark, or rejected), across the clips of a run.
