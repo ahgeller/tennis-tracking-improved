@@ -286,8 +286,9 @@ the tracking thread, as the frame is taken from the source and before anything e
 - **Decoder**: live decodes once with OpenCV; offline decodes the prepass's frames with NVDEC.
   Their pixels differ slightly (see the correctness table). NVDEC frames would need a host copy
   for pass 1.
-- **The prepass in its own process** (`gridtracknet_prepass_process`) is not used live: the stream
-  runs on the tracking thread, and `open_stream` refuses a remote prepass.
+- **The prepass in its own process** (AB+s4's `ball_prepass_mode` `process`, the default for a
+  streaming network offline) is not used live. `live_config` sets the mode to `foreground`, and
+  the stream runs on the tracking thread; `open_stream` refuses a remote prepass.
 - **The selector's window normalisation**: on a window, the selector's clip-length terms are
   window-length. This is measured above, not removed.
 - **On-device**: iOS, Core ML and Swift are out of v1. Each CUDA/TensorRT stage would need a port:

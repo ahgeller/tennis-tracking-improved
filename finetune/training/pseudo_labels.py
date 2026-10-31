@@ -69,7 +69,10 @@ MAX_DRIFT_PX = 3.0               # the selected position against the detector's 
 MIN_CONF = 0.7
 MIN_TRACK_OBS = 10               # detections on the chosen track: a short track is the likeliest wrong object
 QUIET_STEPS = 15                 # label frames either side without any detection for a "none"
-PIPELINE_CONF = 0.5              # the pipeline's detector threshold (the tracker's default)
+# The teacher pipeline's detector threshold: part of the measured filter rule above (the module
+# docstring), so the pseudo-label rule's own, not the tracker's operating threshold; changing it
+# changes what pseudo-labelling produces.
+PIPELINE_CONF = 0.50
 REFERENCE_WIDTH = 1920.0
 
 PseudoTarget = Optional[List[float]]
@@ -270,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_add)
     p = commands.add_parser("label", help="run the teacher pipeline and write the filtered pseudo-labels")
     p.add_argument("--clips", nargs="*")
-    p.add_argument("--weights", default=str(ws.current().repo_weights), help="the teacher (default: the tracker's model)")
+    p.add_argument("--weights", default=str(ws.current().repo_weights), help="the teacher (default: the workspace's model, models/ball_detector.pt)")
     p.add_argument("--device", default="0")
     p.add_argument("--force", action="store_true", help="redo clips that already have pseudo-labels")
     p.add_argument("--reuse", action="store_true", help="filter the saved pipeline JSON again instead of rerunning it")

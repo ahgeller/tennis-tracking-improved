@@ -78,7 +78,7 @@ can be fine-tuned on every clip, and later on new clips, from its ``.pt``. Any a
 Three further parts of the recipe, each off by default (``audit/records/opt_training.md`` has
 the evidence for their settings):
 
-- ``--distill``: knowledge distillation from ``--teacher`` (the tracker's model by default), the
+- ``--distill``: knowledge distillation from ``--teacher`` (the workspace's model by default), the
   teacher's soft heat maps and offsets learned beside the labels, optionally its features
   (``--mgd-weight``), with its answers computed on every batch or cached (``--teacher-maps``);
   see ``distill.py``. ``config.json`` records it as ``distill``;
@@ -551,8 +551,8 @@ def resolve_arch(args: argparse.Namespace, selection_run: Optional[dict], resume
     is ``--arch``, or without it the architecture of the run being continued (`resumed`, the
     ``config.json`` a ``--resume`` read, so a resume names it no more than it names ``--epochs``)
     or of the selection run (an ``--all-clips`` run inherits it), else the architecture of
-    ``--weights`` (the tracker's model, by default: a plain run fine-tunes the network the tracker
-    runs); an ``--arch`` that contradicts a run is refused here, in one line that names it
+    ``--weights`` (the workspace's model, by default: a plain run fine-tunes the workspace's
+    network); an ``--arch`` that contradicts a run is refused here, in one line that names it
     (``same_run`` would refuse it too, but after ``--weights`` had been judged by the wrong
     architecture). A fine-tune starts from ``--weights``, so they must be the architecture's own
     file (``weights_suffix``, the architecture read off them by ``arch_of``, which reads a ``.pt``
@@ -752,9 +752,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--arch", choices=ARCHITECTURES, default=None,
                         help=f"The network: {HEATMAP_S4}, the stride-4 heat-map network (a .pt file, naming its architecture "
                              f"inside), or {GRIDTRACKNET} (an .npz); without it, a --resume or --selection-run inherits its "
-                             f"run's, else the architecture of --weights (the tracker's model)")
+                             f"run's, else the architecture of --weights")
     parser.add_argument("--weights", type=Path, default=layout.repo_weights,
-                        help="The starting model of a fine-tune, the architecture's own file (.npz for gridtracknet, .pt "
+                        help="The starting model of a fine-tune (default: the workspace's model, models/ball_detector.pt), the "
+                             "architecture's own file (.npz for gridtracknet, .pt "
                              f"for {HEATMAP_S4}); with --from-scratch, any "
                              "architecture's, read only by the --oversample-false-alarms prepass (a gridtracknet scratch "
                              "run still needs the .npz, the template it saves into)")
@@ -794,7 +795,8 @@ def build_parser() -> argparse.ArgumentParser:
     distill.add_argument("--distill", action="store_true",
                          help="Learn the --teacher's soft heat maps and offsets beside the labels")
     distill.add_argument("--teacher", type=Path, default=layout.repo_weights,
-                         help="The teacher's weights (default: the tracker's model); any architecture on the student's grid")
+                         help="The teacher's weights (default: the workspace's model, models/ball_detector.pt); any "
+                              "architecture on the student's grid")
     distill.add_argument("--distill-loss", choices=DISTILL_LOSSES, default="qfl",
                          help="qfl (quality focal loss, the default) or mse (Fast Pose Distillation's)")
     distill.add_argument("--distill-weight", type=float, default=1.0, help="The distillation loss's weight (default 1)")

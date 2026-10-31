@@ -15,13 +15,14 @@ import cv2
 import torch
 from ball_in_play_selector import select_ball_in_play
 
-from .config import Config
+from .config import THREAD, Config
 from .court.court_geometry import build_court_polygon, last_valid_court_keypoints
 from .court.bounce_events import infer_kinematic_bounces, predict_bounce_events
 from .court.contact_events import detect_player_contacts
 from .court.court_scene import CourtScene
 from .court.rally_legs import assemble_rally_legs
 from .ball_models import WEIGHTS_SUFFIX
+from .ball_weights import missing_weights
 from .engines.ball_detectors import BallDetectorBackend, GridTrackNetBallDetector, TensorRTRuntimeBallDetector
 from .engines.court_detector import CourtDetector
 from .engines.engine_files import find_ball_class_id_from_names, read_engine_class_names, resolve_engine_path
@@ -101,13 +102,13 @@ def validate_io_paths(cfg: Config) -> Path:
     return input_path
 
 
-def _build_ball_detector(cfg: Config) -> BallDetectorBackend:
+def build_ball_detector(cfg: Config) -> BallDetectorBackend:
     """The five-frame prepass detector for ``.npz`` (GridTrackNet) or ``.pt`` (HeatmapNet)
     weights, else the TensorRT engine next to ``model_path``."""
     model_path = Path(cfg.model_path).expanduser().resolve()
     if model_path.suffix.lower() in PREPASS_WEIGHTS:
         if not model_path.is_file():
-            raise FileNotFoundError(f"Ball-detector weights not found: {model_path}")
+            raise missing_weights(model_path)
         return GridTrackNetBallDetector(str(model_path), cfg)
     engine_path = resolve_engine_path(cfg.model_path)
     if engine_path is None:
@@ -148,7 +149,8 @@ class _EncoderProbe:
 
 def open_cuda_device(cfg: Config) -> Tuple[Config, torch.device]:
     """The config resolved for its CUDA device (``utils.resolve_runtime``, no video encoder chosen)
-    and the device; a RuntimeError without one. The caller's Config is not changed."""
+    and the device; a RuntimeError without one. The caller's Config is not changed. The run owns
+    the process: cuDNN autotunes the fixed-shape convolutions."""
     device_str, _ = detect_device(cfg.device)
     if not str(device_str).isdigit():
         raise RuntimeError("The tracking runtime requires an NVIDIA CUDA device index such as --device 0.")
@@ -156,7 +158,6 @@ def open_cuda_device(cfg: Config) -> Tuple[Config, torch.device]:
     if not torch.cuda.is_available() or device_index >= torch.cuda.device_count():
         raise RuntimeError(f"CUDA device {device_index} is unavailable.")
     cfg, _ = resolve_runtime(cfg, str(device_index), writes_video=False)
-    # The run owns the process: let cuDNN autotune the fixed-shape convolutions.
     torch.backends.cudnn.benchmark = True
     return cfg, torch.device(f"cuda:{device_index}")
 
@@ -173,8 +174,19 @@ def video_info(path: Path, capture: Any, fps: Optional[float] = None) -> VideoIn
     )
 
 
-def _open_inputs(cfg: Config) -> RunContext:
-    """Validate the config, pick the device and encoder, build the detectors and open the clip."""
+class _RunSetup(NamedTuple):
+    """What a run settles before its detectors are built (``_setup_run``)."""
+    cfg: Config                     # with the runtime resolved
+    input_path: Path
+    device: torch.device
+    encoder_probe: Optional[_EncoderProbe]
+    timing: Timing
+    started_at: float
+    init_t0: float
+
+
+def _setup_run(cfg: Config) -> _RunSetup:
+    """Validate the config and pick the device; start the encoder probe and boxmot's import."""
     input_path = validate_io_paths(cfg)
     started_at = time.time()
     timing = Timing(cfg.info_timing)
@@ -187,39 +199,48 @@ def _open_inputs(cfg: Config) -> RunContext:
     # while the detectors are built; the platform report follows once the choice is in.
     cfg, device = open_cuda_device(cfg)
     encoder_probe = _EncoderProbe(cfg) if _video_outputs(cfg) else None
-    detector = _build_ball_detector(cfg)
+    return _RunSetup(cfg, input_path, device, encoder_probe, timing, started_at, init_t0)
 
+
+def _open_inputs(setup: _RunSetup, detector: BallDetectorBackend) -> RunContext:
+    """Open the clip, start the ball prepass and build the court and player detectors. The caller
+    owns `detector` (and closes it); the clip is released here if this fails."""
+    cfg, input_path = setup.cfg, setup.input_path
     cap = cv2.VideoCapture(str(input_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open input video: {input_path}")
-    video = video_info(input_path, cap)
-    print(f"[init] Video: {video.width}x{video.height} @ {video.fps:.1f}fps, ~{video.frame_count_hint} frames")
-    # A prepass on a worker thread starts after the court and player engines are built and the
-    # player engine's CUDA graph is captured: a capture is invalidated by CUDA work from another
-    # thread. A prepass in the foreground (the default) runs first instead, so boxmot's import
-    # (prefetch_bytetrack, ~2 s that PlayerDetector waits for) finishes behind it.
-    foreground_prepass = not (cfg.gridtracknet_prepass_background and isinstance(detector, GridTrackNetBallDetector))
-    if foreground_prepass:
-        detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
-    court_detector = CourtDetector(cfg)
-    player_detector = PlayerDetector(cfg, court_keypoints=None)
-    if not foreground_prepass:
-        detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
-    encoder = encoder_probe.result() if encoder_probe is not None else None
-    print_platform_report(cfg, encoder)
-
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open input video: {input_path}")
+        video = video_info(input_path, cap)
+        print(f"[init] Video: {video.width}x{video.height} @ {video.fps:.1f}fps, ~{video.frame_count_hint} frames")
+        # A prepass on a worker thread starts after the court and player engines are built and the
+        # player engine's CUDA graph is captured: a capture is invalidated by CUDA work from another
+        # thread. A prepass in the foreground runs first instead, so boxmot's import (prefetch_bytetrack,
+        # ~2 s that PlayerDetector waits for) finishes behind it; so does a prepass process, which returns
+        # at once and runs beside the engines' builds (its own CUDA context cannot break a capture here).
+        threaded_prepass = detector.prepass_mode == THREAD
+        if not threaded_prepass:
+            detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
+        court_detector = CourtDetector(cfg)
+        player_detector = PlayerDetector(cfg, court_keypoints=None)
+        if threaded_prepass:
+            detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
+        encoder = setup.encoder_probe.result() if setup.encoder_probe is not None else None
+        print_platform_report(cfg, encoder)
+    except BaseException:
+        cap.release()
+        raise
     return RunContext(
         cfg=cfg,
         video=video,
         capture=cap,
-        device=device,
+        device=setup.device,
         encoder=encoder,
         detector=detector,
         court_detector=court_detector,
         player_detector=player_detector,
-        timing=timing,
-        started_at=started_at,
-        init_t0=init_t0,
+        timing=setup.timing,
+        started_at=setup.started_at,
+        init_t0=setup.init_t0,
     )
 
 
@@ -270,7 +291,7 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
     return Selection(per_frame, chosen_track, all_tracks, court_polygon, last_kps, display_path)
 
 
-def _court_events(ctx: RunContext, pass1: Pass1Result, selection: Selection) -> CourtEvents:
+def compute_court_events(ctx: RunContext, pass1: Pass1Result, selection: Selection) -> CourtEvents:
     """Bounces, contacts and rally legs for the minimap and the tracking JSON; not computed
     when neither ``cfg.court_events`` nor ``cfg.draw_court_minimap`` asks for them."""
     cfg, video = ctx.cfg, ctx.video
@@ -339,10 +360,16 @@ def assemble_result(ctx: RunContext, pass1: Pass1Result, selection: Selection, e
 def run(cfg: Config) -> RunResult:
     """Track the ball through ``cfg.input_video``, write the configured outputs
     and return what was found (see ``RunResult``)."""
-    ctx = _open_inputs(cfg)
-    pass1 = collect_pass1(ctx)
-    erase_ghost_rois(pass1)
-    selection = _select(ctx, pass1)
-    events = _court_events(ctx, pass1, selection)
-    rendered = render_pass2(ctx, pass1, selection, events)
-    return _finish(ctx, pass1, selection, events, rendered)
+    setup = _setup_run(cfg)
+    detector = build_ball_detector(setup.cfg)
+    try:    # whatever ends the run (an init failure, Ctrl-C, an error), a prepass process is stopped
+        ctx = _open_inputs(setup, detector)
+        pass1 = collect_pass1(ctx)
+        detector.finish_prepass()           # a prepass process exits while the selector runs
+        erase_ghost_rois(pass1)
+        selection = _select(ctx, pass1)
+        events = compute_court_events(ctx, pass1, selection)
+        rendered = render_pass2(ctx, pass1, selection, events)
+        return _finish(ctx, pass1, selection, events, rendered)
+    finally:
+        detector.close()

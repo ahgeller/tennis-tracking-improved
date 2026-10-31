@@ -7,6 +7,9 @@ import pytest
 
 import clean_tracker
 from clean_tracker import resolve_output_paths
+from tennis_tracker.ball_weights import HEATMAP_S4_WEIGHTS, STREAM_S4_WEIGHTS, UNKNOWN_CONF
+
+STREAM_CONF, HEATMAP_CONF = STREAM_S4_WEIGHTS.conf, HEATMAP_S4_WEIGHTS.conf
 
 
 def _run_main(tmp_path, argv):
@@ -27,19 +30,37 @@ def test_cli_paths_reach_the_config_and_the_output_folder_is_made(tmp_path):
     assert status == 0                                             # no --annotations: nothing to validate
     assert cfg.input_video == str((tmp_path / "in.mp4").resolve())
     assert cfg.tracking_json == str((tmp_path / "t.json").resolve())
-    assert cfg.model_path.endswith("ball_detector.pt")
+    assert cfg.model_path.endswith("stream_s4_e60.pt")
     assert (tmp_path / "out").is_dir()
 
 
-def test_weights_default_to_the_bundled_heatmapnet_and_another_path_reaches_the_config_as_given(tmp_path):
-    """--weights feeds Config.model_path, whose suffix picks the detector: the default is the
-    bundled HeatmapNet file, and another path is passed through unchanged."""
-    from tennis_tracker.paths import BALL_WEIGHTS
+def test_weights_default_to_stream_s4_and_another_path_reaches_the_config_as_given(tmp_path):
+    """--weights feeds Config.model_path, whose record picks the detector: the default is the
+    stream_s4 file, and another path is passed through unchanged."""
+    from tennis_tracker.paths import BALL_WEIGHTS, STREAM_WEIGHTS
+    assert BALL_WEIGHTS == STREAM_WEIGHTS
     assert clean_tracker._parser().get_default("weights") == str(BALL_WEIGHTS)
     _, cfg = _run_main(tmp_path, ["--weights", "runs/h1/best.pt", "--no-video"])
     assert cfg.model_path == "runs/h1/best.pt"
     _, cfg = _run_main(tmp_path, ["--no-video"])
     assert cfg.model_path == str(BALL_WEIGHTS)
+
+
+@pytest.mark.parametrize("argv, conf", [
+    ([], STREAM_CONF),                                                      # the default, stream_s4
+    (["--weights", "models/candidates/stream_s4_e60.pt"], STREAM_CONF),     # named, relative to system/
+    (["--weights", "models/ball_detector.pt"], HEATMAP_CONF),               # the heat-map network
+    (["--weights", "runs/h1/best.pt"], UNKNOWN_CONF),                       # weights the table does not know
+    (["--weights", "models/ball_detector.pt", "--conf", "0.40"], 0.40),     # explicit
+    (["--conf", "0.40"], 0.40),                                             # stream_s4 at another threshold
+    (["--weights", "models/ball_detector.pt", "--conf", "0.55"], 0.55),
+])
+def test_the_threshold_follows_the_weights_unless_conf_is_given(tmp_path, monkeypatch, argv, conf):
+    """Without --conf the threshold is the one the named weights were gated at (ball_weights);
+    --conf overrides it for any weights."""
+    monkeypatch.chdir(clean_tracker.ROOT)
+    _, cfg = _run_main(tmp_path, [*argv, "--no-video"])
+    assert cfg.conf == conf
 
 
 def test_cli_flags_reach_the_config(tmp_path):
@@ -61,7 +82,7 @@ def test_cli_defaults(tmp_path):
         assert clean_tracker.main([]) == 0
     cfg = run.call_args.args[0]
     assert cfg.save_tracking_video is True
-    assert cfg.conf == 0.4
+    assert cfg.conf == STREAM_CONF
     assert cfg.draw_court_minimap is False and cfg.court_events is False and cfg.info_timing is False
     assert cfg.show_all_tracks is False
     assert cfg.input_video.endswith("pomona.mp4")

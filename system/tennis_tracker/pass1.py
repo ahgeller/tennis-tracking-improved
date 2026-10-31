@@ -22,7 +22,8 @@ from ball_in_play_selector import PackedMask, RawDetection
 from .court.court_geometry import court_keypoints_key
 from .court.court_scene import PlayerBoxes
 from .cuda_kernels import KernelUnavailable
-from .engines.ball_detectors import FrameInput
+from .config import THREAD
+from .engines.ball_detectors import BallDetectorBackend, FrameInput
 from .engines.player_detector import PlayerPending, interpolate_player_boxes
 from .frame_window import FrameWindow
 from .motion import (
@@ -185,7 +186,7 @@ def _same_box(a: Box, b: Box) -> bool:
     return all(abs(int(a[i]) - int(b[i])) <= _ROI_MATCH_TOLERANCE_PX for i in range(4))
 
 
-class _Pass1Collector:
+class Pass1Collector:
     """The pass-1 loop and the per-frame state it carries between iterations."""
 
     def __init__(self, ctx: RunContext, window: FrameWindow,
@@ -199,7 +200,7 @@ class _Pass1Collector:
         self.player_detector = ctx.player_detector
         self.window = window
         self.detector_input_writer = detector_input_writer
-        self.background = BackgroundModel(self.cfg, ctx.device, cuda_graphs=_use_cuda_graphs(self.cfg))
+        self.background = BackgroundModel(self.cfg, ctx.device, cuda_graphs=use_cuda_graphs(self.cfg, ctx.detector))
         self.motion_kernels = _load_motion_kernels(self.cfg, ctx.device)
         self.roi_tracker = ROIMotionTracker(self.cfg, self.video.width, self.video.height, self.video.fps)
         self.pre_cuda_perf: Optional[Dict[str, float]] = (
@@ -479,12 +480,11 @@ def _open_detector_input_writer(ctx: RunContext) -> Optional[VideoWriter]:
                        cfg, encoder=ctx.encoder)
 
 
-def _use_cuda_graphs(cfg) -> bool:
+def use_cuda_graphs(cfg, detector: BallDetectorBackend) -> bool:
     """Whether pass 1 replays its fixed-shape GPU work from CUDA graphs: ``cfg.pass1_cuda_graphs``,
     unless the prepass runs on a worker thread of this process, whose CUDA work during a capture
     would invalidate it (a prepass process has its own context)."""
-    threaded_prepass = cfg.gridtracknet_prepass_background and not cfg.gridtracknet_prepass_process
-    return bool(cfg.pass1_cuda_graphs) and not threaded_prepass
+    return bool(cfg.pass1_cuda_graphs) and detector.prepass_mode != THREAD
 
 
 def _pinned_frame_shape(ctx: RunContext) -> Optional[Tuple[int, int]]:
@@ -522,12 +522,13 @@ def collect_pass1(ctx: RunContext) -> Pass1Result:
         reader.release()
         raise RuntimeError(f"No frames in video: {ctx.video.path}")
     second = reader.read()
-    window = FrameWindow(ctx.device, cfg.enable_preprocess, first, second, cuda_graphs=_use_cuda_graphs(cfg))
+    window = FrameWindow(ctx.device, cfg.enable_preprocess, first, second,
+                         cuda_graphs=use_cuda_graphs(cfg, ctx.detector))
     timing.add("init_total", ctx.init_t0)
     pass1_t0 = timing.start()
     print("[pass 1] Collecting detections...")
     detector_input_writer = _open_detector_input_writer(ctx)
-    collector = _Pass1Collector(ctx, window, detector_input_writer)
+    collector = Pass1Collector(ctx, window, detector_input_writer)
     try:
         result = collector.run(reader)
     finally:
@@ -571,7 +572,7 @@ def erase_ghost_rois(result: Pass1Result) -> int:
     t0 = time.perf_counter()
     erased_frames = 0
     for frame_index, ghosts in enumerate(result.ghost_rois):
-        if ghosts and _erase_ghosts_in_frame(result, frame_index, ghosts):
+        if ghosts and erase_ghosts_in_frame(result, frame_index, ghosts):
             erased_frames += 1
     print(f"[pass 1] Batched ghost deletion cleaned {erased_frames} frames in {time.perf_counter() - t0:.2f}s")
     return erased_frames
@@ -587,7 +588,7 @@ def _clear_boxes(mask: Optional[np.ndarray], boxes: List[Box]) -> bool:
     return changed
 
 
-def _erase_ghosts_in_frame(result: Pass1Result, frame_index: int, ghosts: List[Box]) -> bool:
+def erase_ghosts_in_frame(result: Pass1Result, frame_index: int, ghosts: List[Box]) -> bool:
     """Clear the ghost ROIs in one frame's raw and boost masks and repack the ones that changed;
     whether either mask changed."""
     raw = result.raw_motions[frame_index] if frame_index < len(result.raw_motions) else None

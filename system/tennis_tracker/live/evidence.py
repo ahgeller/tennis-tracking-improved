@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from ball_in_play_selector import PackedMask
 
-from ..pass1 import Pass1Result, _erase_ghosts_in_frame
+from ..pass1 import Pass1Result, erase_ghosts_in_frame
 from .fixed_lag import FixedLagSelector, LagSettings
 
 Box = Tuple[int, int, int, int]
@@ -36,7 +36,7 @@ _FORMAT = 2              # 2: indexed by source frame, with source_index
 
 class GhostEraser:
     """``FixedLagSelector.before_run``: clear, in the frames a run reads, the ghost ROIs that pass 1
-    has added to them since the last run (``pass1._erase_ghosts_in_frame``, offline's own clearing)."""
+    has added to them since the last run (``pass1.erase_ghosts_in_frame``, offline's own clearing)."""
 
     def __init__(self, result: Pass1Result) -> None:
         self.result = result
@@ -47,7 +47,7 @@ class GhostEraser:
         for frame in range(start, min(end, len(ghosts))):
             known = len(ghosts[frame])
             if known > self.erased.get(frame, 0):
-                _erase_ghosts_in_frame(self.result, frame, ghosts[frame])
+                erase_ghosts_in_frame(self.result, frame, ghosts[frame])
                 self.erased[frame] = known
         for frame in [frame for frame in self.erased if frame < start]:
             del self.erased[frame]

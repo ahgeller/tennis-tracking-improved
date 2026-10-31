@@ -51,7 +51,7 @@ def _summary_lines() -> List[str]:
         lines.append(f"tracker model: {layout.repo_weights.name} "
                      f"({dt.datetime.fromtimestamp(layout.repo_weights.stat().st_mtime):%Y-%m-%d %H:%M})")
         if layout.best_weights.is_file() and sha8(layout.best_weights) != sha8(layout.repo_weights):
-            lines.append("a training winner is waiting - pick 7 to make it the tracker's model")
+            lines.append("a training winner is waiting - pick 7 to make it the workspace's model")
     return lines
 
 
@@ -209,7 +209,7 @@ def _menu_check() -> None:
 
 
 def _menu_train() -> None:
-    print("training fine-tunes the tracker's current weights on every labelled clip,")
+    print("training fine-tunes the workspace's model on every labelled clip,")
     print("holds out video10 to judge the result, and keeps the better of new vs current.")
     print("Enter uses those defaults; anything you type is passed through, e.g.")
     print("  --sources custom grid --oversample custom=6 --val-clips video10 video11")
@@ -225,7 +225,7 @@ def _menu_promote() -> None:
     if not ws.current().best_weights.is_file():
         print("no training winner yet - train first (option 6)")
         return
-    confirm = ft.ask(f"make {ws.current().best_weights.name} the tracker's model? the current one is backed up first [y/N] ")
+    confirm = ft.ask(f"make {ws.current().best_weights.name} the workspace's model? the current one is backed up first [y/N] ")
     if confirm and confirm.lower().startswith("y"):
         ft.run_cli(["promote"])
 
@@ -270,7 +270,7 @@ MENU = [
     ("4", "check labels", "validate every label file against its video", _menu_check),
     ("5", "evaluate", "score the current detector on the reviewed clips", lambda: ft.run_cli(["eval"])),
     ("6", "train", "fine-tune the model on the labelled clips", _menu_train),
-    ("7", "promote", "make the last training winner the tracker's model", _menu_promote),
+    ("7", "promote", "make the last training winner the workspace's model", _menu_promote),
     ("8", "import", "pull every labelled clip on this PC into the workspace", _menu_import),
     ("9", "camera tags", "mark each clip fixed/moving camera (train --cameras fixed uses it)", lambda: ft.run_cli(["camera"])),
     ("10", "hint model", "retrain what places the label tool's suggestions; switch versions", _menu_hints),

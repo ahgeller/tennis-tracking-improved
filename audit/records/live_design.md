@@ -23,7 +23,7 @@ cv2 decode  -> queue -> prepass push (TRT encoder/decoder, rings) -> pass 1 -> e
   and stamps its arrival (realtime file pacing: frame i is due i/fps after the first, and
   arrives at max(due, decoded)). `FrameQueue` holds the drop policy.
 - `live/pipeline.py`: `_Pump` pushes each frame into the prepass and keeps it for pass 1. Pass 1
-  is the offline `_Pass1Collector`, unchanged; its frame reader and ball backend pull the pump on
+  is the offline `Pass1Collector`, unchanged; its frame reader and ball backend pull the pump on
   demand, so it trails the prepass by exactly the lookahead it needs. It hands each committed
   frame on through its `committed(frame, ghosts)` hook, a no-op offline.
 - The device, the video's geometry and the `RunResult` come from the offline pipeline's own

@@ -8,9 +8,9 @@ interactive menu that walks through everything below. The commands remain for sc
     python finetune/ft.py add C:\\clips\\rally7.mp4     copy a new video in and pre-label it
     python finetune/ft.py label rally7               correct the labels (pre-labels first if needed)
     python finetune/ft.py check                      validate every label file against its video
-    python finetune/ft.py eval                       score the current detector on the reviewed clips
+    python finetune/ft.py eval                       score the workspace's model on the reviewed clips
     python finetune/ft.py train --val-clips video10  fine-tune; keeps the better of new vs start
-    python finetune/ft.py promote                    make the winner the tracker's model (backs up the old one)
+    python finetune/ft.py promote                    make the winner the workspace's model (backs up the old one)
     python finetune/ft.py hints train                retrain the network that places the label tool's suggestions
     python finetune/ft.py hints list | use <version> its versions (all kept) and which one the tool uses
     python finetune/ft.py hints sheet <clip> [a b]   a zoomed PNG of where two versions disagree, to judge by eye
@@ -233,9 +233,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
     """Score the detector on the clips whose labels may stand as ground truth (``data_policy``):
     the reviewed clips not in exclude.txt, own-camera ones only when there is no review policy.
     ``--clips`` narrows that; ``--all`` lifts the gate (every labelled clip)."""
-    command = ["--mode", "raw", "--models", "gridtracknet", "--archive", str(ws.current().root)]
-    if args.weights:
-        command += ["--gridtracknet-weights", str(Path(args.weights).resolve())]
+    layout = ws.current()
+    weights = Path(args.weights).resolve() if args.weights else layout.repo_weights     # not the tracker's default
+    command = ["--mode", "raw", "--models", "gridtracknet", "--archive", str(layout.root),
+               "--gridtracknet-weights", str(weights)]
     clips = args.clips
     if args.all:
         command.append("--include-excluded")
@@ -297,7 +298,7 @@ def run_cli(argv: List[str]) -> int:
     p.set_defaults(func=cmd_check)
     p = subparsers.add_parser("eval", help="raw detector metrics on the reviewed clips not in exclude.txt "
                                            "(own-camera clips only when there is no review policy)")
-    p.add_argument("--weights", help=".npz to score instead of the tracker's current weights")
+    p.add_argument("--weights", help="weights to score instead of the workspace's model (models/ball_detector.pt)")
     p.add_argument("--clips", nargs="*", help="clip stems or globs, among those")
     p.add_argument("--all", action="store_true",
                    help="every labelled clip instead, including those still under review or in exclude.txt "
@@ -310,8 +311,10 @@ def run_cli(argv: List[str]) -> int:
     p = subparsers.add_parser("pseudo", help="pseudo_labels.py: add <videos> | label | status, the teacher's labels for "
                                             "unlabelled video (its arguments pass through)")
     p.set_defaults(func=cmd_pseudo, forwards=True)
-    p = subparsers.add_parser("promote", help="copy the winning weights over the tracker's model (with backup)")
-    p.add_argument("--weights", help="which weights to promote (default: finetune/models/ball_best.pt); the suffix must be the tracker's")
+    p = subparsers.add_parser("promote", help="copy the winning weights over the workspace's model, "
+                                              "models/ball_detector.pt (with backup)")
+    p.add_argument("--weights", help="which weights to promote (default: finetune/models/ball_best.pt); "
+                                     "the suffix must be the workspace model's")
     p.set_defaults(func=cmd_promote)
     p = subparsers.add_parser("camera", help="measure camera motion per clip and tag clips.csv fixed/moving")
     p.add_argument("--clips", nargs="*", help="clip stems or globs")
@@ -319,7 +322,7 @@ def run_cli(argv: List[str]) -> int:
     p.set_defaults(func=cmd_camera)
     subparsers.add_parser("paths", help="show the interpreter, workspace and data source paths").set_defaults(func=cmd_paths)
     p = subparsers.add_parser("colab-zip", help="build the one zip the Colab notebook unpacks: videos, labels, "
-                                               "clips.csv and the other records, the tracker's weights and the trainer's code")
+                                               "clips.csv and the other records, the workspace's model and the trainer's code")
     p.add_argument("--out", help=f"where to write it (default: {DEFAULT_OUT.relative_to(REPOSITORY).as_posix()})")
     p.add_argument("--code-only", action="store_true",
                    help="just the records and the code, as tennis_finetune_code.zip: the notebook lays it over the big zip")

@@ -36,11 +36,10 @@ from finetune.data import workspace as ws
 from finetune.data.labels import DraftRow, write_draft as write_draft_rows
 from finetune.data.workspace import VideoMeta, draft_csv, label_csv, video_meta, videos_in
 from finetune.data.detect import ball_detector, detect_points
-from tennis_tracker.config import Config
+from tennis_tracker.ball_weights import operating_conf, unknown_weights_note
 from tennis_tracker.frame_rate import require_phase_stride
 
 RAW_DRAFT_CONF = 0.25          # raw drafts keep guesses down to this confidence, so nearly every frame has one
-PIPELINE_CONF = Config.conf    # the tracker's own default threshold, so a pipeline draft is what the tracker shows
 
 Guess = Tuple[float, float, str, float]     # x, y, where it came from, confidence
 NO_GUESS = DraftRow(None, "none", 0.0)      # the draft row of a frame the detector had nothing for
@@ -69,11 +68,16 @@ def raw_rows(video: Path, weights: Path, conf: float, device: str, meta: VideoMe
 
 
 def pipeline_rows(video: Path, weights: Path, conf: Optional[float], device: str, json_path: Path) -> Dict[int, Guess]:
-    """The full tracker's answer per frame it filled (selector + fills), as draft guesses."""
+    """The full tracker's answer per frame it filled (selector + fills), as draft guesses; `conf` None
+    is the threshold the tracker runs `weights` at (``ball_weights.operating_conf``), so a draft is
+    what the tracker shows."""
     from tennis_tracker.headless import run_headless     # the pipeline: CUDA and TensorRT, only for this source
 
-    rows = run_headless(video, model_path=weights, conf=PIPELINE_CONF if conf is None else conf, device=device,
-                        tracking_json=json_path).frame_rows()
+    threshold = operating_conf(weights) if conf is None else conf
+    note = unknown_weights_note(weights) if conf is None else None
+    if note:
+        print(f"[pretrack] {note}")
+    rows = run_headless(video, model_path=weights, conf=threshold, device=device, tracking_json=json_path).frame_rows()
     return {
         row["frame"]: (row["x"], row["y"], row.get("source", "det"), float(row.get("conf", 0.0)))
         for row in rows if row.get("present")

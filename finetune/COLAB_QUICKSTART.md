@@ -9,7 +9,7 @@ python finetune/ft.py colab-zip
 ```
 
 This writes `output/tennis_finetune_colab.zip`. It holds the workspace videos and labels, the records (`clips.csv`,
-`review_status.json`, `holdouts.json`, `exclude.txt`), the tracker's model (`models/ball_detector.pt`, the default start
+`review_status.json`, `holdouts.json`, `exclude.txt`), the workspace's model (`models/ball_detector.pt`, the default start
 and teacher), the pseudo-labelled clips if any (step 4), and the trainer's code. The code list is derived from the
 trainer's imports and written to `code/code_manifest.json`. The notebook checks it.
 
@@ -79,4 +79,5 @@ Two public sources (also in `finetune/DATASETS.md` section 2.5):
 Download `best.pt` from `MyDrive/tennis_finetune/runs/<TAG>/` and score it on the PC:
 `evaluate_archive.py --archive finetune --mode raw --holdout mixed_v1 --gridtracknet-weights best.pt`.
 For the deployable weights, set `SELECTION_RUN` to that `TAG` with a new `TAG` and `EPOCHS` 0, then Run all.
-`python finetune/ft.py promote --weights winner.pt` makes the winner the tracker's model (with a backup).
+`python finetune/ft.py promote --weights winner.pt` makes the winner the workspace's model, `models/ball_detector.pt`
+(with a backup; the tracker's default is stream_s4, and it runs this file with `--weights`).

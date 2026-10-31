@@ -2,10 +2,14 @@
 format's own writer (``labels.write_draft``), on a temporary folder. The detector itself is
 exercised in test_label_workflow (raw_rows) and the script's workspace handling in test_workspace."""
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from finetune.data.labels import read_label_rows, read_labels
-from finetune.training.pretrack import PIPELINE_CONF, RAW_DRAFT_CONF, write_draft
-from tennis_tracker.config import Config
+from finetune.training import pretrack
+from finetune.training.pretrack import RAW_DRAFT_CONF, write_draft
+from tennis_tracker import headless
+from tennis_tracker.ball_weights import HEATMAP_S4_WEIGHTS, STREAM_S4_WEIGHTS, UNKNOWN_CONF
 
 
 def test_write_draft_covers_every_label_frame_in_the_label_format(tmp_path, capsys):
@@ -29,8 +33,19 @@ def test_write_draft_says_when_a_guess_sits_in_the_no_ball_corner(tmp_path, caps
     assert isinstance(draft, Path)
 
 
-def test_pipeline_drafts_use_the_tracker_default_threshold():
-    """The pipeline source drafts what the tracker would show, so its threshold is the tracker's
-    own default and moves with it (it was a copy, left at 0.50 when the default became 0.40)."""
-    assert PIPELINE_CONF == Config().conf
-    assert RAW_DRAFT_CONF < PIPELINE_CONF                                      # raw drafts keep unsure guesses too
+def test_pipeline_drafts_use_the_threshold_the_tracker_runs_the_weights_at(tmp_path):
+    """The pipeline source drafts what the tracker would show, so without --conf its threshold is
+    the one the tracker runs those weights at (it was a copy of the default once, left at 0.50 when
+    the default became 0.40); a given threshold is used as given."""
+    seen = []
+
+    def run_headless(video, *, model_path, conf, **_):
+        seen.append(conf)
+        return SimpleNamespace(frame_rows=lambda: [])
+
+    with patch.object(headless, "run_headless", run_headless):
+        for weights in (STREAM_S4_WEIGHTS.path, HEATMAP_S4_WEIGHTS.path, tmp_path / "other.pt"):
+            pretrack.pipeline_rows(tmp_path / "clip.mp4", weights, None, "0", tmp_path / "t.json")
+        pretrack.pipeline_rows(tmp_path / "clip.mp4", STREAM_S4_WEIGHTS.path, 0.3, "0", tmp_path / "t.json")
+    assert seen == [STREAM_S4_WEIGHTS.conf, HEATMAP_S4_WEIGHTS.conf, UNKNOWN_CONF, 0.3]
+    assert RAW_DRAFT_CONF < min(seen[:3])                                      # raw drafts keep unsure guesses too

@@ -25,15 +25,15 @@ import numpy as np
 import torch
 from ball_in_play_selector import RawDetection
 
-from ..config import Config
+from ..config import AUTO, FOREGROUND, PREPASS_MODES, PROCESS, Config, PrepassMode
 from .ball_gpu import (HeatRing, ModelResize, Nv12ModelResize, Readback, StreamHalves, TransitionRing, grid_peaks,
                       load_nv12_kernel, peak_points, transition_slots)
-from .ball_prepass_process import RemotePrepass
+from .ball_prepass_process import PrepassRows, RemotePrepass
 from .engine_boxes import OutputMode, decode_engine_boxes, engine_output_mode
 from .engine_session import TensorRTRuntimeSession
 from .. import video_decode
 from ..cuda_kernels import Kernel
-from ..ball_models import load_ball_model, load_deployed
+from ..ball_models import arch_of, load_ball_model, load_deployed, model_class
 from ..frame_rate import require_phase_stride
 from ..gridtracknet import FRAMES_PER_UNIT, HEIGHT, WIDTH, GridPoint
 
@@ -60,6 +60,19 @@ _UNITS_PER_INFERENCE = 4            # units per call of the PyTorch model
 _READBACKS_IN_FLIGHT = 3
 _DEFAULT_NAMES: Dict[int, str] = {0: "ball"}
 RUNTIMES = ("tensorrt", "torch")
+
+
+def prepass_mode(cfg: Config, weights: Path) -> PrepassMode:
+    """Where the prepass over `weights` runs: ``Config.ball_prepass_mode``, with ``AUTO`` resolved to
+    ``PROCESS`` for a network that streams (``streaming_halves``, while ``Config.ball_prepass_streaming``
+    is on) and ``FOREGROUND`` for any other. Another mode is a ValueError."""
+    mode = cfg.ball_prepass_mode
+    if mode not in PREPASS_MODES:
+        raise ValueError(f"ball_prepass_mode must be one of {PREPASS_MODES}, not {mode!r}")
+    if mode != AUTO:
+        return mode
+    streams = cfg.ball_prepass_streaming and callable(getattr(model_class(arch_of(weights)), "streaming_halves", None))
+    return PROCESS if streams else FOREGROUND
 
 
 class FrameReader:
@@ -143,9 +156,17 @@ class BallDetectorBackend:
     uses_raw_frames = False
     use_async = False
     async_slots = 1
+    # Where a whole-clip backend's prepass runs (``prepass_mode``); a per-frame backend has none.
+    prepass_mode = FOREGROUND
 
     def prepare_video(self, video_path: Path, fps: float, width: int, height: int, total: int) -> None:
         """Hook for whole-clip backends; ``total`` is the container's frame count hint."""
+
+    def finish_prepass(self) -> None:
+        """Pass 1 has every detection: let a prepass process start exiting (``close`` waits)."""
+
+    def close(self) -> None:
+        """Release what the backend holds beyond this process's memory (a prepass process)."""
 
     def detect(self, frame_bgr: FrameInput, frame_index: int) -> List[RawDetection]:
         raise NotImplementedError
@@ -211,8 +232,8 @@ class GridTrackNetBallDetector(BallDetectorBackend):
     only four floats a frame come back, through pinned memory a few calls
     behind the device.
 
-    ``prepare_video`` decodes the whole clip once (by default before pass 1,
-    or on a worker thread or process, see ``Config.gridtracknet_prepass_background``) and caches one
+    ``prepare_video`` decodes the whole clip once (before pass 1, on a worker thread or in a child
+    process: ``prepass_mode``, ``Config.ball_prepass_mode``) and caches one
     detection per decoded source frame; ``detections_at(i)`` returns frame
     ``i``'s result, waiting for the prepass if it is behind, and raises once
     the prepass has finished without ever decoding frame ``i``.
@@ -255,10 +276,12 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         self.model: Any = None
         self.engine: Any = None
         self.stream_halves: Optional[StreamHalves] = None
-        if cfg.gridtracknet_prepass_process and cfg.gridtracknet_prepass_background:
-            # The child builds the model and the engine; this process only reads its answers.
+        self.prepass_mode = prepass_mode(cfg, Path(weights_path))
+        if self.prepass_mode == PROCESS:
+            # The child builds the model and the engines, starting now; this process only reads its answers.
             self._remote = RemotePrepass(weights_path, cfg)
-            print(f"[detector] the ball prepass runs in its own process ({Path(weights_path).name})")
+            print(f"[detector] the ball prepass runs in its own process ({Path(weights_path).name}, "
+                  f"pid {self._remote.pid})")
             return
         self.model = load_ball_model(Path(weights_path), self.device)
         self.stream_halves = self._open_stream(Path(weights_path))
@@ -391,16 +414,17 @@ class GridTrackNetBallDetector(BallDetectorBackend):
 
         ``total`` is the container's frame count, only a hint: the cache
         grows with the frames actually decoded, and a mismatch is reported.
-        ``background`` (default ``cfg.gridtracknet_prepass_background``) runs
-        the prepass on a worker thread so pass 1 can start on frame 0 while
-        the detector is still ahead of it; ``detect()`` then blocks only if
-        pass 1 catches up.  Results are identical to the synchronous pass,
-        whose failure raises from here.
+        ``background`` (default: unless ``prepass_mode`` is ``FOREGROUND``)
+        returns at once, the prepass running on a worker thread or in the
+        prepass process, so pass 1 can start on frame 0 while the detector is
+        still ahead of it; ``detect()`` then blocks only if pass 1 catches up.
+        Results are identical to the synchronous pass, whose failure raises
+        from here.
         """
         source_stride = self.source_stride_for(fps)
         cached = self._begin_prepass()
         if background is None:
-            background = self.cfg.gridtracknet_prepass_background
+            background = self.prepass_mode != FOREGROUND
         if self._remote is not None:
             self._run_remote(self._remote, video_path, fps, width, height, total, cached)
             if not background:
@@ -423,10 +447,10 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                     cached: List[List[RawDetection]]) -> None:
         """Start the prepass process on the clip: its final rows land in `cached` in order and are
         published as they arrive; its end, or its error, finishes the prepass here."""
-        def on_rows(start: int, rows: List[List[RawDetection]]) -> None:
-            del cached[start:]
-            cached.extend(rows)
-            self._publish(start + len(rows))
+        def on_rows(message: PrepassRows) -> None:
+            del cached[message.start:]
+            cached.extend(message.rows)
+            self._publish(message.start + len(message.rows))
 
         def on_end(error: Optional[BaseException]) -> None:
             self._worker_error = error
@@ -434,8 +458,13 @@ class GridTrackNetBallDetector(BallDetectorBackend):
 
         remote.run(video_path, fps, width, height, total, on_rows, on_end)
 
+    def finish_prepass(self) -> None:
+        """Tell the prepass process, if the prepass runs in one, to exit."""
+        if self._remote is not None:
+            self._remote.stop()
+
     def close(self) -> None:
-        """Stop the prepass process, if the prepass runs in one."""
+        """Stop the prepass process, if the prepass runs in one, and wait for it."""
         if self._remote is not None:
             self._remote.close()
             self._remote = None

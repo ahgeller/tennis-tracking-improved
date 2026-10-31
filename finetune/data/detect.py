@@ -27,11 +27,13 @@ def ball_detector(weights: Path, conf: float = 0.0, device: str = "0",
     `window_step` is ``Config.gridtracknet_window_step`` (below 5, overlapping units averaged;
     None, the Config default)."""
     import torch
-    from tennis_tracker.config import Config
+    from tennis_tracker.config import FOREGROUND, Config
     from tennis_tracker.engines import ball_detectors as backends
     # These scripts own their process: let cuDNN autotune the fixed-shape convolutions.
     torch.backends.cudnn.benchmark = True
-    cfg = Config(conf=conf, device=device, gridtracknet_source_stride=source_stride,
+    # In the foreground: these scripts want the whole clip's answer at once, so a child process
+    # (Config.ball_prepass_mode "auto" for a streaming network) would only add its start-up.
+    cfg = Config(conf=conf, device=device, gridtracknet_source_stride=source_stride, ball_prepass_mode=FOREGROUND,
                  **({} if window_step is None else {"gridtracknet_window_step": window_step}))
     return backends.GridTrackNetBallDetector(str(weights), cfg)
 

@@ -24,6 +24,7 @@ from finetune.data.detector_metrics import REFERENCE_HEIGHT, REFERENCE_WIDTH
 from finetune.data import workspace as ws
 from finetune.data.workspace import (DEFAULT_SOURCES, clip_of, draft_files, label_files, natural_key, read_exclusions,
                                      read_manifest, review_json, video_meta, videos_in, write_manifest)
+from tennis_tracker.ball_weights import known_weights
 
 LISTED_CLIPS = 12                  # how many clip names status prints before "..."
 
@@ -123,7 +124,7 @@ def print_models() -> None:
     print("\nmodels")
     layout = ws.current()
     if layout.repo_weights.is_file():
-        print(f"  tracker uses   {shown(layout.repo_weights)}  sha {sha8(layout.repo_weights)}  "
+        print(f"  workspace uses {shown(layout.repo_weights)}  sha {sha8(layout.repo_weights)}  "
               f"{dt.datetime.fromtimestamp(layout.repo_weights.stat().st_mtime):%Y-%m-%d %H:%M}")
     if layout.best_weights.is_file():
         same = sha8(layout.best_weights) == sha8(layout.repo_weights) if layout.repo_weights.is_file() else False
@@ -252,8 +253,17 @@ def cmd_promote(args: argparse.Namespace) -> int:
         print(f"[backup ] {layout.repo_weights.name} -> {backup.name}")
     copy_atomic(source, layout.repo_weights)
     print(f"[promote] {source} -> {layout.repo_weights}")
-    print("next: python finetune/ft.py eval      (the reviewed clips)\n"
-          "      python -m evaluation.parity     (in system/: the Pomona gate; a new model may legitimately move its numbers)")
+    entry = known_weights(layout.repo_weights)
+    if entry is not None:
+        print(f"[warning] the tracker runs {layout.repo_weights.name} at {entry.conf:.2f}, the threshold the weights "
+              f"before these were gated at (tennis_tracker/ball_weights.py): gate these (evaluate_archive.py --mode "
+              f"pipeline --holdout mixed_v1 --gridtracknet-weights {shown(layout.repo_weights)}) and update that "
+              f"entry, or run them with --conf")
+    name = layout.repo_weights.name
+    print(f"next: python finetune/ft.py eval      (the reviewed clips, scoring {name})\n"
+          f"      in system/: python clean_tracker.py --weights models/{name} --no-video --tracking-json output/tracking.json\n"
+          f"      then        python -m evaluation.parity --existing   (the Pomona gate on that run; without --existing it\n"
+          f"                  runs the tracker's default, stream_s4, not {name}; a new model may legitimately move its numbers)")
     return 0
 
 

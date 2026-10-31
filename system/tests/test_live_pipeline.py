@@ -2,6 +2,7 @@
 source frames to the selector, the Phase C seam, Ctrl-C's stop and the options' checks."""
 import contextlib
 import signal
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -145,3 +146,20 @@ def test_a_camera_cannot_be_paced_fast_and_is_named_as_the_input():
         LiveOptions(camera=0, pacing="fast")
     assert LiveOptions(camera=0).pacing == "realtime"
     assert camera_name(1) == "camera:1"
+
+
+def test_a_live_config_runs_the_prepass_in_the_foreground_and_writes_no_video():
+    """Live feeds the prepass frame by frame on the tracking thread, whatever the config asked for
+    (a streaming network's AUTO is a prepass process), so pass 1's CUDA graphs stay on."""
+    from tennis_tracker.config import FOREGROUND, PROCESS, Config
+    from tennis_tracker.engines.ball_detectors import prepass_mode
+    from tennis_tracker.live.pipeline import live_config
+    from tennis_tracker.pass1 import use_cuda_graphs
+    asked = Config(ball_prepass_mode=PROCESS, save_tracking_video=True, save_motion_debug=True,
+                   save_detector_input_debug=True, save_track_debug_video=True, motion_diagnostics=True)
+    cfg = live_config(asked)
+    assert cfg.ball_prepass_mode == FOREGROUND == prepass_mode(cfg, Path("stream.pt"))   # the weights are not read
+    assert not (cfg.save_tracking_video or cfg.save_motion_debug or cfg.save_detector_input_debug
+                or cfg.save_track_debug_video or cfg.motion_diagnostics)
+    assert use_cuda_graphs(cfg, SimpleNamespace(prepass_mode=FOREGROUND)) == bool(cfg.pass1_cuda_graphs)
+    assert (cfg.conf, cfg.model_path) == (asked.conf, asked.model_path)

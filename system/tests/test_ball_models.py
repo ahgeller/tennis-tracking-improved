@@ -11,7 +11,7 @@ import torch
 from tennis_tracker import ball_models, pipeline
 from tennis_tracker.ball_models import (ARCHITECTURES, GRIDTRACKNET, HEATMAP_S4, arch_of, load_ball_model, model_class,
                                         weights_suffix)
-from tennis_tracker.config import Config
+from tennis_tracker.config import FOREGROUND, Config
 from tennis_tracker.gridtracknet import GridTrackNet
 from tennis_tracker.heatmapnet import HeatmapNet, save_model
 
@@ -72,16 +72,16 @@ def test_the_pipeline_builder_sends_both_weights_suffixes_to_the_prepass_detecto
     weights.write_bytes(b"placeholder")
     cfg = Config(model_path=str(weights))
     with patch.object(pipeline, "GridTrackNetBallDetector", return_value="prepass") as detector:
-        assert pipeline._build_ball_detector(cfg) == "prepass"
+        assert pipeline.build_ball_detector(cfg) == "prepass"
     detector.assert_called_once_with(str(weights.resolve()), cfg)
     with pytest.raises(FileNotFoundError, match="Ball-detector weights not found"):
-        pipeline._build_ball_detector(Config(model_path=str(tmp_path / f"missing{suffix}")))
+        pipeline.build_ball_detector(Config(model_path=str(tmp_path / f"missing{suffix}")))
 
 
 def test_the_pipeline_builder_still_resolves_an_engine_beside_other_paths(tmp_path):
     with patch.object(pipeline, "resolve_engine_path", return_value=None):
         with pytest.raises(RuntimeError, match="Expected a .engine file"):
-            pipeline._build_ball_detector(Config(model_path=str(tmp_path / "ball.onnx")))
+            pipeline.build_ball_detector(Config(model_path=str(tmp_path / "ball.onnx")))
 
 
 def test_the_prepass_detector_warms_up_with_the_models_channel_count(capsys):
@@ -101,6 +101,7 @@ def test_the_prepass_detector_warms_up_with_the_models_channel_count(capsys):
          patch.object(torch, "device", return_value=CPU), \
          patch.object(torch.cuda, "synchronize"), \
          patch.object(ball_detectors, "load_ball_model", return_value=Probe()):
-        detector = ball_detectors.GridTrackNetBallDetector("weights.pt", Config(device="0"))
+        cfg = Config(device="0", ball_prepass_mode=FOREGROUND)       # "auto" would read the weights
+        detector = ball_detectors.GridTrackNetBallDetector("weights.pt", cfg)
     assert seen["shape"] == (1, 15, 432, 768) and isinstance(detector.model, Probe)
     assert "[detector] heatmap_s4 FP16, 192x108 grid" in capsys.readouterr().out

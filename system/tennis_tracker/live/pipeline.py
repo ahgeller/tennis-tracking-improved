@@ -9,10 +9,10 @@ number of frames later. Nothing waits for the whole clip.
    the same engines, ``TransitionRing`` and heat ring, each unit run as soon as it is cut) and
    holds it for pass 1. A frame's detections are final ``PrepassStream.lookahead_frames`` frames
    after it (8 at 60 FPS, 4 at 30 FPS).
-3. Pass 1 (``pass1._Pass1Collector``, the offline loop itself) trails the prepass: it pulls frames
+3. Pass 1 (``pass1.Pass1Collector``, the offline loop itself) trails the prepass: it pulls frames
    and detections on demand, and both pull the pump, so it runs as far behind the newest frame
    as the prepass's lookahead and the motion gate's next frame need, and no farther.
-4. Each frame pass 1 commits (``_Pass1Collector.committed``) goes to the ``FixedLagSelector``,
+4. Each frame pass 1 commits (``Pass1Collector.committed``) goes to the ``FixedLagSelector``,
    which commits every frame's output ``delay`` frames after it (``fixed_lag``), in its own process
    by default (``selector_process``).
 
@@ -59,15 +59,15 @@ import cv2
 import numpy as np
 from ball_in_play_selector import FrameResult
 
-from ..config import Config
+from ..config import FOREGROUND, Config
 from ..court.court_geometry import last_valid_court_keypoints
 from ..engines.ball_detectors import BallDetectorBackend, CachedDetections, FrameInput, GridTrackNetBallDetector
 from ..engines.court_detector import CourtDetector
 from ..engines.player_detector import PlayerDetector, prefetch_bytetrack
 from ..export import RunResult, write_tracking_json
 from ..frame_window import FrameWindow
-from ..pass1 import Box, Pass1Result, _Pass1Collector, _use_cuda_graphs
-from ..pipeline import _build_ball_detector, _court_events, assemble_result, open_cuda_device, video_info
+from ..pass1 import Box, Pass1Result, Pass1Collector, use_cuda_graphs
+from ..pipeline import build_ball_detector, compute_court_events, assemble_result, open_cuda_device, video_info
 from ..run_context import RunContext, Selection, Timing
 from ..utils import print_platform_report
 from ..video_io import pinned_source
@@ -258,7 +258,7 @@ class _PumpReader:
         return self.pump.waiting.popleft() if self.pump.waiting else None
 
 
-class _LiveCollector(_Pass1Collector):
+class _LiveCollector(Pass1Collector):
     """Pass 1's loop, with each committed frame and the ghost ROIs found with it handed on
     (``evidence.GhostEraser`` has the rule the selector applies them by)."""
 
@@ -414,6 +414,14 @@ def _stop_on_interrupt(source: LiveSource) -> Iterator[None]:
         signal.signal(signal.SIGINT, previous)
 
 
+def live_config(cfg: Config) -> Config:
+    """`cfg` for a live run: no video or debug output written, and the prepass in the foreground
+    (``FOREGROUND``), fed frame by frame on the tracking thread (``open_stream``): a thread or a
+    process prepass reads the clip itself."""
+    return replace(cfg, save_tracking_video=False, save_motion_debug=False, save_detector_input_debug=False,
+                   save_track_debug_video=False, motion_diagnostics=False, ball_prepass_mode=FOREGROUND)
+
+
 def _open_live(cfg: Config, options: LiveOptions) -> RunContext:
     """The config resolved for a CUDA device, the detectors and the capture, as ``pipeline._open_inputs``
     builds them (``open_cuda_device``, ``video_info``), for a live run: no video written, the prepass
@@ -424,13 +432,11 @@ def _open_live(cfg: Config, options: LiveOptions) -> RunContext:
     if cfg.player_model_path:
         prefetch_bytetrack()
     camera = options.camera
-    cfg = replace(cfg, save_tracking_video=False, save_motion_debug=False, save_detector_input_debug=False,
-                  save_track_debug_video=False, motion_diagnostics=False,
-                  gridtracknet_prepass_background=False, gridtracknet_prepass_process=False)
+    cfg = live_config(cfg)
     if camera is not None:
         cfg = replace(cfg, input_video=camera_name(camera))
     cfg, device = open_cuda_device(cfg)
-    detector = _build_ball_detector(cfg)
+    detector = build_ball_detector(cfg)
     if not isinstance(detector, GridTrackNetBallDetector):
         raise RuntimeError("The live tracker runs the five-frame ball model (.pt or .npz weights)")
     capture = open_capture(cfg.input_video if camera is None else None, camera)
@@ -486,7 +492,7 @@ def run_live(cfg: Config, options: LiveOptions = LiveOptions(),
                     raise RuntimeError(f"No frames from {video.path}")
                 stats.first_arrival = pump.arrivals[0]
                 window = FrameWindow(ctx.device, cfg.enable_preprocess, first, reader.read(),
-                                     cuda_graphs=_use_cuda_graphs(cfg))
+                                     cuda_graphs=use_cuda_graphs(cfg, detector))
                 ctx.timing.add("init_total", ctx.init_t0)
                 print(f"[live] committing {settings.delay if settings.delay is not None else 'all'} frame(s) behind, "
                       f"re-selecting every {settings.every} over {settings.history} frames of history"
@@ -539,7 +545,7 @@ def _finish(ctx: RunContext, pass1: Pass1Result, run: _LiveRun, source_index: Li
         track.in_timeline = True
     by_source = Pass1Result(player_boxes=player_boxes, court_keypoints=court_keypoints)
     selection = Selection(run.committed, None, tracks, None, None if last_court is None else list(last_court), {})
-    events = _court_events(ctx, by_source, selection)
+    events = compute_court_events(ctx, by_source, selection)
     outputs = {"tracking_json": Path(cfg.tracking_json)} if cfg.tracking_json else {}
     result = assemble_result(ctx, by_source, selection, events, total, 0, outputs)
     report = stats.report()

@@ -46,14 +46,19 @@ from finetune.data import workspace as ws
 from finetune.data.workspace import (HOLDOUTS_NAME, MANIFEST_NAME, clip_of, find_video, natural_key, read_exclusions,
                                      read_manifest, video_meta)
 from finetune.scoring.pipeline_score import ClipScore, score_pipeline_clip
+from tennis_tracker.ball_weights import operating_conf, unknown_weights_note
+from tennis_tracker.config import PREPASS_MODES, PrepassMode
 from tennis_tracker.paths import BALL_WEIGHTS
 
 ARCHIVE_VARIABLE = "TENNIS_ARCHIVE"
 MODELS = {
-    "gridtracknet": BALL_WEIGHTS,
+    "gridtracknet": BALL_WEIGHTS,       # the tracker's default detector; ft.py eval names the workspace's model
 }
 DEFAULT_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-PER_CLIP_CONF = 0.4         # the per-clip table and the offset report use this threshold
+# The per-clip table and the offset report use this threshold. Fixed, not the scored weights'
+# operating threshold (ball_weights.operating_conf), so raw tables compare across models and runs at
+# one threshold; the sweep over --thresholds shows the others.
+PER_CLIP_CONF = 0.4
 BAD_FRAMES_LISTED = 40      # how many of a clip's bad frames the pipeline report names
 CELL_BINS = 5               # --cell-histogram: bins across a grid cell, per axis
 
@@ -292,22 +297,33 @@ def run_raw(models: List[str], clips: List[ClipPair], thresholds: List[float], d
         report_raw(name, per_model[name], thresholds, sources, grids[name] if histogram else None)
 
 
-def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float], device: str,
+def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, Optional[float]], device: str,
                  out_dir: Path, reuse_json: bool = False, court_events: bool = False,
                  weights: Optional[Dict[str, Path]] = None, window_step: Optional[int] = None,
-                 live: Optional[Any] = None, sources: Optional[Dict[str, str]] = None) -> None:
+                 prepass_mode: Optional[PrepassMode] = None, live: Optional[Any] = None,
+                 sources: Optional[Dict[str, str]] = None) -> None:
     """Track every clip (``headless.run_headless``) and score the per-frame output; with
     ``court_events`` each clip's tracking JSON also carries its court events, which
     ``score_court_events.py`` reads. `weights` (model name -> file) replaces a model's bundled
-    weights, and `window_step` is the prepass's ``Config.gridtracknet_window_step`` (None, the
-    Config default), as both are in ``run_raw``. `live` (``tennis_tracker.live.pipeline.LiveOptions``)
-    tracks each clip with the live tracker instead, frame by frame on its fixed lag. `sources` (clip ->
-    clips.csv source) adds a pooled line per source."""
+    weights, a model's `conf` None is its weights' gated threshold (``ball_weights.operating_conf``),
+    `window_step` is the prepass's ``Config.gridtracknet_window_step`` (None, the Config default), as
+    both are in ``run_raw``, and `prepass_mode` is ``Config.ball_prepass_mode`` (None, its default).
+    `live` (``tennis_tracker.live.pipeline.LiveOptions``) tracks each clip with the live tracker
+    instead, frame by frame on its fixed lag (its prepass always in the foreground). `sources` (clip
+    -> clips.csv source) adds a pooled line per source."""
     from tennis_tracker.headless import headless_config, run_headless, tracking_payload   # CUDA and TensorRT, only here
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for name in models:
         results: List[Tuple[str, ClipScore]] = []
+        model_path = (weights or {}).get(name) or MODELS[name]
+        threshold = conf[name]
+        if threshold is None:
+            threshold = operating_conf(model_path)
+            note = unknown_weights_note(model_path)
+            if note:
+                print(f"[pipeline] {note}")
+        print(f"[pipeline] {name}: {model_path} at confidence {threshold:.2f}")
         for video_path, csv_path in clips:
             meta = video_meta(video_path)
             labels = read_labels(csv_path, meta.width, meta.height)
@@ -318,16 +334,15 @@ def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float
                 payload = json.loads(json_path.read_text(encoding="utf-8"))
             elif live is not None:
                 from tennis_tracker.live.pipeline import run_live
-                config = headless_config(video_path, model_path=(weights or {}).get(name) or MODELS[name],
-                                         conf=conf[name], device=device, tracking_json=json_path,
+                config = headless_config(video_path, model_path=model_path, conf=threshold, device=device,
+                                         tracking_json=json_path,
                                          court_events=court_events, window_step=window_step)
                 result, _ = run_live(config, live)
                 payload = tracking_payload(result)
             else:
-                result = run_headless(video_path, model_path=(weights or {}).get(name) or MODELS[name],
-                                      conf=conf[name], device=device,
+                result = run_headless(video_path, model_path=model_path, conf=threshold, device=device,
                                       tracking_json=json_path, output_video=out_dir / f"{video_path.stem}_{name}.mp4",
-                                      court_events=court_events, window_step=window_step)
+                                      court_events=court_events, window_step=window_step, prepass_mode=prepass_mode)
                 payload = tracking_payload(result)
             results.append((video_path.stem, score_pipeline_clip(labels, payload, meta.width)))
         print(f"\n=== pipeline [{name}] per clip ===")
@@ -370,7 +385,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--cell-histogram", action="store_true",
                         help="Raw mode: also report recall by where the ball sat within its grid cell")
     parser.add_argument("--thresholds", nargs="+", type=float, default=DEFAULT_THRESHOLDS)
-    parser.add_argument("--gridtracknet-conf", type=float, default=0.40)
+    parser.add_argument("--gridtracknet-conf", type=float, default=None,
+                        help="Pipeline mode: the detector's threshold (default: the one its weights were gated at, "
+                             "tennis_tracker/ball_weights.py)")
     parser.add_argument("--device", default="0")
     parser.add_argument("--out-dir", default=str(REPOSITORY / "output" / "archive_eval"))
     parser.add_argument("--archive", default=None,
@@ -404,6 +421,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="Frames of a phase between the prepass's unit starts, in both modes (default: the "
                              "tracker's Config.gridtracknet_window_step); below 5 a frame's overlapping units are "
                              "averaged before it is decoded (1 = a unit at every frame, 5 = one unit per frame)")
+    parser.add_argument("--prepass-mode", choices=PREPASS_MODES, default=None,
+                        help="Pipeline mode: where the prepass runs, Config.ball_prepass_mode (default: the tracker's, "
+                             "auto: a child process for a streaming network); the answers are the same in every mode")
     args = parser.parse_args(argv)
 
     archive = Path(args.archive) if args.archive else default_archive()
@@ -424,7 +444,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.models, clips,
             {"gridtracknet": args.gridtracknet_conf},
             args.device, Path(args.out_dir), reuse_json=bool(args.reuse_json), court_events=bool(args.court),
-            weights=weights, window_step=args.window_step, live=_live_options(args),
+            weights=weights, window_step=args.window_step, prepass_mode=args.prepass_mode, live=_live_options(args),
             sources={clip_of(csv_path): clip_source(clip_of(csv_path), manifest) for _, csv_path in clips},
         )
     return 0

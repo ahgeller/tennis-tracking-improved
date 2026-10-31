@@ -15,7 +15,7 @@ The same actions exist as commands for scripts and power use:
 
 | command | what it does |
 |---|---|
-| `ft.py status` | every clip by source, own-camera clips with review progress, which model the tracker uses |
+| `ft.py status` | every clip by source, own-camera clips with review progress, which model the workspace uses |
 | `ft.py import all` | pull every labelled clip that exists on this PC into the workspace (see *Data* below) |
 | `ft.py add C:\clips\rally7.mp4` | copy a new video in (30 or 60 FPS) and pre-label it |
 | `ft.py label rally7` | open the click tool; pre-labels first if there is no draft yet |
@@ -24,9 +24,9 @@ The same actions exist as commands for scripts and power use:
 | `ft.py check --audit --mark` | as `--audit`, plus record every frame the detector disputes so the click tool can walk you to them |
 | `ft.py check` | validate every label file against its video (cadence, range, columns); `--audit [--fix]` cross-checks with the detector |
 | `ft.py camera` | measure camera motion per clip and tag `clips.csv` `fixed` / `moving` (the background channel only learns from fixed) |
-| `ft.py eval` | raw detector recall / wrong / false-alarm on the reviewed clips not in `exclude.txt` (`--clips` narrows; `--all` scores every labelled clip; `--weights`) |
+| `ft.py eval` | the workspace model's (`system/models/ball_detector.pt`) raw detector recall / wrong / false-alarm on the reviewed clips not in `exclude.txt` (`--clips` narrows; `--all` scores every labelled clip; `--weights` scores other weights) |
 | `ft.py train ...` | fine-tune or train from scratch; keeps the better of new vs starting weights |
-| `ft.py promote` | make the winner the tracker's model (`system/models/ball_detector.pt`, old one backed up) |
+| `ft.py promote` | make the winner the workspace's model (`system/models/ball_detector.pt`, old one backed up; the tracker runs it with `--weights`, its default being stream_s4) |
 | `ft.py paths` | which python, which folders |
 | `ft.py colab-zip` | build `output/tennis_finetune_colab.zip`, the one file the Colab notebook unpacks (videos, labels, records, weights, trainer code) |
 
@@ -195,8 +195,8 @@ separately). `ft.py check` flags files that break this rule.
    .\finetune.ps1 eval --clips night1      # how the current detector scores on it (--weights for a candidate)
    ```
 
-4. **Train** - `ft.py train`. Defaults: fine-tune the tracker's current
-   weights on every clip in the workspace, hold out `video10`, 10 epochs.
+4. **Train** - `ft.py train`. Defaults: fine-tune the workspace's
+   model (`system/models/ball_detector.pt`) on every clip in the workspace, hold out `video10`, 10 epochs.
    Useful recipes:
 
    ```powershell
@@ -218,8 +218,8 @@ separately). `ft.py check` flags files that break this rule.
      `--epoch-units N` fixes how many windows an epoch draws (an epoch over
      everything is ~50k windows, about an hour on the 5080).
    - `--arch` picks the network; without it the run trains the architecture of
-     `--weights`, the tracker's model by default. `heatmap_s4` is `HeatmapNet`
-     (`system/tennis_tracker/heatmapnet.py`), the tracker's network since 2026-10-26: a U-shaped encoder-decoder with skip
+     `--weights`, the workspace's model by default. `heatmap_s4` is `HeatmapNet`
+     (`system/tennis_tracker/heatmapnet.py`), the tracker's network from 2026-10-26 to 2026-10-30 (stream_s4 since): a U-shaped encoder-decoder with skip
      connections answering on a 192x108 grid (stride 4) instead of
      GridTrackNet's 48x27, trained on a Gaussian heat target with CenterNet's
      focal loss. It takes the same five frames and answers in the same layout,
@@ -311,10 +311,14 @@ separately). `ft.py check` flags files that break this rule.
 5. **Use it** - `.\finetune.ps1 promote` copies the winner over
    `system/models/ball_detector.pt` (the old file is kept as
    `*.pt.before_promote_<timestamp>`) - only worth doing when `runs/<tag>/winner.json`
-   says the new weights won. Then `.\finetune.ps1 eval` and
-   `python -m evaluation.parity` (in `system/`). Go back to step 1 with `--weights` pointing at
-   the new model. `.\finetune.ps1 status` at any point shows what is
-   labelled, what is still a draft, and which model the tracker is using.
+   says the new weights won. Then `.\finetune.ps1 eval` (it scores that file), and in `system/`
+   `python clean_tracker.py --weights models/ball_detector.pt --no-video --tracking-json
+   output/tracking.json` followed by `python -m evaluation.parity --existing` (plain
+   `evaluation.parity` runs the tracker's default, stream_s4, not the promoted file). The
+   promoted file runs at its path's threshold in `system/tennis_tracker/ball_weights.py` (0.40):
+   gate the new weights and update that entry, as `promote` warns. Go back to step 1 with
+   `--weights` pointing at the new model. `.\finetune.ps1 status` at any point shows what is
+   labelled, what is still a draft, and which model the workspace uses.
 
 ## Tips
 

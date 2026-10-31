@@ -13,7 +13,7 @@ from finetune.data.workspace import (MANIFEST_COLUMNS, add_exclusion, clip_of, d
                                      label_csv, label_files, labelled_clips, natural_key, read_exclusions, read_manifest,
                                      recording_of, require_video, review_json, suspect_json, unsaved_csv, videos_in,
                                      write_manifest)
-from tennis_tracker.paths import BALL_WEIGHTS
+from tennis_tracker.paths import HEATMAP_WEIGHTS
 
 
 
@@ -111,7 +111,7 @@ def test_tennis_workspace_relocates_the_workspace_without_touching_the_code_path
     out = subprocess.run([sys.executable, "-c", code], cwd=REPOSITORY, env=env, capture_output=True, text=True, check=True)
     lines = out.stdout.splitlines()
     assert lines[:3] == [str(tmp_path.resolve()), str(tmp_path.resolve() / "labels"), str(tmp_path.resolve() / "clips.csv")]
-    assert lines[3] == str(BALL_WEIGHTS)
+    assert lines[3] == str(HEATMAP_WEIGHTS)
     env.pop("TENNIS_WORKSPACE")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPOSITORY, env=env, capture_output=True, text=True, check=True)
     assert out.stdout.splitlines()[0] == str(REPOSITORY / "finetune")
@@ -150,7 +150,7 @@ def test_the_layout_is_one_object_and_nothing_else_holds_a_workspace_path(tmp_pa
     monkeypatch.undo()
     monkeypatch.setenv(workspace.WORKSPACE_VARIABLE, str(tmp_path / "elsewhere"))
     assert workspace.current().root == (tmp_path / "elsewhere").resolve()
-    assert workspace.current().repo_weights == BALL_WEIGHTS
+    assert workspace.current().repo_weights == HEATMAP_WEIGHTS
     monkeypatch.delenv(workspace.WORKSPACE_VARIABLE)
     assert workspace.current().root == REPOSITORY / "finetune"
 

@@ -99,6 +99,23 @@ def test_promote_backs_up_the_tracker_weights_and_copies_the_winner_atomically(w
     assert layout.repo_weights.read_bytes() == b"explicit" and len(list(layout.models.glob("*.before_promote_*"))) == 2
 
 
+def test_promote_warns_that_a_known_path_keeps_its_old_threshold_and_says_how_to_check_it(workspace_dir, capsys,
+                                                                                         monkeypatch):
+    """The threshold table is keyed by path, so the promoted file inherits the old weights'
+    threshold: promote says so, and its parity hint runs the promoted file, not the default."""
+    from tennis_tracker import ball_weights
+
+    layout = workspace.current()
+    layout.models.mkdir()
+    layout.best_weights.write_bytes(b"new weights")
+    entry = ball_weights.HEATMAP_S4_WEIGHTS._replace(path=layout.repo_weights)
+    monkeypatch.setattr(ball_weights, "KNOWN", (ball_weights.STREAM_S4_WEIGHTS, entry))
+    assert ft.run_cli(["promote"]) == 0
+    out = capsys.readouterr().out
+    assert f"runs {layout.repo_weights.name} at {entry.conf:.2f}" in out and "--mode pipeline" in out
+    assert f"--weights models/{layout.repo_weights.name}" in out and "evaluation.parity --existing" in out
+
+
 # --------------------------------------------------------------------------- check and status
 
 def test_check_reports_each_label_file_against_its_video(workspace_dir, capsys):
@@ -165,6 +182,8 @@ def test_eval_scores_the_clips_the_policy_admits_and_says_when_none_do(workspace
         assert ft.run_cli(["eval", "--all"]) == 0
     assert launched[0][-2:] == ["--clips", "video13"]                     # video2 unreviewed, video14 excluded
     assert launched[1][-1] == "--include-excluded" and "--clips" not in launched[1]
+    for arguments in launched:          # the workspace's model, not the tracker's default (stream_s4)
+        assert arguments[6:8] == ["--gridtracknet-weights", str(workspace.current().repo_weights)]
 
 
 def test_label_pre_labels_a_clip_that_has_no_labels_yet(workspace_dir, capsys):

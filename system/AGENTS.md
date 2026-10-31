@@ -5,9 +5,11 @@
 This is a GPU tennis-video tracker, offline by default and live with `--live` or
 `--camera` (`tennis_tracker/live/`, below). `clean_tracker.py` runs detection,
 selection and optional rendering (`--weights` points it at other ball-detector
-weights, `.npz` or `.pt`; the default, `models/ball_detector.pt`, is the heat-map
-network's control run of 2026-10-26, and `models/legacy/` keeps the GridTrackNet
-`.npz` files and the old YOLO `ball.engine`). Outputs are an annotated MP4 and
+weights, `.npz` or `.pt`; the default, `models/candidates/stream_s4_e60.pt`, is the
+`stream_s4` network at 0.42, `models/ball_detector.pt` the heat-map network's
+control run of 2026-10-26, run at 0.40, and `models/legacy/` keeps the GridTrackNet
+`.npz` files and the old YOLO `ball.engine`; without `--conf` the threshold is the
+one `tennis_tracker/ball_weights.py` records for the weights). Outputs are an annotated MP4 and
 per-frame JSON. It is not a calibrated 3D ball-flight or line-calling system.
 
 The labelling and GridTrackNet fine-tuning workspace (`finetune/`, its launchers,
@@ -61,9 +63,14 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   input with the same bytes; `tennis_tracker/cuda_kernels.py` compiles such kernels
   with the NVRTC PyTorch ships and caches the cubins; `video_decode.py` is NVDEC
   and OpenCV decoding with OpenCV's pixels); `ball_trt.py` builds and caches the ball model's TensorRT engine
-  (`Config.ball_prepass_runtime`), or a streaming network's encoder and decoder engines; `ball_prepass_process.py` runs the prepass in a
-  child process. The prepass runs before pass 1 by default
-  (`audit/records/opt_ball_prepass.md` on the `optimization` branch has why).
+  (`Config.ball_prepass_runtime`), or a streaming network's encoder and decoder engines;
+  `ball_prepass_process.py` runs the prepass in a child process (`RemotePrepass`: started
+  with the detector, so it builds its engines while the parent builds its own; told to exit by
+  `finish_prepass` once pass 1 is done, waited for by `close`, which the pipeline calls whatever
+  ends the run, and it exits with its parent). `Config.ball_prepass_mode` places the prepass: `auto` (the default)
+  runs a streaming network's (stream_s4's) in the child beside init and pass 1 and any other
+  before pass 1 (`audit/records/opt_abplus_s4.md` and `opt_ball_prepass.md` on the
+  `optimization` branch have why).
   `engine_session.py`: the TensorRT session the ball, player
   and court engines share; `engine_files.py`: locating engine files, their
   Ultralytics metadata and I/O tensor table (no CUDA); `engine_boxes.py`:
@@ -73,7 +80,9 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   TensorRT players with ByteTrack association.
   `court_detector.py`: court keypoints every N frames, last good result cached.
   `tennis_tracker/paths.py`: the model asset paths every consumer (Config
-  defaults, scripts) spells once. `headless.py`: the one Config and run for a
+  defaults, scripts) spells once. `tennis_tracker/ball_weights.py`: the known ball-detector files'
+  gated thresholds (`operating_conf`) and the error that says where a missing one comes from.
+  `headless.py`: the one Config and run for a
   caller that wants the tracker's answer and no video.
 - `tennis_tracker/pipeline.py`: orders the stages, calls the selector and, with
   `--court` (`Config.court_events`, implied by the minimap), the court events,
