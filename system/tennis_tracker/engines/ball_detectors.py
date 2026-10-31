@@ -25,7 +25,7 @@ import numpy as np
 import torch
 from ball_in_play_selector import RawDetection
 
-from ..config import Config
+from ..config import AUTO, FOREGROUND, PREPASS_MODES, PROCESS, Config, PrepassMode
 from .ball_gpu import (HeatRing, ModelResize, Nv12ModelResize, Readback, StreamHalves, TransitionRing, grid_peaks,
                       load_nv12_kernel, peak_points, transition_slots)
 from .ball_prepass_process import PrepassRows, RemotePrepass
@@ -60,12 +60,9 @@ _UNITS_PER_INFERENCE = 4            # units per call of the PyTorch model
 _READBACKS_IN_FLIGHT = 3
 _DEFAULT_NAMES: Dict[int, str] = {0: "ball"}
 RUNTIMES = ("tensorrt", "torch")
-# Where the prepass runs (``Config.ball_prepass_mode``; ``AUTO`` resolves by the network, ``prepass_mode``).
-AUTO, FOREGROUND, THREAD, PROCESS = "auto", "foreground", "thread", "process"
-PREPASS_MODES = (AUTO, FOREGROUND, THREAD, PROCESS)
 
 
-def prepass_mode(cfg: Config, weights: Path) -> str:
+def prepass_mode(cfg: Config, weights: Path) -> PrepassMode:
     """Where the prepass over `weights` runs: ``Config.ball_prepass_mode``, with ``AUTO`` resolved to
     ``PROCESS`` for a network that streams (``streaming_halves``, while ``Config.ball_prepass_streaming``
     is on) and ``FOREGROUND`` for any other. Another mode is a ValueError."""

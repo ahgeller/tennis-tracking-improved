@@ -1,8 +1,16 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional, Tuple
 
 from tennis_tracker.ball_weights import DEFAULT_CONF
 from tennis_tracker.paths import COURT_ENGINE, BALL_WEIGHTS, MODELS, PLAYER_ENGINE
+
+# Where the ball prepass runs (Config.ball_prepass_mode; engines/ball_detectors.prepass_mode resolves AUTO).
+PrepassMode = Literal["auto", "foreground", "thread", "process"]
+AUTO: PrepassMode = "auto"
+FOREGROUND: PrepassMode = "foreground"
+THREAD: PrepassMode = "thread"
+PROCESS: PrepassMode = "process"
+PREPASS_MODES: Tuple[PrepassMode, ...] = (AUTO, FOREGROUND, THREAD, PROCESS)
 
 
 @dataclass
@@ -35,7 +43,7 @@ class Config:
     # one, audit/records/opt_abplus_s4.md) and costs pass 1 up to 0.4 s beside it; the windowed
     # heatmap_s4 prepass, ~4 s, slowed pass 1 by more than that (opt_ball_prepass.md item 3,
     # opt_abplus.md item 3).
-    ball_prepass_mode: str = "auto"
+    ball_prepass_mode: PrepassMode = AUTO
     # Frames of a phase between one five-frame unit's start and the next: 1 starts a unit at every
     # frame and averages the up-to-five answers each frame gets (the default since 2026-10-26: on
     # heat4's weights, held out, false alarm 0.085 to 0.073 at recall 0.894 to 0.900, and through the

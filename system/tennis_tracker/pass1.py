@@ -22,7 +22,8 @@ from ball_in_play_selector import PackedMask, RawDetection
 from .court.court_geometry import court_keypoints_key
 from .court.court_scene import PlayerBoxes
 from .cuda_kernels import KernelUnavailable
-from .engines.ball_detectors import THREAD, BallDetectorBackend, FrameInput
+from .config import THREAD
+from .engines.ball_detectors import BallDetectorBackend, FrameInput
 from .engines.player_detector import PlayerPending, interpolate_player_boxes
 from .frame_window import FrameWindow
 from .motion import (

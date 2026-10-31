@@ -47,8 +47,9 @@ import numpy as np
 import pytest
 
 from tennis_tracker import pass1, pass2, pipeline, utils, video_decode
-from tennis_tracker.config import Config
+from tennis_tracker.config import FOREGROUND, PROCESS, THREAD, Config
 from tennis_tracker.court.court_geometry import LINE_PAIRS_14
+from tennis_tracker.engines.ball_detectors import prepass_mode
 from tennis_tracker.engines.court_detector import CourtDetector
 from tennis_tracker.export import RunResult
 from tennis_tracker.headless import headless_config
@@ -196,7 +197,7 @@ class FakeGridTrackNet:
     def __init__(self, weights_path: str, cfg: Config):
         self.weights_path = str(weights_path)
         self.cfg = cfg
-        self.prepass_mode = "foreground" if cfg.ball_prepass_mode == "auto" else cfg.ball_prepass_mode
+        self.prepass_mode = prepass_mode(cfg, Path(weights_path))       # the real rule (an .npz: no file read)
         self.closed = False
         self.finished = False
         self.prepared: Optional[Dict[str, Any]] = None
@@ -365,6 +366,12 @@ JSON_ONLY_OVERRIDES = dict(
     save_detector_input_debug=False,
     save_track_debug_video=False,
 )
+
+
+def open_inputs(cfg: Config):
+    """What ``pipeline.run`` opens before pass 1: the run's setup, its ball detector and inputs."""
+    setup = pipeline._setup_run(cfg)
+    return pipeline._open_inputs(setup, pipeline._build_ball_detector(setup.cfg))
 
 
 def make_config(tmp_path: Path, clip: Path, **overrides) -> Config:
@@ -713,7 +720,7 @@ def test_pass2_refuses_a_clip_it_cannot_reopen(tmp_path, monkeypatch, fake_cuda,
         pipeline.run(cfg)
 
 
-@pytest.mark.parametrize("mode", ["foreground", "process", "thread"])
+@pytest.mark.parametrize("mode", [FOREGROUND, PROCESS, THREAD])
 def test_a_foreground_or_process_prepass_starts_before_the_engines_and_a_threaded_one_after(
         tmp_path, monkeypatch, fake_cuda, clip, mode):
     """A prepass on the main thread runs before the court and player detectors are built, so
@@ -742,7 +749,7 @@ def test_a_foreground_or_process_prepass_starts_before_the_engines_and_a_threade
     monkeypatch.setattr(pipeline, "CourtDetector", RecordingCourt)
     monkeypatch.setattr(pipeline, "PlayerDetector", RecordingPlayers)
     pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode=mode))
-    assert events == (["court", "players", "prepass"] if mode == "thread" else ["prepass", "court", "players"])
+    assert events == (["court", "players", "prepass"] if mode == THREAD else ["prepass", "court", "players"])
     assert FakeGridTrackNet.instances[0].closed
 
 
@@ -759,15 +766,24 @@ def test_the_prepass_is_finished_after_pass_1_and_the_detector_closed_after_the_
         return select(ctx, pass1)
 
     monkeypatch.setattr(pipeline, "_select", recording_select)
-    pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode="process"))
+    pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode=PROCESS))
     assert seen == [(True, False)] and FakeGridTrackNet.instances[0].closed
 
 
 @pytest.mark.parametrize("stage", ["init", "pass1"])
 def test_the_ball_detector_is_closed_when_a_run_fails_or_is_interrupted(tmp_path, monkeypatch, fake_cuda, clip, stage):
     """The detector, which may own a prepass process, is closed whatever ends the run early: an
-    error while the other engines are built, or Ctrl-C during pass 1."""
+    error while the other engines are built, or Ctrl-C during pass 1; a failed init also releases
+    the clip it opened."""
     install_fakes(monkeypatch)
+    captures = []
+    open_capture = pipeline.cv2.VideoCapture
+
+    def recording_capture(*args):
+        captures.append(open_capture(*args))
+        return captures[-1]
+
+    monkeypatch.setattr(pipeline.cv2, "VideoCapture", recording_capture)
 
     def no_engine(*args, **kwargs):
         raise OSError("no engine")
@@ -780,8 +796,10 @@ def test_the_ball_detector_is_closed_when_a_run_fails_or_is_interrupted(tmp_path
     else:
         monkeypatch.setattr(pipeline, "collect_pass1", interrupted)
     with pytest.raises(OSError if stage == "init" else KeyboardInterrupt):
-        pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode="process"))
+        pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode=PROCESS))
     assert FakeGridTrackNet.instances[0].closed
+    if stage == "init":
+        assert len(captures) == 1 and not captures[0].isOpened()
 
 
 def test_a_video_run_probes_the_encoder_alongside_init_and_raises_what_the_probe_raised(
@@ -800,7 +818,7 @@ def test_a_video_run_probes_the_encoder_alongside_init_and_raises_what_the_probe
 
     monkeypatch.setattr(pipeline, "choose_encoder", recording_choose)
     install_fakes(monkeypatch)
-    ctx = pipeline._open_inputs(make_config(tmp_path, clip, use_nvenc=True))
+    ctx = open_inputs(make_config(tmp_path, clip, use_nvenc=True))
     ctx.capture.release()
     assert probes == ["encoder-probe"]
     assert ctx.encoder is not None and ctx.encoder.preferred == utils.ENCODER_NVENC
@@ -811,4 +829,4 @@ def test_a_video_run_probes_the_encoder_alongside_init_and_raises_what_the_probe
 
     monkeypatch.setattr(pipeline, "choose_encoder", broken)
     with pytest.raises(OSError, match="ffmpeg vanished"):
-        pipeline._open_inputs(make_config(tmp_path, clip, use_nvenc=True))
+        open_inputs(make_config(tmp_path, clip, use_nvenc=True))

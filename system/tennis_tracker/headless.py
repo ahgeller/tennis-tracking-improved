@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
-from .config import Config
+from .config import Config, PrepassMode
 from .paths import BOUNCE_MODEL, COURT_ENGINE, PLAYER_ENGINE
 from .export import RunResult
 from .tracking_schema import TrackingFrames
@@ -17,7 +17,7 @@ from .tracking_schema import TrackingFrames
 
 def headless_config(video: Path, *, model_path: Path, conf: float, device: str, tracking_json: Path,
                     output_video: Optional[Path] = None, court_events: bool = False,
-                    window_step: Optional[int] = None, prepass_mode: Optional[str] = None) -> Config:
+                    window_step: Optional[int] = None, prepass_mode: Optional[PrepassMode] = None) -> Config:
     """The tracker's configuration for a run that writes the tracking JSON and no video: the
     bundled player and court engines, the selector's table silenced. ``output_video`` only names
     the video the run would have written (its debug outputs are derived from it); ``court_events``
@@ -45,7 +45,7 @@ def headless_config(video: Path, *, model_path: Path, conf: float, device: str, 
 
 def run_headless(video: Path, *, model_path: Path, conf: float, device: str, tracking_json: Path,
                  output_video: Optional[Path] = None, court_events: bool = False,
-                 window_step: Optional[int] = None, prepass_mode: Optional[str] = None) -> RunResult:
+                 window_step: Optional[int] = None, prepass_mode: Optional[PrepassMode] = None) -> RunResult:
     """Track ``video`` with ``headless_config``'s settings and return what was found."""
     from .pipeline import run     # the pipeline imports CUDA, TensorRT and the renderers: only when a run is wanted
 

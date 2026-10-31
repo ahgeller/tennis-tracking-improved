@@ -11,7 +11,7 @@ import torch
 from tennis_tracker import ball_models, pipeline
 from tennis_tracker.ball_models import (ARCHITECTURES, GRIDTRACKNET, HEATMAP_S4, arch_of, load_ball_model, model_class,
                                         weights_suffix)
-from tennis_tracker.config import Config
+from tennis_tracker.config import FOREGROUND, Config
 from tennis_tracker.gridtracknet import GridTrackNet
 from tennis_tracker.heatmapnet import HeatmapNet, save_model
 
@@ -101,7 +101,7 @@ def test_the_prepass_detector_warms_up_with_the_models_channel_count(capsys):
          patch.object(torch, "device", return_value=CPU), \
          patch.object(torch.cuda, "synchronize"), \
          patch.object(ball_detectors, "load_ball_model", return_value=Probe()):
-        cfg = Config(device="0", ball_prepass_mode="foreground")       # "auto" would read the weights
+        cfg = Config(device="0", ball_prepass_mode=FOREGROUND)       # "auto" would read the weights
         detector = ball_detectors.GridTrackNetBallDetector("weights.pt", cfg)
     assert seen["shape"] == (1, 15, 432, 768) and isinstance(detector.model, Probe)
     assert "[detector] heatmap_s4 FP16, 192x108 grid" in capsys.readouterr().out
