@@ -1,4 +1,4 @@
-"""Check the exported Core ML ball models on a Mac against the PyTorch outputs saved beside them.
+"""Check the exported Core ML models on a Mac against the PyTorch outputs saved beside them.
 
 Run from this folder (``bash validate.sh`` sets up the environment and runs it):
 
@@ -7,27 +7,32 @@ Run from this folder (``bash validate.sh`` sets up the environment and runs it):
 
 ``manifest.json`` (written by ``tools/export_coreml.py``) lists the packages, the sample inputs
 (``samples/unit*/``: five consecutive same-phase frames of ``system/sample/pomona.mp4`` at 768x432,
-RGB in [0, 1], float16) and the PyTorch FP32 reference outputs for them. For every package this
-loads it with coremltools, predicts on each sample and prints:
+RGB in [0, 1], float16; ``samples/players/``: each unit's first frame as the player detector takes
+it) and the PyTorch FP32 reference outputs for them. For every package this loads it with
+coremltools, predicts on each sample and prints, per kind of case (``KINDS``):
 
 - grids (a unit's 15-channel output): the largest heat-map difference, the largest offset
-  difference, and in how many of the unit's frames the heat map's argmax lands on the same cell as
-  PyTorch's (exactly, and within one cell), over all frames and over the frames whose PyTorch peak
-  reaches the weights' operating threshold;
-- features (the stream_s4 encoder): the largest difference, also relative to the reference's range;
-- boxes (the player detector, on each unit's first frame): both raw heads decoded as the tracker
-  does (score threshold, then NMS), whether the frames find as many players, and over the matched
-  boxes the lowest IoU and the largest corner and score differences.
+  difference (over all frames, and over the frames whose PyTorch peak reaches the weights'
+  operating threshold, the confident ones), and in how many of the unit's frames the heat map's
+  argmax lands on the same cell as PyTorch's (exactly, and within one cell), over all frames and
+  over the confident ones;
+- stream_chain: the phone's path, the Core ML encoder on the unit's four transitions and its
+  outputs fed straight to the Core ML decoder, scored as grids;
+- features (the stream_s4 encoder): per level the largest difference, also relative to the
+  reference's largest magnitude;
+- boxes (the player detector): both raw heads decoded as the tracker does (score threshold, then
+  NMS), whether each frame finds as many players, and over the matched boxes the lowest IoU and
+  the largest corner and score differences.
 
-``stream_s4 chain`` runs the phone's path: the Core ML encoder on the unit's four transitions, its
-outputs fed straight to the Core ML decoder. Exit status 1 when an argmax disagrees on a frame
-above the threshold, a heat map differs by more than ``--heat-tolerance``, or a frame finds a
-different number of players or a player box overlaps the reference's by less than
-``BOX_IOU_TOLERANCE``.
+Exit status 1 when any group fails: a heat map differs by more than ``--heat-tolerance``, a
+confident frame's argmax lands elsewhere or its offsets differ by more than
+``--offset-tolerance``, an encoder level's largest relative difference exceeds the feature
+tolerance, or a frame finds a different number of players or a player box overlaps the
+reference's by less than the box IoU tolerance (``Tolerances``).
 
 Only numpy and coremltools are needed (``requirements-mac.txt``); predictions need macOS 14 or
-later (the packages target iOS 17). This file is also imported on the PC, where the metric
-functions below score the PyTorch FP16 runs; coremltools is imported only to predict.
+later (the packages target iOS 17). This file is also imported on the PC, where the same functions
+score the PyTorch graphs; coremltools is imported only to predict.
 """
 from __future__ import annotations
 
@@ -37,7 +42,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -47,27 +52,45 @@ GRID_PLANES = 3                     # per frame: heat, x offset, y offset
 HEAT_CHANNELS = tuple(range(0, FRAMES_PER_UNIT * GRID_PLANES, GRID_PLANES))
 OFFSET_CHANNELS = tuple(c for c in range(FRAMES_PER_UNIT * GRID_PLANES) if c not in HEAT_CHANNELS)
 DEFAULT_COMPUTE_UNITS = ("ALL", "CPU_AND_NE")
-DEFAULT_HEAT_TOLERANCE = 0.05
-FEATURE_TOLERANCE = 0.05            # an encoder feature's largest difference over the reference's largest magnitude
-BOX_IOU_TOLERANCE = 0.9             # the lowest IoU a player box may have with the reference's
+
+
+@dataclass(frozen=True)
+class Tolerances:
+    """What passes. heat: the largest heat-map difference; offset: the largest offset difference
+    on a confident frame (the PC's FP16 graphs reach about 0.026); feature: an encoder level's
+    largest difference over the reference's largest magnitude; box_iou: the lowest IoU a player
+    box may have with the reference's."""
+    heat: float = 0.05
+    offset: float = 0.1
+    feature: float = 0.05
+    box_iou: float = 0.9
 
 
 @dataclass
 class GridScore:
-    """How a unit's grids compare with the reference's: the largest heat and offset differences,
-    and per frame whether the heat argmax agrees (exact cell, within one cell) and whether the
-    reference's peak reaches the threshold."""
+    """How units' grids compare with the reference's: the largest heat difference, and per frame
+    the largest offset difference, whether the heat argmax agrees (exact cell, within one cell)
+    and whether the reference's peak reaches the threshold."""
     max_heat_diff: float
-    max_offset_diff: float
+    offset_diffs: List[float]
     exact: List[bool]
     near: List[bool]
     confident: List[bool]
+
+    @property
+    def max_offset_diff(self) -> float:
+        return max(self.offset_diffs, default=0.0)
+
+    @property
+    def confident_max_offset_diff(self) -> float:
+        return max((d for d, c in zip(self.offset_diffs, self.confident) if c), default=0.0)
 
     def summary(self) -> Dict[str, Any]:
         confident = [i for i, flag in enumerate(self.confident) if flag]
         return {
             "max_heat_diff": round(self.max_heat_diff, 5),
             "max_offset_diff": round(self.max_offset_diff, 5),
+            "confident_max_offset_diff": round(self.confident_max_offset_diff, 5),
             "argmax_exact": f"{sum(self.exact)}/{len(self.exact)}",
             "argmax_within_1": f"{sum(self.near)}/{len(self.near)}",
             "confident_argmax_exact": f"{sum(self.exact[i] for i in confident)}/{len(confident)}",
@@ -87,14 +110,21 @@ def score_grids(output: np.ndarray, reference: np.ndarray, threshold: float) -> 
     if out.shape != ref.shape or out.shape[0] != FRAMES_PER_UNIT * GRID_PLANES:
         raise ValueError(f"grids of shape {out.shape} and {ref.shape}: expected two (15, rows, cols)")
     diff = np.abs(out - ref)
-    exact, near, confident = [], [], []
+    offsets, exact, near, confident = [], [], [], []
     for channel in HEAT_CHANNELS:
         (r0, c0), (r1, c1) = _peak(out[channel]), _peak(ref[channel])
+        offsets.append(float(diff[channel + 1:channel + GRID_PLANES].max()))
         exact.append((r0, c0) == (r1, c1))
         near.append(abs(r0 - r1) <= 1 and abs(c0 - c1) <= 1)
         confident.append(bool(ref[channel].max() >= threshold))
-    return GridScore(float(diff[list(HEAT_CHANNELS)].max()), float(diff[list(OFFSET_CHANNELS)].max()),
-                     exact, near, confident)
+    return GridScore(float(diff[list(HEAT_CHANNELS)].max()), offsets, exact, near, confident)
+
+
+def merge_grid_scores(scores: Sequence[GridScore]) -> GridScore:
+    """The scores of several units as one: the largest heat difference, every frame's values."""
+    return GridScore(max(s.max_heat_diff for s in scores), [d for s in scores for d in s.offset_diffs],
+                     [f for s in scores for f in s.exact], [f for s in scores for f in s.near],
+                     [f for s in scores for f in s.confident])
 
 
 def score_features(output: np.ndarray, reference: np.ndarray) -> Dict[str, float]:
@@ -109,22 +139,35 @@ def score_features(output: np.ndarray, reference: np.ndarray) -> Dict[str, float
     return {"max_diff": round(largest, 5), "max_diff_relative": round(largest / scale, 6)}
 
 
+def nms(boxes: np.ndarray, scores: np.ndarray, iou: float) -> np.ndarray:
+    """Indices greedy NMS keeps, best score first; the arithmetic of the tracker's
+    ``engine_boxes.nms_xyxy``."""
+    if boxes.size == 0:
+        return np.empty((0,), dtype=np.int64)
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+    order = np.argsort(scores)[::-1]
+    keep = []
+    while order.size:
+        best, rest = int(order[0]), order[1:]
+        keep.append(best)
+        inter = (np.maximum(0.0, np.minimum(x2[best], x2[rest]) - np.maximum(x1[best], x1[rest]))
+                 * np.maximum(0.0, np.minimum(y2[best], y2[rest]) - np.maximum(y1[best], y1[rest])))
+        order = rest[inter / (areas[best] + areas[rest] - inter + 1e-6) <= float(iou)]
+    return np.asarray(keep, dtype=np.int64)
+
+
 def decode_head(head: np.ndarray, threshold: float, iou: float) -> np.ndarray:
     """A raw detection head ``(1, 4 + classes, anchors)`` as the tracker decodes it
-    (``engine_boxes``): anchors whose best class scores at least `threshold`, as ``[x1, y1, x2, y2,
-    score]`` rows in input pixels, after greedy NMS at `iou`, best first."""
-    values = np.asarray(head, dtype=np.float32).reshape(np.shape(head)[-2:])
-    scores = values[4:].max(axis=0)
-    keep = np.flatnonzero(scores >= threshold)
-    cx, cy, w, h = values[:4, keep]
-    boxes = np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, scores[keep]], axis=1)
-    order = list(np.argsort(-boxes[:, 4]))
-    kept: List[np.ndarray] = []
-    while order:
-        best = boxes[order.pop(0)]
-        kept.append(best)
-        order = [i for i in order if box_iou(best, boxes[i]) <= iou]
-    return np.array(kept, dtype=np.float32).reshape(-1, 5)
+    (``engine_boxes._raw_head_rows``): anchors whose best class scores at least `threshold`, as
+    ``[x1, y1, x2, y2, score]`` float32 rows in input pixels, after greedy NMS at `iou`, best first."""
+    values = np.asarray(head).reshape(np.shape(head)[-2:])
+    scores = values[4:].astype(np.float32).max(axis=0)
+    keep = np.flatnonzero(scores >= float(threshold))
+    cx, cy, w, h = values[:4, keep].astype(np.float32)
+    boxes = np.stack([cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5], axis=1)
+    kept = nms(boxes, scores[keep], iou)
+    return np.column_stack([boxes[kept], scores[keep][kept]]).astype(np.float32).reshape(-1, 5)
 
 
 def box_iou(a: np.ndarray, b: np.ndarray) -> float:
@@ -179,13 +222,6 @@ def merge_box_scores(scores: Sequence[BoxScore]) -> BoxScore:
                     max(s.max_corner_diff for s in scores), max(s.max_score_diff for s in scores))
 
 
-def merge_grid_scores(scores: Sequence[GridScore]) -> GridScore:
-    """The scores of several units as one: the largest differences, every frame's flags."""
-    return GridScore(max(s.max_heat_diff for s in scores), max(s.max_offset_diff for s in scores),
-                     [f for s in scores for f in s.exact], [f for s in scores for f in s.near],
-                     [f for s in scores for f in s.confident])
-
-
 def load_input(spec: Mapping[str, Any], root: Path) -> np.ndarray:
     """One model input from the manifest: ``{"npy": path}`` or ``{"npy": path, "channels": [a, b]}``
     (a channel slice of a unit's frames, an encoder's frame), as contiguous float16."""
@@ -220,32 +256,79 @@ class CoreMLRunner:
         return {key: np.asarray(value) for key, value in self.model(name).predict(dict(inputs)).items()}
 
 
-def run_case(runner: CoreMLRunner, case: Mapping[str, Any], root: Path) -> Dict[str, Any]:
-    """One manifest case scored: a ``grids`` or ``features`` case runs one package; a
-    ``stream_chain`` case runs the encoder on the unit's transitions and the decoder on its outputs."""
-    kind = case["kind"]
-    if kind == "stream_chain":
-        features: Dict[str, np.ndarray] = {}
-        for step in case["encoder_steps"]:
-            inputs = {name: load_input(spec, root) for name, spec in step["inputs"].items()}
-            outputs = runner.predict(case["encoder"], inputs)
-            for output_name, decoder_input in step["outputs_to"].items():
-                features[decoder_input] = np.ascontiguousarray(outputs[output_name], dtype=np.float16)
-        grids = runner.predict(case["decoder"], features)[case["output"]]
-        score = score_grids(grids, np.load(root / case["reference"]), case["threshold"])
-        return {"grid_score": score}
-    inputs = {name: load_input(spec, root) for name, spec in case["inputs"].items()}
-    outputs = runner.predict(case["package"], inputs)
-    if kind == "grids":
-        output = outputs[case["output"]]
-        return {"grid_score": score_grids(output, np.load(root / case["reference"]), case["threshold"])}
-    if kind == "boxes":
-        output = outputs[case["output"]]
-        return {"box_score": score_boxes(output, np.load(root / case["reference"]), case["threshold"], case["iou"])}
-    if kind == "features":
-        return {"features": {name: score_features(outputs[name], np.load(root / path))
-                             for name, path in case["references"].items()}}
-    raise ValueError(f"unknown case kind {kind!r}")
+def _predict_case(runner: Any, case: Mapping[str, Any], root: Path) -> Dict[str, np.ndarray]:
+    return runner.predict(case["package"], {name: load_input(spec, root) for name, spec in case["inputs"].items()})
+
+
+def run_grids(runner: Any, case: Mapping[str, Any], root: Path) -> GridScore:
+    output = _predict_case(runner, case, root)[case["output"]]
+    return score_grids(output, np.load(root / case["reference"]), case["threshold"])
+
+
+def run_chain(runner: Any, case: Mapping[str, Any], root: Path) -> GridScore:
+    features: Dict[str, np.ndarray] = {}
+    for step in case["encoder_steps"]:
+        inputs = {name: load_input(spec, root) for name, spec in step["inputs"].items()}
+        outputs = runner.predict(case["encoder"], inputs)
+        for output_name, decoder_input in step["outputs_to"].items():
+            features[decoder_input] = np.ascontiguousarray(outputs[output_name], dtype=np.float16)
+    grids = runner.predict(case["decoder"], features)[case["output"]]
+    return score_grids(grids, np.load(root / case["reference"]), case["threshold"])
+
+
+def run_features(runner: Any, case: Mapping[str, Any], root: Path) -> Dict[str, Dict[str, float]]:
+    outputs = _predict_case(runner, case, root)
+    return {name: score_features(outputs[name], np.load(root / path)) for name, path in case["references"].items()}
+
+
+def run_boxes(runner: Any, case: Mapping[str, Any], root: Path) -> BoxScore:
+    output = _predict_case(runner, case, root)[case["output"]]
+    return score_boxes(output, np.load(root / case["reference"]), case["threshold"], case["iou"])
+
+
+Verdict = Tuple[bool, Dict[str, Any]]
+
+
+def judge_grids(scores: Sequence[GridScore], tolerances: Tolerances) -> Verdict:
+    """Pass: the largest heat difference within tolerance, and on every confident frame the
+    reference's argmax and offsets within tolerance."""
+    merged = merge_grid_scores(scores)
+    confident = [i for i, flag in enumerate(merged.confident) if flag]
+    ok = (merged.max_heat_diff <= tolerances.heat and all(merged.exact[i] for i in confident)
+          and merged.confident_max_offset_diff <= tolerances.offset)
+    return ok, merged.summary()
+
+
+def judge_features(scores: Sequence[Mapping[str, Mapping[str, float]]], tolerances: Tolerances) -> Verdict:
+    """Pass: every level's worst relative difference, over every case, within tolerance."""
+    worst: Dict[str, Dict[str, float]] = {}
+    for result in scores:
+        for level, values in result.items():
+            entry = worst.setdefault(level, {"max_diff": 0.0, "max_diff_relative": 0.0})
+            for key in entry:
+                entry[key] = max(entry[key], values[key])
+    return all(values["max_diff_relative"] <= tolerances.feature for values in worst.values()), worst
+
+
+def judge_boxes(scores: Sequence[BoxScore], tolerances: Tolerances) -> Verdict:
+    """Pass: every frame finds as many players, and every matched box overlaps within tolerance."""
+    merged = merge_box_scores(scores)
+    return all(merged.same_count) and merged.min_iou >= tolerances.box_iou, merged.summary()
+
+
+@dataclass(frozen=True)
+class Kind:
+    """How one kind of case is run (to a score) and how a group's scores are judged."""
+    run: Callable[[Any, Mapping[str, Any], Path], Any]
+    judge: Callable[[Sequence[Any], Tolerances], Verdict]
+
+
+KINDS: Dict[str, Kind] = {
+    "grids": Kind(run_grids, judge_grids),
+    "stream_chain": Kind(run_chain, judge_grids),
+    "features": Kind(run_features, judge_features),
+    "boxes": Kind(run_boxes, judge_boxes),
+}
 
 
 def time_predictions(runner: CoreMLRunner, name: str, inputs: Mapping[str, np.ndarray], repeats: int) -> float:
@@ -259,43 +342,30 @@ def time_predictions(runner: CoreMLRunner, name: str, inputs: Mapping[str, np.nd
     return float(np.median(times))
 
 
-def evaluate(runner: Any, manifest: Mapping[str, Any], root: Path, heat_tolerance: float) -> Dict[str, Dict[str, Any]]:
-    """Every case run by `runner` (anything with ``predict(name, inputs)``), scored by group:
-    ``{"pass": bool, "summary": {...}}``. A grids group passes when its largest heat difference is
-    within `heat_tolerance` and every frame above the threshold has the reference's argmax; a
-    features group when every level's largest difference is within ``FEATURE_TOLERANCE`` of the
-    reference's range."""
+def evaluate(runner: Any, manifest: Mapping[str, Any], root: Path,
+             tolerances: Tolerances = Tolerances()) -> Dict[str, Dict[str, Any]]:
+    """Every case run by `runner` (anything with ``predict(name, inputs)``) and judged by group
+    (``KINDS``): ``{"pass": bool, "summary": {...}}``."""
     groups: Dict[str, List[Mapping[str, Any]]] = {}
     for case in manifest["cases"]:
         groups.setdefault(case["group"], []).append(case)
     scored: Dict[str, Dict[str, Any]] = {}
     for group, cases in groups.items():
-        results = [run_case(runner, case, root) for case in cases]
-        if "grid_score" in results[0]:
-            merged = merge_grid_scores([r["grid_score"] for r in results])
-            ok = merged.max_heat_diff <= heat_tolerance and all(e for e, c in zip(merged.exact, merged.confident) if c)
-            scored[group] = {"pass": bool(ok), "summary": merged.summary()}
-        elif "box_score" in results[0]:
-            boxes = merge_box_scores([r["box_score"] for r in results])
-            ok = all(boxes.same_count) and boxes.min_iou >= BOX_IOU_TOLERANCE
-            scored[group] = {"pass": bool(ok), "summary": boxes.summary()}
-        else:
-            worst: Dict[str, Dict[str, float]] = {}
-            for result in results:
-                for name, values in result["features"].items():
-                    if name not in worst or values["max_diff"] > worst[name]["max_diff"]:
-                        worst[name] = values
-            ok = all(values["max_diff_relative"] <= FEATURE_TOLERANCE for values in worst.values())
-            scored[group] = {"pass": bool(ok), "summary": worst}
+        kinds = {case["kind"] for case in cases}
+        if len(kinds) != 1 or not kinds <= set(KINDS):
+            raise ValueError(f"group {group!r} has case kinds {sorted(kinds)}; expected one of {sorted(KINDS)}")
+        kind = KINDS[kinds.pop()]
+        ok, summary = kind.judge([kind.run(runner, case, root) for case in cases], tolerances)
+        scored[group] = {"pass": bool(ok), "summary": summary}
     return scored
 
 
-def validate(manifest: Mapping[str, Any], root: Path, compute_units: str, heat_tolerance: float,
+def validate(manifest: Mapping[str, Any], root: Path, compute_units: str, tolerances: Tolerances,
              repeats: int) -> bool:
     """Every case at `compute_units` on Core ML, printed by group; True when every group passes."""
     runner = CoreMLRunner(manifest, root, compute_units)
     print(f"\n=== compute units {compute_units} ===")
-    scored = evaluate(runner, manifest, root, heat_tolerance)
+    scored = evaluate(runner, manifest, root, tolerances)
     for group, result in scored.items():
         print(f"{'PASS' if result['pass'] else 'FAIL'}  {group:<18} {json.dumps(result['summary'])}")
     passed = all(result["pass"] for result in scored.values())
@@ -309,22 +379,26 @@ def validate(manifest: Mapping[str, Any], root: Path, compute_units: str, heat_t
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    defaults = Tolerances()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--manifest", type=Path, default=HERE / "manifest.json")
     parser.add_argument("--compute-units", nargs="+", default=list(DEFAULT_COMPUTE_UNITS),
                         choices=["ALL", "CPU_AND_NE", "CPU_AND_GPU", "CPU_ONLY"])
-    parser.add_argument("--heat-tolerance", type=float, default=DEFAULT_HEAT_TOLERANCE,
-                        help=f"the largest heat-map difference that passes (default {DEFAULT_HEAT_TOLERANCE})")
+    parser.add_argument("--heat-tolerance", type=float, default=defaults.heat,
+                        help=f"the largest heat-map difference that passes (default {defaults.heat})")
+    parser.add_argument("--offset-tolerance", type=float, default=defaults.offset,
+                        help=f"the largest offset difference on a confident frame that passes (default {defaults.offset})")
     parser.add_argument("--repeats", type=int, default=20, help="predictions timed per package on this Mac (0: none)")
     args = parser.parse_args(argv)
     if sys.platform != "darwin":
         print("Core ML predictions run only on macOS; copy this folder to a Mac.")
         return 2
+    tolerances = Tolerances(heat=args.heat_tolerance, offset=args.offset_tolerance)
     manifest = json.loads(args.manifest.read_text())
     root = args.manifest.resolve().parent
     print(f"packages exported {manifest['exported']} from {manifest['source_commit']} "
           f"(coremltools {manifest['coremltools']}); references: PyTorch FP32")
-    passed = all([validate(manifest, root, units, args.heat_tolerance, args.repeats) for units in args.compute_units])
+    passed = all([validate(manifest, root, units, tolerances, args.repeats) for units in args.compute_units])
     print("\nALL PASS" if passed else "\nSOME CHECKS FAILED (see FAIL lines)")
     return 0 if passed else 1
 

@@ -23,6 +23,9 @@ here: its source weights could not be matched to the one the tracker ships.
 
 ## 1. What you need
 
+- **This whole folder on the Mac.** Copy the `coreml_speed_test` folder as it is (a USB drive,
+  AirDrop, or a zip you unzip on the Mac): `models/`, `samples/`, `manifest.json` and the scripts
+  must stay side by side, with the folders inside unchanged.
 - **A Mac with Xcode.** Install Xcode from the Mac App Store. The current version, Xcode 27,
   needs macOS Tahoe 26.6 or later ([Xcode support](https://developer.apple.com/support/xcode/)).
   Xcode 15 or later works (the models target iOS 17); older versions name some windows differently (noted below).
@@ -61,11 +64,20 @@ bash /path/to/coreml_speed_test/validate.sh
 
 The first run sets up a private Python environment in `.venv` here (it needs the internet once)
 and then runs every model on this Mac, first with all compute units and then with CPU and
-Neural Engine. Each line says PASS or FAIL. It ends with **ALL PASS** when every ball model's
-heat map stays within 0.05 of the PC's and finds the ball in the same grid cell on every frame
-where the PC sees a ball, and the player detector finds the same players with boxes overlapping
-the PC's by at least 90%. Keep the output (copy the Terminal text) and send it back. The
-times it prints are this Mac's, not the iPhone's.
+Neural Engine. Each line says PASS or FAIL. It ends with **ALL PASS** when:
+
+- every ball model's heat map stays within 0.05 of the PC's, and on every frame where the PC
+  sees a ball it finds the ball in the same grid cell, with the position within the cell
+  (the x and y offsets) within 0.1 of the PC's;
+- the stream_s4 encoder's features stay within 5% of the PC's (largest difference over the
+  largest value, per feature level);
+- the player detector finds the same number of players on every sample frame, each box
+  overlapping the PC's by at least 90%.
+
+If the setup is interrupted or fails, run it again: it rebuilds `.venv` from scratch. Keep the
+output (copy the Terminal text) and send it back. This checks the models on **this Mac's**
+Neural Engine and CPU, not the iPhone's (the iPhone's chip is a different generation), and the
+times it prints are this Mac's too; section 4 is what measures the iPhone.
 
 ## 4. Time each model on the iPhone
 
@@ -119,6 +131,8 @@ above 16.7 ms it cannot keep up with 60 FPS at all.
   every frame, so its cost per frame is
   **encoder median Prediction + decoder median Prediction**.
   Example: encoder 1.4 ms + decoder 1.1 ms = 2.5 ms per frame, 15% of the budget.
+  (The tracker then averages each frame's heat maps over the up to five units that contain
+  it before it reads the ball's position, which is a few additions, not another model call.)
 - **stream_s4_unit** does the same work as four encoder runs plus one decoder run in a single
   call. It is not how the tracker runs; it shows what the split saves.
 - **heatmap_s4_unit** runs once per frame: its median Prediction is its per-frame cost. It is
@@ -136,7 +150,9 @@ above 16.7 ms it cannot keep up with 60 FPS at all.
   its cost is a short stall now and then, not a per-frame share.
 - **Load** is paid once when the app starts the model, not per frame.
 
-The work per call, counted on the PC (billions of multiply-accumulates, GMAC):
+The work per call, counted on the PC (billions of multiply-accumulates, GMAC; `manifest.json`
+holds each package's exact figure as `conv_gmac_per_call`, and where the two differ the manifest
+is right):
 
 | model | GMAC per call | calls per frame | GMAC per frame |
 |---|---:|---:|---:|
