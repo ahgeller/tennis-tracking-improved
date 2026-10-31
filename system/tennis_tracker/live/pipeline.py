@@ -29,6 +29,7 @@ region with the frame. v1 always looks at the whole frame.
 from __future__ import annotations
 
 import collections
+import gc
 import json
 import threading
 import time
@@ -76,7 +77,7 @@ class LiveOptions:
     every_s: float = 0.2
     pacing: str = "realtime"
     drop: DropPolicy = DropPolicy.BACKLOG
-    max_backlog_s: float = 0.25
+    max_backlog_s: float = 0.5
     camera: Optional[int] = None
     record_evidence: bool = False
     report_every_s: float = 5.0
@@ -405,7 +406,10 @@ def run_live(cfg: Config, options: LiveOptions = LiveOptions()) -> Tuple[RunResu
     stats.lookahead_frames = pump.prepass.lookahead_frames
     run = _LiveRun(ctx, pump, options, stats, settings)
     live_ctx = replace(ctx, detector=_LiveBall(pump))
-    source = LiveSource(capture, queue, video.fps, options.pacing, camera=options.camera is not None)
+    # Pass 1's frame window is built from the first two frames; a file's source holds the rest until
+    # it is (a camera keeps capturing: what the tracker cannot take then is dropped and reported).
+    camera = options.camera is not None
+    source = LiveSource(capture, queue, video.fps, options.pacing, camera=camera, hold_after=0 if camera else 2)
     reader = _PumpReader(pump)
     try:
         if run.process is not None:
@@ -424,9 +428,16 @@ def run_live(cfg: Config, options: LiveOptions = LiveOptions()) -> Tuple[RunResu
                   f"detections final {stats.lookahead_frames} frames behind")
             collector = _LiveCollector(live_ctx, window, run)
             run.attach(collector.result)
+            # Everything built so far (the models, engines, CUDA graphs: millions of objects) lives
+            # for the whole stream; out of the collector's reach, a full collection no longer walks
+            # it, which otherwise stalls the tracking thread 80-170 ms at a time.
+            gc.collect()
+            gc.freeze()
+            source.release()
             pass1 = collector.run(reader)       # type: ignore[arg-type]   # reads like ThreadedFrameReader
         finally:
             source.stop()
+            gc.unfreeze()
         run.finish()
     finally:
         run.close()

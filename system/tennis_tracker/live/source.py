@@ -126,10 +126,16 @@ def open_capture(video: Optional[str], camera: Optional[int]) -> Any:
 class LiveSource:
     """Decode `capture` on a thread and deliver its frames through `queue` (see the module docstring).
     ``fps`` paces a file in realtime; ``camera`` captures are realtime by nature and never paced.
-    ``clock`` and ``sleep`` are the timing seams the tests replace."""
+    ``clock`` and ``sleep`` are the timing seams the tests replace.
+
+    With `hold_after` the source delivers that many frames and waits for ``release()`` before the
+    next: the tracker builds its per-stream state from the first frames (pass 1's frame window and
+    its CUDA graphs: a quarter of a second), and a realtime file's clock starts at the release, as
+    a camera would be opened once the tracker is ready."""
 
     def __init__(self, capture: Any, queue: FrameQueue, fps: float, pacing: str = "realtime", camera: bool = False,
-                 clock: Callable[[], float] = time.perf_counter, sleep: Callable[[float], None] = time.sleep) -> None:
+                 clock: Callable[[], float] = time.perf_counter, sleep: Callable[[float], None] = time.sleep,
+                 hold_after: int = 0) -> None:
         if pacing not in PACINGS:
             raise ValueError(f"pacing must be one of {PACINGS}, not {pacing!r}")
         self.capture, self.queue = capture, queue
@@ -138,6 +144,10 @@ class LiveSource:
         self.clock, self.sleep = clock, sleep
         self.started: Optional[float] = None
         self._stop = threading.Event()
+        self.hold_after = int(hold_after)
+        self._released = threading.Event()
+        if self.hold_after <= 0:
+            self._released.set()
         self._pinned: Optional[Tuple[int, int]] = None
         height, width = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)), int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         if height > 0 and width > 0 and torch.cuda.is_available():
@@ -147,9 +157,14 @@ class LiveSource:
     def start(self) -> None:
         self._thread.start()
 
+    def release(self) -> None:
+        """Deliver the frames after the first `hold_after` (see the class docstring)."""
+        self._released.set()
+
     def stop(self) -> None:
         """Stop decoding (the frames queued so far stay queued) and release the capture."""
         self._stop.set()
+        self._released.set()
         self._thread.join()
         self.capture.release()
 
@@ -167,6 +182,12 @@ class LiveSource:
         try:
             index = 0
             while not self._stop.is_set():
+                if index == self.hold_after and not self._released.is_set():
+                    self._released.wait()
+                    if self._stop.is_set():
+                        break
+                    if self.started is not None:      # the clock starts again: frame `index` is due now
+                        self.started = self.clock() - index * self.period
                 ok, image = self._read()
                 if not ok or image is None:
                     break

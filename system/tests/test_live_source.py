@@ -163,3 +163,31 @@ def test_a_failing_decoder_reaches_the_tracker():
 def test_an_unknown_pacing_is_refused():
     with pytest.raises(ValueError):
         LiveSource(_Capture(1), FrameQueue(), fps=30.0, pacing="slow")
+
+
+def test_a_held_source_delivers_its_first_frames_then_starts_its_clock_at_the_release():
+    """With ``hold_after`` the source stops after that many frames until released; a realtime file
+    then paces the rest from the release, so the tracker's start-up does not count against it."""
+    clock = _Clock(step=0.001)
+    queue = FrameQueue(DropPolicy.NEVER)
+    source = LiveSource(_Capture(6), queue, fps=50.0, pacing="realtime", clock=clock, sleep=clock.sleep, hold_after=2)
+    source.start()
+    first = [queue.get(), queue.get()]
+    assert [frame.index for frame in first] == [0, 1] and queue.waiting == 0
+    clock.now += 5.0                                          # the tracker builds its state
+    released = clock.now
+    source.release()
+    rest = _drain_frames(queue)
+    source.stop()
+    assert [frame.index for frame in rest] == [2, 3, 4, 5]
+    assert rest[0].arrived >= released and rest[0].arrived - released < 0.01
+    assert np.allclose(np.diff([frame.arrived for frame in rest]), 0.02, atol=0.002)   # a clock tick per read
+
+
+def test_stopping_a_held_source_ends_it():
+    queue = FrameQueue(DropPolicy.NEVER)
+    source = LiveSource(_Capture(6), queue, fps=50.0, pacing="fast", hold_after=1)
+    source.start()
+    assert queue.get().index == 0
+    source.stop()
+    assert queue.get() is None
