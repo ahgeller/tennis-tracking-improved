@@ -228,3 +228,55 @@ System suite (`tennis-opt`): 643 passed. Root suite (`tennis-analysis`, which ru
   hand (the runs and `promote` now say so).
 - `tools/link_worktree_data.py` does not link `models/candidates/`, so a new worktree lacks the
   default weights until they are copied (the error says so).
+
+## Speed round merged (2026-10-31)
+
+629417d merges `phase-ABplus-heatmap` at a5a5bfb, which brought in the speed round:
+`speed-motion` (pass 1's whole-frame motion masks, the player head decode and its pinned outputs,
+the deferred boost filter; `opt_speed_motion.md`), the `speed-players` record and the 60 FPS
+every-other-frame player interval it measured (shipped by the owner's decision,
+`opt_speed_players.md`), and the worktree data tool's reference candidates and engines, which
+closes the open issue above (`tools/link_worktree_data.py` now copies `models/candidates/`). A
+second merge, 6550127, brings the heatmap branch's record of this and c2b75f3. The onnx skip in `test_ball_trt.py` came
+from the speed branches too; the heatmap merge kept this branch's line (4a21ee3), so it merged clean.
+
+Conflicts: `pipeline.py` (this branch's `_open_inputs` with its try and the prepass picked by mode,
+kept; `PlayerDetector` now gets the clip's fps), `test_pipeline_run.py` (this branch's
+`open_inputs` helper kept, the 60 FPS test added) and `README.md` (this branch's heading, the 60 FPS
+note added). `pass1.py`, `player_detector.py`, `config.py` and `clean_tracker.py` merged without one.
+
+Verified at the merge (the stream_s4 engine is `phases/ABplus`'s build, md5 f5bfa32d / 4ef6ca09):
+
+- **Gate** at this branch's defaults (`evaluate_archive.py --archive finetune --mode pipeline
+  --holdout mixed_v1`, stream_s4 at 0.42, the prepass in the child): recall 0.953, FA 95 (79 / 16),
+  median 1.0 px, custom / grid / prof .971 / .913 / .952, as before the merge.
+- **Identity.** All 24 gate clips (`--court`) and the pomona, VolyAvw and PomonaPitzer samples
+  equal, JSON for JSON, the merged heat-map tree's stream_s4 runs (`--weights stream_s4_e60.pt
+  --conf 0.42`, prepass in the foreground there): the child process changes nothing.
+- **Off court**: pomona 1090 / 0, VolyAvw 2453 / 0 (2457 before; idea 2's four frames),
+  PomonaPitzer 3142 / 0.
+- **The prepass still overlaps.** Init is unchanged by the merge (4.32 s against 4.44 s on pomona,
+  4.33 s on VolyAvw in both trees) although the child's prepass takes 2.2 s of it on pomona, and
+  pass 1 waits 0.003 s in all for the ball rows. Forced into the foreground
+  (`Config.ball_prepass_mode`, 3 runs each, alternated), pomona's init is 5.00-5.02 s against
+  3.76-3.82 s in the child, pass 1 3.83-4.02 s against 4.55-4.59 s (the child beside it), the total
+  9.4-9.6 s against 9.1 s, with equal outputs (a first process run, 16.1 s, came cold after an
+  idle spell and is left out).
+- **Suites**: `system/` 686 passed in `tennis-opt` (its 4 warnings, the legacy ONNX exporter's
+  notice, are gone after the second heatmap merge, which brings c2b75f3), 675 passed and 11
+  skipped in `tennis-analysis`; the root suite 1412 passed, 11 skipped; mypy clean in `system/`
+  (22 files) and at the root.
+
+Timing, `clean_tracker.py --info --no-video` at the defaults, 18e10d3 (the branch before the
+merge, a treehouse worktree linked with the new tool) against the merge, interleaved in one lock (a
+warm-up round, 4 timed rounds, the order reversed each round, no run flagged), median [min-max] s:
+
+| | 18e10d3 pomona | merged pomona | 18e10d3 VolyAvw | merged VolyAvw |
+|---|---|---|---|---|
+| total | 12.10 [11.70-12.90] | **9.55** [9.50-10.10] | 16.40 [16.10-16.70] | **13.95** [13.60-14.40] |
+| - init | 4.44 | 4.32 | 4.33 | 4.33 |
+| - pass 1 | 7.05 | 4.65 | 10.88 | 8.08 |
+| - pass 1 aux wait (player d2h) | 2.80 | 2.05 | 5.57 | 3.74 |
+| - selector | 0.50 | 0.58 | 0.90 | 1.26 |
+
+End to end 21% faster on pomona and 15% on VolyAvw; pass 1 34% and 26%.
