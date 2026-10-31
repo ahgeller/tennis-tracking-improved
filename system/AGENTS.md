@@ -69,7 +69,10 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   decoding detection-engine outputs into boxes for the ball and player
   backends. `build_engines.py`: YOLO checkpoint to ONNX to TensorRT engine, run
   as `python -m tennis_tracker.engines.build_engines`. `player_detector.py`:
-  TensorRT players with ByteTrack association.
+  TensorRT players with ByteTrack association. From `Config.player_every_other_frame_fps`
+  (55) up, the engine and ByteTrack run on every other frame (`effective_player_interval`)
+  and pass 1 interpolates the boxes of the frames between (`interpolate_player_boxes`);
+  0 (`clean_tracker.py --players-every-frame`) runs them on every frame.
   `court_detector.py`: court keypoints every N frames, last good result cached.
   `tennis_tracker/paths.py`: the model asset paths every consumer (Config
   defaults, scripts) spells once. `headless.py`: the one Config and run for a
@@ -83,7 +86,11 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   planes, background update) replays from CUDA graphs
   (`Config.pass1_cuda_graphs`); frames are decoded into pinned buffers and
   uploaded from them (`video_io.pinned_source`), and the pass 2 frame cache
-  keeps pageable copies. `pass2.py`: rendering pass. `export.py`: `RunResult`,
+  keeps pageable copies. `Pass1Result.boost_masks` (`motion.BoostMasks`) leaves a
+  frame's boost-mask filter to its first reader: an entry is filtered the first time it
+  is indexed, and ghost-ROI erasure reads and writes through that indexing, so it erases
+  the filtered mask; read and write it by index, never through a copied list.
+  `pass2.py`: rendering pass. `export.py`: `RunResult`,
   what a run returns, and the tracking JSON writer, whose `court_events` block
   carries every event with its provenance (`{}` when they were not computed).
   `tracking_schema.py`: the tracking JSON's shape (TypedDicts, typing only),
