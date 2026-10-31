@@ -188,8 +188,8 @@ Two reviews of f43218a..f290f93; every fix is a new commit.
   closes it in one `finally`, and `_open_inputs` releases the clip when init fails;
   `STREAM_S4_WEIGHTS`/`HEATMAP_S4_WEIGHTS`; test fakes call the real `prepass_mode` or name their
   mode; the 0.42 literal once in the tests; `_gone` tolerates a process that ends between checks;
-  `pseudo_labels`' teacher runs at `operating_conf` (it was a stale 0.50); `PER_CLIP_CONF` says why
-  it is fixed; README fixes (the weights are not in the repository).
+  `pseudo_labels`' `PIPELINE_CONF` stays 0.50, its comment now naming it the measured pseudo-label
+  rule's own threshold (not the tracker's); `PER_CLIP_CONF` says why it is fixed; README fixes (the weights are not in the repository).
 
 Re-verified at 7a0b14f:
 

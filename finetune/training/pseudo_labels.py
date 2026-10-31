@@ -57,7 +57,6 @@ if __name__ == "__main__":          # run as a script: make the repository root 
 from finetune.data import workspace as ws
 from finetune.data.fileio import atomic_csv
 from finetune.data.workspace import video_meta, videos_in
-from tennis_tracker.ball_weights import operating_conf
 from tennis_tracker.frame_rate import phase_stride
 
 PSEUDO_DIR = "pseudo"            # under the workspace root
@@ -70,6 +69,10 @@ MAX_DRIFT_PX = 3.0               # the selected position against the detector's 
 MIN_CONF = 0.7
 MIN_TRACK_OBS = 10               # detections on the chosen track: a short track is the likeliest wrong object
 QUIET_STEPS = 15                 # label frames either side without any detection for a "none"
+# The teacher pipeline's detector threshold: part of the measured filter rule above (the module
+# docstring), so the pseudo-label rule's own, not the tracker's operating threshold; changing it
+# changes what pseudo-labelling produces.
+PIPELINE_CONF = 0.50
 REFERENCE_WIDTH = 1920.0
 
 PseudoTarget = Optional[List[float]]
@@ -235,10 +238,7 @@ def cmd_label(args: argparse.Namespace) -> int:
             from tennis_tracker.headless import run_headless     # the pipeline: CUDA and TensorRT, only here
 
             print(f"[pipe] {clip}: {meta.width}x{meta.height} @ {meta.fps:.2f} FPS, {meta.total} frames, teacher {weights.name}")
-            # The teacher runs at the threshold the tracker runs its weights at (it was 0.50, a copy of
-            # the tracker's old default, until 2026-10-30); MIN_CONF filters what is kept.
-            run_headless(found[clip], model_path=weights, conf=operating_conf(weights), device=args.device,
-                         tracking_json=json_path)
+            run_headless(found[clip], model_path=weights, conf=PIPELINE_CONF, device=args.device, tracking_json=json_path)
         states = frame_states(json.loads(json_path.read_text(encoding="utf-8")), stride)
         write_pseudo_labels(target, states)
         print(f"[pseudo] {target.name}: {summary(states)}")
