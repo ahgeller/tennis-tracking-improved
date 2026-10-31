@@ -285,3 +285,39 @@ def test_menu_dispatches_a_number_or_a_name_and_quits(workspace_dir, capsys):
     assert ran == [["status"], ["status"]]
     out = capsys.readouterr().out
     assert "'nope' is not an option" in out and "the workspace is empty" in out
+
+
+def test_label_from_a_worktree_works_in_the_label_homes_workspace_throughout(tmp_path, monkeypatch, capsys):
+    """From a worktree the label tool writes to the main checkout's labels (workspace.label_home):
+    so must the pre-labelling before it, the review and flags read around it and the re-timing
+    offered after it, or a session's work splits between two folders."""
+    import json
+    main, tree = tmp_path / "main" / "finetune", tmp_path / "tree" / "finetune"
+    for root in (main, tree):
+        (root / "labels").mkdir(parents=True)
+        (root / "videos").mkdir()
+        (root / "videos" / "clip.mp4").write_bytes(b"")
+    write_labels(main / "labels" / "clip_ball.csv", {0: (5.0, 5.0), 1: (6.0, 6.0), 2: (7.0, 7.0)}, *SIZE)
+    (main / "labels" / "clip_ball.suspect.json").write_text(json.dumps({"unplaceable": [2], "check": []}), encoding="utf-8")
+    monkeypatch.setenv(workspace.WORKSPACE_VARIABLE, str(tree))
+    monkeypatch.setattr(workspace, "label_home", lambda: main / "labels")
+    seen, asked = [], []
+
+    def label_tool(script, arguments):
+        seen.append((script, workspace.current().root))
+        (main / "labels" / "clip_ball.review.json").write_text(json.dumps({"reviewed": [2], "edited": []}), encoding="utf-8")
+        return 0
+    with patch.object(ft, "run_script", label_tool), patch.object(ft, "ask", lambda prompt: asked.append(prompt) or "n"):
+        assert ft.run_cli(["label", "clip"]) == 0
+    assert seen == [("labeling/label_tool.py", main)]
+    assert asked                                   # the frame reviewed was read from the home's review and flags
+    assert workspace.current().root == tree        # and the workspace is the worktree's again after
+
+
+def test_label_from_a_worktree_whose_label_home_is_missing_stops_with_the_reason(tmp_path, monkeypatch, capsys):
+    def missing():
+        raise workspace.LabelHomeMissing("the main checkout has no labels at X")
+    monkeypatch.setattr(workspace, "label_home", missing)
+    with patch.object(ft, "run_script") as run:
+        assert ft.run_cli(["label", "clip"]) == 2
+    assert not run.called and "the main checkout has no labels at X" in capsys.readouterr().out
