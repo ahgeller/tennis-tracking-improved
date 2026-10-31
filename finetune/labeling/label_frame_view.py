@@ -112,7 +112,7 @@ class FrameView:
         if touched is not None:
             draw_landing_point(display, *session.to_view(*touched), session.ui)
         worn_hit = session.hit_for(session.cursor)
-        contact = session.source.hits.get(worn_hit) if worn_hit is not None else None
+        contact = session.source.hits[worn_hit].point if worn_hit is not None else None
         if contact is not None:
             draw_landing_point(display, *session.to_view(*contact), session.ui, HIT)
         for event in session.open_candidates(session.cursor):
@@ -191,7 +191,7 @@ class FrameView:
         if landing is not None:
             edge = draw_badge(display, landing, LANDING, (0, 0, 0), ui, right_edge=edge)[0]
         worn_hit = session.hit_for(session.cursor)
-        hit_text = hit_badge(worn_hit, row.frame, session.source.hitters.get(worn_hit) if worn_hit is not None else None)
+        hit_text = hit_badge(worn_hit, row.frame, session.source.hits[worn_hit].hitter if worn_hit is not None else None)
         if hit_text is not None:
             edge = draw_badge(display, hit_text, HIT, (0, 0, 0), ui, right_edge=edge)[0]
         rally = session.rally_mark(session.cursor)
@@ -253,7 +253,7 @@ class FrameView:
         if landing is not None:
             tag += f"  {landing}"
         worn_hit = session.hit_for(session.cursor)
-        hit_text = hit_badge(worn_hit, row.frame, source.hitters.get(worn_hit) if worn_hit is not None else None)
+        hit_text = hit_badge(worn_hit, row.frame, source.hits[worn_hit].hitter if worn_hit is not None else None)
         if hit_text is not None:
             tag += f"  {hit_text}"
         rally = session.rally_at(session.cursor)

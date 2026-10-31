@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 from finetune.data.bounce_labels import BounceLabel, read_bounce_labels, write_bounce_labels
 from finetune.data.court_labels import CourtLabel, CourtPoints, read_court_labels, write_court_labels
@@ -184,25 +184,38 @@ def save_landings(path: Path, landings: Landings) -> None:
     write_bounce_labels(path, (BounceLabel(frame, point) for frame, point in landings.items()))
 
 
-# A clip's hits (``event_labels``), kept exactly as its landings are (the same keys, points None
-# until a click places one: ``Landings``), and apart from them who hit the ball, by the same keys,
-# for the hits where that was said.
-Hits = Landings
-Hitters = Dict[float, Hitter]
+class HitMark(NamedTuple):
+    """One hit the tool holds: where the racket met the ball (None until a click places it, as a
+    landing's point) and who hit it (None until , says so; never taken from the tracker, whose
+    hitter the scorer measures against this one)."""
+
+    point: LabelPoint = None
+    hitter: Optional[Hitter] = None
 
 
-def load_hits(path: Path) -> Tuple[Hits, Hitters]:
-    """The clip's hits and their hitters; none when there is no file. A damaged file is its
-    LabelFormatError."""
+# A clip's hits (``event_labels``), keyed as its landings are (``Landings``): frame -> its HitMark.
+Hits = Dict[float, HitMark]
+
+
+def load_hits(path: Path) -> Hits:
+    """The clip's hits; none when there is no file. A damaged file is its LabelFormatError."""
     if not path.is_file():
-        return {}, {}
-    labels = read_hit_labels(path)
-    return ({label.frame: label.point for label in labels},
-            {label.frame: label.hitter for label in labels if label.hitter is not None})
+        return {}
+    return {label.frame: HitMark(label.point, label.hitter) for label in read_hit_labels(path)}
 
 
-def save_hits(path: Path, hits: Hits, hitters: Hitters) -> None:
-    write_hit_labels(path, (HitLabel(frame, point, hitters.get(frame)) for frame, point in hits.items()))
+def no_point(moved: Optional[LabelPoint]) -> LabelPoint:
+    """A landing placed or moved between two frames (``LabelSession.toggle_mark``): no point yet."""
+    return None
+
+
+def blank_hit(moved: Optional[HitMark]) -> HitMark:
+    """A hit placed, or moved between two frames: no point yet, and the hitter it had."""
+    return HitMark(None, moved.hitter if moved is not None else None)
+
+
+def save_hits(path: Path, hits: Hits) -> None:
+    write_hit_labels(path, (HitLabel(frame, mark.point, mark.hitter) for frame, mark in hits.items()))
 
 
 def load_rallies(path: Path) -> Tuple[Set[int], Set[int]]:

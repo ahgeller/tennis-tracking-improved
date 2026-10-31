@@ -125,7 +125,7 @@ class CourtView:
     def move_point(self, name: str, x: float, y: float) -> None:
         session = self.session
         points = dict(self.points())
-        points[name] = (float(min(max(x, 0.0), session.width - 1.0)), float(min(max(y, 0.0), session.height - 1.0)))
+        points[name] = session.clamp(x, y)
         self.change(points)
 
     def state(self) -> str:
@@ -275,8 +275,7 @@ class CourtView:
             points = dict(self.points())
             fx, fy = self.to_frame(x, y)
             session = self.session
-            points[COURT_POINTS[self.selected]] = (float(min(max(fx, 0.0), session.width - 1.0)),
-                                                   float(min(max(fy, 0.0), session.height - 1.0)))
+            points[COURT_POINTS[self.selected]] = session.clamp(fx, fy)
             self.drafts[self.frame] = points        # one undo step for the whole drag, taken on the press
             self.revision += 1
         elif event == cv2.EVENT_MOUSEMOVE and COURT_POINTS[self.selected] not in self.points():

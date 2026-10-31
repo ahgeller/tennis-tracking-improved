@@ -71,7 +71,7 @@ you do click.
 | `u` | undo the last change on this frame's label (not a landing, hit or rally mark: their keys take them off again) |
 | `/` | this frame is a landing: the ball is on the ground here. Pressed again, it is not. The frame wears a LANDING badge (its grid tile too) and the bar counts the clip's landings. Pressed on the frame after (or before) one already marked, the ball bounced between the two: the two marks become one landing between them and both frames wear LANDING 1/2. When the landing has no ball label under it (one between two frames, or one on a frame labelled "no ball") the bar asks for a click where the ball touched the ground. Saved with the labels to `labels/<clip>_bounces.csv` (see *Landings*) |
 | `.` | this frame is a racket hit (serves included), exactly as `/` is a landing: pressed again it is not; on the frame after (or before) one already marked, the contact was between the two (HIT 1/2); with no ball label under it the bar asks for a click where the racket met the ball. Saved to `labels/<clip>_hits.csv` (see *Hits*) |
-| `,` | who hit this frame's hit: near (the player on the half nearer the camera), far, not said, round again. The tracker's hit candidate on the frame fills it in when `.` marks it |
+| `,` | who hit this frame's hit: near (the player on the half nearer the camera), far, not said, round again. Never filled in from the tracker |
 | `[` / `]` | a rally starts / ends on this frame; pressed again, it does not. A frame is never both. Saved to `labels/<clip>_rallies.csv` (see *Rallies*) |
 | `;` / SHIFT+`;` (or `:`) | go to the next / previous frame wearing a candidate nobody has answered yet (see *Candidates*) |
 | backslash | the candidates on this frame are wrong: reject them and go to the next one. On a frame whose candidates are all answered, it reopens the ones rejected there |
@@ -181,9 +181,10 @@ on one, already going out on the next), press `.` on both: one hit between them,
 frames, or on a frame labelled "no ball") waits for a click where the racket met the
 ball, drawn as a small red cross; any other key leaves it without a point and the
 scorer takes the ball labels either side, as for a landing. Mark serves and every
-stroke of the rally. `,` says who hit it: `near`, `far` or not said; a hit marked on
-a frame wearing the tracker's hit candidate takes the candidate's side of the net,
-shown on the badge as HIT NEAR or HIT FAR.
+stroke of the rally. `,` says who hit it: `near`, `far` or not said, shown on the
+badge as HIT NEAR or HIT FAR. Only `,` says it: a hit is never given the tracker's
+hitter, since the hit scorer measures the tracker's hitter against yours. A hit that
+becomes one between two frames keeps the hitter it had.
 
 ## Rallies
 

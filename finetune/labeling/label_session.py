@@ -8,7 +8,7 @@ it - the edits, the navigation the keys name, the window and the loop - and the 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, TypeVar
 
 import numpy as np
 
@@ -31,6 +31,7 @@ GHOST_REACH = 3           # rows either side searched for a ball to interpolate 
 SNAP_PX = 4               # a wheel turned with the pointer this close to the ball zooms about the ball
 
 Anchor = Tuple[Point, Tuple[float, float]]   # (frame point, view point) a zoom glide holds still
+Mark = TypeVar("Mark")                        # what a clip's landings or hits hold per frame (toggle_mark)
 
 
 class LabelSession:
@@ -103,6 +104,10 @@ class LabelSession:
         """(first, last + 1) row indices of the clip row `index` belongs to."""
         source = self.by_clip[self.rows[index].clip]
         return source.start, source.start + len(source.rows)
+
+    def clamp(self, x: float, y: float) -> Point:
+        """(x, y) kept on the frame: within its first and last pixel centres' reach."""
+        return float(min(max(x, 0.0), self.width - 1.0)), float(min(max(y, 0.0), self.height - 1.0))
 
     def frame_missing(self) -> bool:
         """True when the frame under the cursor has no picture, so nothing should be said about it."""
@@ -216,7 +221,7 @@ class LabelSession:
 
     def centre_on(self, x: float, y: float) -> None:
         """Put frame point (x, y), kept on the frame, in the middle of the view."""
-        self.center = (min(max(x, 0.0), self.width - 1.0), min(max(y, 0.0), self.height - 1.0))
+        self.center = self.clamp(x, y)
         self.centre_view()
 
     # Frame coordinates put pixel k's centre at k + 0.5 (what the click mapping, GridTrackNet's grid
@@ -359,11 +364,14 @@ class LabelSession:
                 return between
         return None
 
-    def toggle_mark(self, index: int, marks: Dict) -> Optional[float]:
+    def toggle_mark(self, index: int, marks: Dict[float, Mark], blank: Callable[[Optional[Mark]], Mark]
+                    ) -> Optional[float]:
         """/ and .: put a mark on row `index`'s frame - or take off the one it wears. On the row
         after (or before) a frame already marked, the two become one mark between them (3.5 between
         frames 3 and 4; on a 60 FPS clip labelled every other frame, the unlabelled frame between).
-        The mark placed holds None. Returns its key, None when one was taken off."""
+        The mark placed holds `blank` of the mark it was moved from (None for a new one): no point,
+        since it is no longer where that point was said, but what else was said of it (a hit's
+        hitter). Returns its key, None when one was taken off."""
         worn = self.mark_for(index, marks)
         self.marks += 1
         if worn is not None:
@@ -371,12 +379,13 @@ class LabelSession:
             return None
         row = self.rows[index]
         placed: float = row.frame
+        moved: Optional[Mark] = None
         for other in self.neighbour_frames(index):   # the previous row first: the one just marked
             if other in marks:
-                del marks[other]
+                moved = marks.pop(other)
                 placed = between_frames(row.frame, other)
                 break
-        marks[placed] = None
+        marks[placed] = blank(moved)
         return placed
 
     def candidate_between(self, index: int, kind: CandidateKind) -> Optional[float]:

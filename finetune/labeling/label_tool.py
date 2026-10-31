@@ -23,7 +23,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Hashable, List, Optional, Tuple
+from typing import Hashable, List, Mapping, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -47,7 +47,7 @@ from finetune.labeling.label_session import LabelSession
 from finetune.labeling.label_sheet import SheetView
 from finetune.labeling.label_source import Prefetcher, Source
 from finetune.labeling.label_saving import rescue_source, save_source
-from finetune.labeling.label_store import Row, save_settings
+from finetune.labeling.label_store import HitMark, Row, blank_hit, no_point, save_settings
 from finetune.labeling.label_window import WINDOW
 from finetune.data.labels import is_visible
 
@@ -353,8 +353,7 @@ class Tool:
         session = self.session
         if session.frame_missing():
             return False
-        x = float(min(max(x, 0.0), session.width - 1.0))
-        y = float(min(max(y, 0.0), session.height - 1.0))
+        x, y = session.clamp(x, y)
         if not is_visible(x, y, session.width, session.height):
             # The label CSV marks "no ball" by the top-right pixel, and every reader in the workspace
             # takes a point on it to mean that. Stored, this would read back as absent.
@@ -413,7 +412,7 @@ class Tool:
         session.awaiting_landing = None
         if session.frame_missing():
             return                    # a black placeholder is not a frame the ball can be seen on
-        placed = session.toggle_mark(session.cursor, session.source.landings)   # LabelSession.toggle_mark
+        placed = session.toggle_mark(session.cursor, session.source.landings, no_point)   # LabelSession.toggle_mark
         if placed is not None and not self.overview and self.wants_point(placed):
             session.awaiting_landing = placed   # no ball label under it: ask where it touched the ground
         session.touch("landings")
@@ -432,8 +431,7 @@ class Tool:
         landing, session.awaiting_landing = session.awaiting_landing, None
         if landing is None or landing not in session.source.landings:
             return                    # removed since, or never there: nothing to place
-        session.source.landings[landing] = (float(min(max(x, 0.0), session.width - 1.0)),
-                                            float(min(max(y, 0.0), session.height - 1.0)))
+        session.source.landings[landing] = session.clamp(x, y)
         session.marks += 1
         session.touch("landings")
 
@@ -443,24 +441,16 @@ class Tool:
         the contact lies between the two; a hit with no ball label under it (between two frames, or
         on a frame with no ball) waits for a click on where the racket met the ball
         (session.awaiting_hit, MouseHandler.place_click; any other key leaves it without a point,
-        and the scorer takes the ball labels either side, event_labels.resolve_hit_points). The
-        hitter comes from the tracker's hit candidate here when there is one (its player's side of
-        the net), shown on the HIT badge; `,` changes it. The key is its own undo."""
+        and the scorer takes the ball labels either side, event_labels.resolve_hit_points). Who hit
+        it is said with `,` alone, never taken from the tracker: the scorer measures the tracker's
+        hitter against it. A hit moved between two frames keeps its hitter. The key is its own undo."""
         session = self.session
         session.awaiting_hit = None
         if session.frame_missing():
             return
-        offered = [event.hitter for event in session.open_candidates(session.cursor)
-                   if event.kind == "hit" and event.hitter is not None]
-        placed = session.toggle_mark(session.cursor, session.source.hits)
-        if placed is None:
-            session.source.hitters = {frame: who for frame, who in session.source.hitters.items()
-                                      if frame in session.source.hits}
-        else:
-            if offered:
-                session.source.hitters[placed] = offered[0]
-            if not self.overview and self.wants_point(placed):
-                session.awaiting_hit = placed   # no ball label under it: ask where the racket met it
+        placed = session.toggle_mark(session.cursor, session.source.hits, blank_hit)
+        if placed is not None and not self.overview and self.wants_point(placed):
+            session.awaiting_hit = placed   # no ball label under it: ask where the racket met it
         session.touch("hits")
 
     def place_hit(self, x: float, y: float) -> None:
@@ -470,8 +460,7 @@ class Tool:
         hit, session.awaiting_hit = session.awaiting_hit, None
         if hit is None or hit not in session.source.hits:
             return
-        session.source.hits[hit] = (float(min(max(x, 0.0), session.width - 1.0)),
-                                    float(min(max(y, 0.0), session.height - 1.0)))
+        session.source.hits[hit] = session.source.hits[hit]._replace(point=session.clamp(x, y))
         session.marks += 1
         session.touch("hits")
 
@@ -479,19 +468,21 @@ class Tool:
         """The click a landing or hit candidate between two label frames waits for once ; has come
         to it (jump_candidate): the tracker was right, and the ball touched the ground (or met the
         racket) at (x, y). The mark is placed between the two frames with that point, as / (or .)
-        on both frames and a click would place it; the frame stays up."""
+        on both frames and a click would place it; the frame stays up. Its hitter is not taken from
+        the tracker (toggle_hit)."""
         session = self.session
         event, session.awaiting_candidate = session.awaiting_candidate, None
         if event is None or session.frame_missing():
             return
         kind = "landing" if event.kind == "landing" else "hit"
-        marks = session.source.landings if kind == "landing" else session.source.hits
+        marks: Mapping[float, object] = session.source.landings if kind == "landing" else session.source.hits
         between = session.candidate_between(session.cursor, kind)
         if between is None or session.mark_for(session.cursor, marks) is not None:
             return                    # answered or marked meanwhile: nothing to confirm
-        marks[between] = (float(min(max(x, 0.0), session.width - 1.0)), float(min(max(y, 0.0), session.height - 1.0)))
-        if kind == "hit" and event.hitter is not None:
-            session.source.hitters[between] = event.hitter
+        if kind == "landing":
+            session.source.landings[between] = session.clamp(x, y)
+        else:
+            session.source.hits[between] = HitMark(session.clamp(x, y))
         session.marks += 1
         session.touch("landings" if kind == "landing" else "hits")
 
@@ -504,11 +495,8 @@ class Tool:
             print("[hit ] no hit on this frame to name the hitter of: . marks one")
             return
         order = (None,) + HITTERS
-        hitter = order[(order.index(session.source.hitters.get(hit)) + 1) % len(order)]
-        if hitter is None:
-            session.source.hitters.pop(hit, None)
-        else:
-            session.source.hitters[hit] = hitter
+        mark = session.source.hits[hit]
+        session.source.hits[hit] = mark._replace(hitter=order[(order.index(mark.hitter) + 1) % len(order)])
         session.marks += 1
         session.touch("hits")
 

@@ -17,7 +17,7 @@ import numpy as np
 
 from finetune.labeling.label_candidates import ClipCandidates, load_candidates
 from finetune.labeling.label_saving import fingerprint
-from finetune.labeling.label_store import (CourtFrames, Hitters, Hits, Landings, Rejected, Row, apply_flags, apply_review,
+from finetune.labeling.label_store import (CourtFrames, Hits, Landings, Rejected, Row, apply_flags, apply_review,
                                            load_event_review, load_hits, load_landings, load_rallies, load_rows)
 from finetune.data.labels import LabelFormatError
 from finetune.data.player_labels import PlayerBoxLabel
@@ -106,8 +106,7 @@ class Source:
         self.events_review = events_review_json(clip, labels)
         self.players_path, self.court_path = players_csv(clip, labels), court_csv(clip, labels)
         self.landings: Landings = {}  # the frames where the ball hit the ground (label_store.load_landings)
-        self.hits: Hits = {}          # the frames a racket hit it, kept as the landings are, and
-        self.hitters: Hitters = {}    # who hit it where that was said (label_store.load_hits)
+        self.hits: Hits = {}          # the frames a racket hit it, keyed as the landings are, with who hit it
         self.rally_starts: Set[int] = set()   # the frames rallies start and end on (label_store.load_rallies)
         self.rally_ends: Set[int] = set()
         self.rejected: Rejected = {}  # the candidates rejected, by kind (label_store.load_event_review)
@@ -382,7 +381,7 @@ def build_source(clip: str, videos: Path, labels: Path, candidates: Optional[Pat
         source.flagged = apply_flags(source.suspects, rows)
         state = apply_review(review, rows)
         source.landings = load_landings(source.bounces)
-        source.hits, source.hitters = load_hits(source.hits_path)
+        source.hits = load_hits(source.hits_path)
         source.rally_starts, source.rally_ends = load_rallies(source.rallies_path)
         source.rejected = load_event_review(source.events_review)
     except LabelFormatError as error:

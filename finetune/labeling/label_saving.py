@@ -69,7 +69,7 @@ def parts(source: "Source", kind: str) -> List[Part]:
     if kind == "landings":
         return [Part(source.bounces, lambda path: save_landings(path, source.landings), not source.landings)]
     if kind == "hits":
-        return [Part(source.hits_path, lambda path: save_hits(path, source.hits, source.hitters), not source.hits)]
+        return [Part(source.hits_path, lambda path: save_hits(path, source.hits), not source.hits)]
     if kind == "rallies":
         return [Part(source.rallies_path, lambda path: save_rallies(path, source.rally_starts, source.rally_ends),
                      not (source.rally_starts or source.rally_ends))]

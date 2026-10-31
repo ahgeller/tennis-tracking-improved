@@ -14,7 +14,7 @@ from finetune.data.event_labels import HitLabel, RallyLabel, read_hit_labels, re
 from finetune.labeling import label_window as win
 from finetune.labeling.label_candidates import Candidate, ClipCandidates
 from finetune.labeling.label_draw import HIT, LANDING
-from finetune.labeling.label_store import (load_event_review, load_hits, load_rallies, save_event_review, save_hits,
+from finetune.labeling.label_store import (HitMark, load_event_review, load_hits, load_rallies, save_event_review, save_hits,
                                            save_rallies)
 from finetune.labeling.label_tool import Tool
 from _workspace_helpers import fake_source, fake_tool
@@ -58,7 +58,7 @@ def test_a_hit_is_marked_and_unmarked_with_the_dot_on_its_own_frame():
     session = tool.session
     session.cursor = 4
     press_key(tool, ".")
-    assert session.source.hits == {4: None} and session.awaiting_hit is None   # the ball label is its point
+    assert session.source.hits == {4: HitMark()} and session.awaiting_hit is None   # the ball label is its point
     assert session.hit_for(4) == 4 and session.hit_for(5) is None
     assert "  HIT  " in tool.frame_view.hud_lines(session.rows[4], None, None)[0]
     press_key(tool, ".")
@@ -72,12 +72,12 @@ def test_a_dot_on_two_consecutive_frames_makes_one_hit_between_them_and_the_clic
     press_key(tool, ".")
     tool.move(1)
     press_key(tool, ".")
-    assert session.source.hits == {3.5: None} and session.awaiting_hit == 3.5
+    assert session.source.hits == {3.5: HitMark()} and session.awaiting_hit == 3.5
     assert session.hit_for(3) == session.hit_for(4) == 3.5
     assert "CLICK WHERE THE RACKET MET THE BALL" in tool.frame_view.hud_lines(session.rows[4], None, None)[1]
     click_picture(tool, 200.0, 150.0)
     assert session.awaiting_hit is None and session.cursor == 4          # the frame stays up
-    assert session.source.hits[3.5] == (pytest.approx(200.0, abs=1.0), pytest.approx(150.0, abs=1.0))
+    assert session.source.hits[3.5].point == (pytest.approx(200.0, abs=1.0), pytest.approx(150.0, abs=1.0))
     assert not session.rows[4].edited                                    # the ball label was not touched
     press_key(tool, ".")                                                 # on either frame: unmarked
     assert session.source.hits == {}
@@ -91,26 +91,42 @@ def test_any_other_key_leaves_a_hit_without_a_point_and_the_landing_key_is_untou
     press_key(tool, ".")
     assert session.awaiting_hit == 3
     press_key(tool, "t")
-    assert session.awaiting_hit is None and session.source.hits == {3: None}
+    assert session.awaiting_hit is None and session.source.hits == {3: HitMark()}
     press_key(tool, "/")                                                 # a landing on the same frame: its own mark
-    assert session.source.landings == {3: None} and session.awaiting_landing == 3 and session.source.hits == {3: None}
+    assert session.source.landings == {3: None} and session.awaiting_landing == 3 and session.source.hits == {3: HitMark()}
 
 
-def test_the_hitter_comes_from_the_trackers_hit_and_the_comma_cycles_it():
+def test_the_hitter_is_only_ever_said_by_the_comma_never_taken_from_the_tracker():
+    """The hit scorer scores the tracker's hitter against the labelled one: a label pre-filled
+    from the tracker would score it against itself."""
     tool = fake_tool(clip(candidates=[Candidate("hit", 4, "kink", "far")]))
     session = tool.session
     session.cursor = 4
     press_key(tool, ",")                                                 # no hit yet: nothing to name
-    assert session.source.hitters == {}
+    assert session.source.hits == {}
     press_key(tool, ".")
-    assert session.source.hitters == {4: "far"}
-    assert "HIT FAR" in tool.frame_view.hud_lines(session.rows[4], None, None)[0]
+    assert session.source.hits == {4: HitMark(None, None)}               # the tracker's "far" is not taken
     press_key(tool, ",")
-    assert session.source.hitters == {}                                  # far -> not said
+    assert session.source.hits == {4: HitMark(None, "near")}
+    assert "HIT NEAR" in tool.frame_view.hud_lines(session.rows[4], None, None)[0]
     press_key(tool, ",")
-    assert session.source.hitters == {4: "near"}
+    assert session.source.hits == {4: HitMark(None, "far")}
+    press_key(tool, ",")
+    assert session.source.hits == {4: HitMark(None, None)}               # far -> not said
     press_key(tool, ".")                                                 # unmarked: its hitter goes with it
-    assert session.source.hits == {} and session.source.hitters == {}
+    assert session.source.hits == {}
+
+
+def test_a_hit_moved_between_two_frames_keeps_its_hitter():
+    tool = fake_tool(clip())
+    session = tool.session
+    session.cursor = 3
+    press_key(tool, ".")
+    press_key(tool, ",")
+    press_key(tool, ",")                                                 # far
+    tool.move(1)
+    press_key(tool, ".")                                                 # it was between 3 and 4
+    assert session.source.hits == {3.5: HitMark(None, "far")}
 
 
 def test_hits_are_saved_beside_the_landings_and_read_back(tmp_path):
@@ -128,7 +144,7 @@ def test_hits_are_saved_beside_the_landings_and_read_back(tmp_path):
     labels = read_hit_labels(source.hits_path)
     assert [(label.frame, label.hitter) for label in labels] == [(2, "near"), (6, None)]
     assert labels[0].point is None and labels[1].point == (pytest.approx(300.0, abs=1.0), pytest.approx(200.0, abs=1.0))
-    assert load_hits(source.hits_path) == ({2: None, 6: labels[1].point}, {2: "near"})
+    assert load_hits(source.hits_path) == {2: HitMark(None, "near"), 6: HitMark(labels[1].point, None)}
     session.cursor = 2
     press_key(tool, ".")
     session.cursor = 6
@@ -202,8 +218,8 @@ def test_a_candidate_between_two_frames_waits_for_the_click_that_confirms_it_the
     assert event is not None and event.kind == "hit"
     assert "HIT? BETWEEN FRAMES" in tool.frame_view.hud_lines(session.rows[session.cursor], None, None)[1]
     click_picture(tool, 120.0, 60.0)
-    assert session.source.hits == {9: (pytest.approx(120.0, abs=1.0), pytest.approx(60.0, abs=1.0))}
-    assert session.source.hitters == {9: "near"} and session.awaiting_candidate is None
+    assert session.source.hits[9].point == (pytest.approx(120.0, abs=1.0), pytest.approx(60.0, abs=1.0))
+    assert session.source.hits[9].hitter is None and session.awaiting_candidate is None   # said by , alone
     assert not any(row.edited for row in session.rows)                   # the click placed no ball label
 
 
@@ -302,14 +318,14 @@ def test_marks_redraw_the_frame_view():
 
 def test_the_sidecars_roundtrip_through_the_store(tmp_path):
     hits, rallies, review = tmp_path / "a_hits.csv", tmp_path / "a_rallies.csv", tmp_path / "a_events.review.json"
-    save_hits(hits, {4.5: (1.0, 2.0), 9: None}, {9: "far"})
+    save_hits(hits, {4.5: HitMark((1.0, 2.0)), 9: HitMark(None, "far")})
     assert read_hit_labels(hits) == [HitLabel(4.5, (1.0, 2.0), None), HitLabel(9, None, "far")]
     save_rallies(rallies, {3}, set())
     assert load_rallies(rallies) == ({3}, set())
     save_event_review(review, {"hit": {5, 2}, "landing": set()})
     assert load_event_review(review) == {"hit": {2, 5}}
     review.write_text(json.dumps({"rejected": {"hit": [5]}, "note": "kept"}), encoding="utf-8")
-    save_hits(hits, {}, {})                          # nothing: the header alone (label_saving removes a file
+    save_hits(hits, {})                              # nothing: the header alone (label_saving removes a file
     save_rallies(rallies, set(), set())              # the tool emptied, not the store)
     save_event_review(review, {})
     assert hits.read_text(encoding="utf-8").splitlines() == ["frame,ball_x,ball_y,hitter"]
