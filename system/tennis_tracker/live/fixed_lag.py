@@ -57,10 +57,13 @@ class Evidence(Protocol):
     the lists only ever grow, and entries before ``FixedLagSelector.releasable`` may be dropped."""
 
     detections: List[List[RawDetection]]
-    boost_masks: List[Optional[PackedMask]]
     raw_motions: List[Optional[PackedMask]]
     player_boxes: List[PlayerBoxes]
     court_keypoints: List[Optional[List[float]]]
+
+    # Read only here: pass 1's masks filter on first read (``motion.BoostMasks``), a record's are a list.
+    @property
+    def boost_masks(self) -> Sequence[Optional[PackedMask]]: ...
 
 
 @dataclass(frozen=True)

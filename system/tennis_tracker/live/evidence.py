@@ -62,10 +62,13 @@ EMPTY_EVIDENCE: FrameEvidence = ([], None, None, {}, None)
 
 class _EvidenceLists(Protocol):
     detections: List[Any]
-    boost_masks: List[Optional[PackedMask]]
     raw_motions: List[Optional[PackedMask]]
     player_boxes: List[Any]
     court_keypoints: List[Optional[List[float]]]
+
+    # Read only here: pass 1's masks filter on first read (``motion.BoostMasks``), a record's are a list.
+    @property
+    def boost_masks(self) -> Sequence[Optional[PackedMask]]: ...
 
 
 def frame_evidence_of(evidence: _EvidenceLists, frame: int) -> FrameEvidence:
