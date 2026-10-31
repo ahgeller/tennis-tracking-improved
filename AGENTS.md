@@ -11,8 +11,8 @@ fine-tuning workspace.
   `clean_tracker.py`). `system/AGENTS.md` is the map of that code and its change
   discipline; read it before touching anything under `system/`.
 - Everything else is training and labelling: `finetune/` (the workspace, the trainer,
-  the scorers), the root scripts `evaluate_archive.py`, `score_court_events.py` and
-  `track_breaks.py` that front the scorers, `tests/` (the workspace suites),
+  the scorers), the root scripts `evaluate_archive.py`, `score_court_events.py`,
+  `score_labels.py` and `track_breaks.py` that front the scorers, `tests/` (the workspace suites),
   `audit/` (the workspace's ledgers and records) and the launchers
   `finetune.ps1` / `finetune.bat`.
 
@@ -79,8 +79,13 @@ so the same `__init__` sets the path up there.
   `label_keys.py` (what the keys do), `label_mouse.py` (what the mouse does),
   `label_frame_view.py` (the single-frame picture and HUD), `label_grid.py` and
   `label_sheet.py` (the grid and trajectory-sheet views, each owning its state,
-  picture and keys), `label_draw.py` (the filters, marks and text every view
-  draws with) and `label_hints.py` (the suggestions). `finetune/refiner/`: the
+  picture and keys), `label_players.py` (`--players`: track segments and who they
+  are) and `label_court.py` (`--court`: the court's keypoints), `label_timeline.py`
+  (the strip of rallies, events and candidates every view's HUD carries),
+  `label_candidates.py` (a pipeline run's landings, hits and rally marks offered to
+  confirm or reject), `label_draw.py` (the filters, marks and text every view
+  draws with) and `label_hints.py` (the suggestions). `finetune/labeling/LABEL_TOOL.md`
+  documents every key and label file. `finetune/refiner/`: the
   suggestion model above (`refine.py` with `motion_blobs.py`, `cnn_refiner.py` with its torch network class in
   `refiner_network.py`, `refiner_training.py` with `refiner_crops.py` and `refiner_fitting.py`,
   `refiner_sheet.py`, `hints.py`). `finetune/data/`: `labels.py`, the label
@@ -92,8 +97,12 @@ so the same `__init__` sets the path up there.
   metric all run; `bounce_labels.py`, the landing labels (`labels/<clip>_bounces.csv`, the
   frames where the ball landed, `frame_###.5` for a landing between two frames, points
   optional) the label tool's `/` key writes and the court-event scorer reads;
+  `event_labels.py` (hits, `<clip>_hits.csv`, and rallies, `<clip>_rallies.csv`),
+  `player_labels.py` (`<clip>_players.csv`) and `court_labels.py` (`<clip>_court.csv`, with
+  the court's dimensions in metres), the other label types the tool writes;
   `workspace.py`, where the workspace keeps things and a clip's video
-  facts, and the one place `clips.csv` and `exclude.txt` are read and written
+  facts, and `label_home()`, the main checkout's `finetune/labels` even from a worktree,
+  where the label tool writes and the new scorers read by default, and the one place `clips.csv` and `exclude.txt` are read and written
   (`TENNIS_WORKSPACE` relocates the workspace); `detector_metrics.py`, the detector metric (`DetectorMetrics`);
   `data_policy.py`, which clips may be trained, validated or scored on;
   `holdouts.py`, the named held-out sets of whole recordings in `finetune/holdouts.json`
@@ -137,9 +146,13 @@ so the same `__init__` sets the path up there.
   reruns the selector on the CPU over a pipeline run's recorded detections and scores it
   (the chain, every track, or the detector alone), the tool a selector change is measured
   with before a GPU run; `audit/records/selector_robustness_2026-10.md` is the ledger of
-  the selector changes. The root
-  `evaluate_archive.py`, `score_court_events.py` and `track_breaks.py` are thin entry points
-  to `archive`, `court_events_score` and `track_breaks`; the rest run as
+  the selector changes. `tracker_events.py` reads a pipeline run's JSON as events (hits with
+  the hitter's side, rallies from the rally legs, player boxes, court keypoints);
+  `hits_score.py`, `rallies_score.py`, `players_score.py` and `court_score.py` score those
+  against the hit, rally, player and court labels, sharing `label_scoring.py`, and
+  `scorecard.py` runs them all with the landing scorer. The root
+  `evaluate_archive.py`, `score_court_events.py`, `score_labels.py` and `track_breaks.py` are
+  thin entry points to `archive`, `court_events_score`, `scorecard` and `track_breaks`; the rest run as
   `python -m finetune.scoring.<module>`. `evaluate_archive.py --mode pipeline --live` tracks
   each clip with the live tracker (`system/tennis_tracker/live`) and records its selector
   evidence; `tools/live_lag_sweep.py` replays that evidence at other commit delays on the CPU.
