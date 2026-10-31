@@ -246,7 +246,7 @@ next segment comes up:
 | `n` / `p` / arrows, a click on a row | the next / previous segment, or that one |
 | `f` | the next segment nobody has said anything about |
 | right click on a crop | split the segment there: the track jumped from one person to another |
-| SHIFT+`n` (`N`) | the next clip of the run |
+| SHIFT+`n` | the next clip of the run |
 | `s` | save |
 | `q` / ESC | save and quit |
 
@@ -275,7 +275,7 @@ point) shows the selected point enlarged.
 | `x` | unlabel this frame |
 | `u` | undo the last change on this frame |
 | `n` / `p` / arrows | the next / previous frame, without confirming |
-| SHIFT+`n` (`N`) | the next clip of the run |
+| SHIFT+`n` | the next clip of the run |
 | `s` | save |
 | `q` / ESC | save and quit |
 

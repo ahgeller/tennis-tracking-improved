@@ -39,7 +39,7 @@ from finetune.data.player_labels import NOT_PLAYER, PLAYERS, Box, PlayerBoxLabel
 from finetune.labeling.label_draw import Colour, fit_picture, fit_text, hud_text
 from finetune.labeling.label_store import load_players
 from finetune.labeling.label_timeline import Timeline
-from finetune.labeling.label_window import KEY_NEXT_CLIP, KEY_SAVE, KEYS_CONFIRM
+from finetune.labeling.label_window import KEY_SAVE, KEYS_CONFIRM, next_clip_key
 from finetune.data.labels import LabelFormatError
 from finetune.scoring.tracker_events import (court_keypoints_by_frame, court_side, player_boxes_by_frame, read_run,
                                              run_fps)
@@ -446,7 +446,7 @@ class PlayerView:
 
     # ---------------------------------------------------------------- input
     def handle_key(self, code: int, direction: int) -> None:
-        if code == KEY_NEXT_CLIP:
+        if next_clip_key(code):         # before n moves on: it is n with SHIFT
             self.next_clip()
         elif code == KEY_SAVE:
             self.tool.save()
@@ -499,7 +499,7 @@ class PlayerView:
         if self.message is not None or not self.segments:
             cv2.putText(canvas, fit_text(self.message or "no segments", session.view_w - int(40 * ui), 0.6 * ui, 1),
                         (int(20 * ui), int(40 * ui)), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui, (255, 255, 255), 1, cv2.LINE_AA)
-            hud_text(canvas[session.view_h + session.timeline_h:], "PLAYERS", "N (SHIFT+n): next clip   q: save/quit", ui)
+            hud_text(canvas[session.view_h + session.timeline_h:], "PLAYERS", "SHIFT+n: next clip   q: save/quit", ui)
         else:
             overview_h = int(session.view_h * OVERVIEW_SHARE)
             self.draw_overview(canvas[:overview_h], overview_h)
@@ -601,6 +601,6 @@ class PlayerView:
                  f"frames {segment.first}-{segment.last}  {self.identity(segment) or 'unassigned'}  "
                  f"assigned {assigned}/{len(self.segments)}{loading}{'  *unsaved*' if self.session.dirty else ''}")
         line2 = (f"1-4=P1-P4  0/v=not a player  SPACE={suggestion or '-'} (suggested)  u=clear  n/p=segment  "
-                 f"f=next unassigned  right click a crop=split there  N=next clip  q=save/quit")
+                 f"f=next unassigned  right click a crop=split there  SHIFT+n=next clip  q=save/quit")
         return line1, line2
 

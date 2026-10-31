@@ -350,7 +350,10 @@ def test_c_confirms_like_space_and_shift_n_goes_to_the_next_clip_and_s_saves(tmp
     tool, _ = open_players(tmp_path) if view_name == "player_view" else open_court(tmp_path)
     view = getattr(tool, view_name)
     with patch.object(type(view), "next_clip") as next_clip, patch.object(Tool, "save") as save:
-        press(tool, "N")
+        press(tool, "n")                                                          # n alone: the next segment / frame
+        assert next_clip.call_count == 0
+        press(tool, "p")                                                          # and back
+        press(tool, "n", shift=True)                  # Qt hands SHIFT+n back as a lower-case n, 110
         press(tool, "s")
     assert next_clip.call_count == 1 and save.call_count == 1
     press(tool, "c")                                                              # c is SPACE here too

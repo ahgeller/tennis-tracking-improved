@@ -25,7 +25,7 @@ from finetune.labeling import label_window as win
 from finetune.labeling.label_draw import fit_picture, fit_text, hud_text
 from finetune.labeling.label_store import load_court
 from finetune.labeling.label_timeline import Timeline
-from finetune.labeling.label_window import KEY_NEXT_CLIP, KEY_SAVE, KEYS_CONFIRM
+from finetune.labeling.label_window import KEY_SAVE, KEYS_CONFIRM, next_clip_key
 from finetune.scoring.tracker_events import court_keypoints_by_frame, read_run
 from tennis_tracker.court.court_geometry import LINE_PAIRS_14
 
@@ -218,7 +218,7 @@ class CourtView:
 
     # ---------------------------------------------------------------- input
     def handle_key(self, code: int, direction: int) -> None:
-        if code == KEY_NEXT_CLIP:
+        if next_clip_key(code):         # before n moves on: it is n with SHIFT
             self.next_clip()
             return
         if code == KEY_SAVE:
@@ -296,7 +296,7 @@ class CourtView:
         if not self.frames or self.source is None:
             cv2.putText(canvas, fit_text(self.message or "no frames to label", session.view_w - int(40 * ui), 0.6 * ui, 1),
                         (int(20 * ui), int(40 * ui)), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui, (255, 255, 255), 1, cv2.LINE_AA)
-            hud_text(canvas[session.view_h + session.timeline_h:], "COURT", "N (SHIFT+n): next clip   q: save/quit", ui)
+            hud_text(canvas[session.view_h + session.timeline_h:], "COURT", "SHIFT+n: next clip   q: save/quit", ui)
         else:
             image = self.source.frame(self.frame)
             picture, scale, off_x, off_y = fit_picture(image, session.view_w, session.view_h)
