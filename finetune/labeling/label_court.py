@@ -67,6 +67,7 @@ class CourtView:
         self.revision = 0
         self.message: Optional[str] = None
         self.mapping = (1.0, 0, 0)                    # scale, x and y offset of the picture on screen
+        self.loupe_box: Optional[Tuple[int, int, int]] = None   # (x0, y0, size) of the loupe last drawn
         self.cache_key: Optional[tuple] = None
         self.cache: Optional[np.ndarray] = None
         self.timeline = Timeline(session)
@@ -248,8 +249,9 @@ class CourtView:
             self.go(self.position + direction)
 
     def to_screen(self, x: float, y: float) -> Tuple[int, int]:
+        """The screen pixel frame point (x, y) falls in (to_frame's inverse: its middle maps back)."""
         scale, off_x, off_y = self.mapping
-        return int(round(x * scale + off_x)), int(round(y * scale + off_y))
+        return math.floor(x * scale + off_x), math.floor(y * scale + off_y)
 
     def to_frame(self, x: int, y: int) -> Tuple[float, float]:
         scale, off_x, off_y = self.mapping
@@ -339,8 +341,10 @@ class CourtView:
         point = self.points().get(name)
         h, w = image.shape[:2]
         cx, cy = point if point is not None else self.hover if self.hover is not None else (w / 2.0, h / 2.0)
-        # The region is resampled about the point itself, so the crosshair sits on its sub-pixel spot.
-        matrix = np.float32([[LOUPE, 0, size / 2.0 - LOUPE * cx], [0, LOUPE, size / 2.0 - LOUPE * cy]])
+        # The region is resampled about the point itself, so the crosshair sits on its sub-pixel spot:
+        # frame coordinates put pixel k's centre at k + 0.5, warpAffine at k, and the crosshair is on
+        # the loupe's pixel size // 2.
+        matrix = np.float32([[LOUPE, 0, size // 2 - LOUPE * (cx - 0.5)], [0, LOUPE, size // 2 - LOUPE * (cy - 0.5)]])
         loupe = cv2.warpAffine(image, matrix, (size, size), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
         on_right = self.to_screen(cx, cy)[0] > display.shape[1] // 2
         x0 = int(10 * ui) if on_right else display.shape[1] - size - int(10 * ui)   # away from the point
@@ -348,6 +352,7 @@ class CourtView:
         if x0 < 0 or y0 + size > display.shape[0]:
             return
         display[y0:y0 + size, x0:x0 + size] = loupe
+        self.loupe_box = (x0, y0, size)
         mid = (x0 + size // 2, y0 + size // 2)
         colour = SELECTED_COLOUR if point is not None else (120, 120, 120)
         gap = int(6 * ui)

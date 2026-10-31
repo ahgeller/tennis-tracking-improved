@@ -3,6 +3,7 @@ cut from a small pipeline run, who they are said to be, the court's points pre-f
 moved and confirmed, and the files both are saved to. Every file is under tmp_path; no video is
 decoded (the crop reader is not started)."""
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -361,6 +362,28 @@ def test_c_confirms_like_space_and_shift_n_goes_to_the_next_clip_and_s_saves(tmp
         assert view.identity(view.segments[0]) == "P1"
     else:
         assert 0 in tool.court_view.source.court
+
+
+
+def test_the_loupe_crosshair_and_the_screen_point_sit_on_the_pixel_the_point_names(tmp_path):
+    """Frame coordinates put pixel k's centre at k + 0.5: a point at (100.5, 50.5) is the middle of
+    pixel (100, 50), and both the loupe's crosshair and the point on screen must be on it."""
+    tool, source = open_court(tmp_path)
+    view = tool.court_view
+    picture = source.frame(0)
+    picture[50, 100] = (0, 0, 255)                                                # one bright pixel
+    view.selected = 0
+    view.change({**view.points(), "far_left": (100.5, 50.5)})
+    canvas = tool.render()
+    x0, y0, size = view.loupe_box
+    loupe = canvas[y0:y0 + size, x0:x0 + size]
+    peak = np.argwhere((loupe == (0, 0, 255)).all(axis=2))
+    assert [tuple(p) for p in peak] == [(size // 2, size // 2)]                   # under the crosshair's middle
+    sx, sy = view.to_screen(100.5, 50.5)
+    scale, off_x, off_y = view.mapping
+    assert (math.floor(100 * scale + off_x) <= sx < math.floor(101 * scale + off_x) + 1
+            and math.floor(50 * scale + off_y) <= sy < math.floor(51 * scale + off_y) + 1)
+    assert view.to_screen(*view.to_frame(sx, sy)) == (sx, sy)                    # and back
 
 
 def test_the_loupe_of_a_point_not_placed_follows_the_mouse(tmp_path):
