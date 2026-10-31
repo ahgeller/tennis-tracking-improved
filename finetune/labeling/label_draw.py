@@ -332,12 +332,14 @@ def draw_key_help(canvas: np.ndarray, title: str, keys: Sequence[Tuple[str, str]
     scale, line_h, pad = 0.5 * ui, int(round(24 * ui)), int(round(16 * ui))
     height, width = out.shape[:2]
     rows_fit = max(1, (height - 3 * pad - line_h) // line_h)
-    columns = [keys[k:k + rows_fit] for k in range(0, len(keys), rows_fit)]
+    count = -(-len(keys) // rows_fit)                       # as few columns as the height allows ...
+    per = -(-len(keys) // max(1, count))                    # ... each as long as the others
+    columns = [keys[k:k + per] for k in range(0, len(keys), per)]
     key_w = max((text_width(key, scale, thin) for key, _ in keys), default=0) + int(14 * ui)
     column_w = min((width - 2 * pad) // max(1, len(columns)),
                    key_w + max((text_width(what, scale, thin) for _, what in keys), default=0) + int(24 * ui))
     panel_w = column_w * len(columns) + 2 * pad
-    panel_h = line_h * (min(len(keys), rows_fit) + 1) + 2 * pad
+    panel_h = line_h * (min(len(keys), per) + 1) + 2 * pad
     x0, y0 = max(0, (width - panel_w) // 2), max(0, (height - panel_h) // 2)
     region = out[y0:y0 + panel_h, x0:x0 + panel_w]
     region[:] = (region * 0.15).astype(np.uint8)
