@@ -30,7 +30,7 @@ import math
 import threading
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
@@ -52,8 +52,11 @@ SEGMENT_GAP_S = 0.5           # a track missing this long ends its segment
 CROPS = 12                    # crops shown per segment, evenly through it
 CROP_H = 176                  # crops are kept at this height in pixels, scaled to the row when drawn
 CROP_PAD = 0.12               # each crop takes this share of the box's size around it
-ROWS_SHOWN = 4                # segment rows on screen at once
-OVERVIEW_SHARE = 0.42         # of the view's height, the whole-frame picture at the top
+ROWS_SHOWN = 4                # segment rows on screen at once, at most
+OVERVIEW_SHARE = 0.42         # of the view's height, the whole-frame picture at the top at least: fewer
+                              # segments than ROWS_SHOWN give it their rows' room too
+CELL_ASPECT = 0.6             # every crop is shown letterboxed in a cell this wide for its height
+CELL_FILL = (30, 30, 30)
 SIDE_BONUS = 0.15             # added to an identity's likeness when its nearest segment is on the same half
 LIKE_MIN = 0.35               # below this likeness, the suggestion is the first identity not yet in use
 IDENTITY_COLOURS: Dict[Optional[str], Colour] = {
@@ -189,6 +192,26 @@ def crop_box(image: np.ndarray, box: Box) -> Optional[np.ndarray]:
 
 
 Wanted = Dict[int, List[Tuple[str, Box]]]        # frame -> the (track, box) to cut a crop of on it
+
+
+def place_tags(boxes: Sequence[Tuple[str, Box]], picture: Box, tag_h: int, tag_w: Union[int, Mapping[str, int]]
+               ) -> Dict[str, Tuple[int, int]]:
+    """Where each box's tag goes (its top-left corner), in the order given, the first ones first:
+    just above the box (clipped to the picture), or inside it at its top when there is no room
+    above; a tag that would cover one already placed is left out."""
+    left, top, right, _ = picture
+    placed: Dict[str, Tuple[int, int]] = {}
+    rects: List[Tuple[int, int, int, int]] = []
+    for track, box in boxes:
+        width = tag_w if isinstance(tag_w, int) else tag_w[track]
+        x = int(max(left, min(box[0], right - width)))
+        y = int(box[1] - tag_h if box[1] - tag_h >= top else max(top, box[1]))
+        rect = (x, y, x + width, y + tag_h)
+        if any(rect[0] < o[2] and o[0] < rect[2] and rect[1] < o[3] and o[1] < rect[3] for o in rects):
+            continue
+        rects.append(rect)
+        placed[track] = (x, y)
+    return placed
 
 
 class CropReader:
@@ -481,48 +504,76 @@ class PlayerView(ClipView):
     def ready(self) -> bool:
         return self.message is None and bool(self.segments)
 
+    def row_height(self) -> int:
+        """Every segment row's height: ROWS_SHOWN of them fill what the overview leaves at its least."""
+        return int(self.session.view_h * (1.0 - OVERVIEW_SHARE)) // ROWS_SHOWN
+
     def draw(self, canvas: np.ndarray) -> None:
-        overview_h = int(self.session.view_h * OVERVIEW_SHARE)
-        self.draw_overview(canvas[:overview_h], overview_h)
-        self.draw_rows(canvas, overview_h)
+        """The overview above, the rows below: as many rows as there are segments, up to ROWS_SHOWN,
+        each the same height, and the overview the rest."""
+        view_h = self.session.view_h
+        rows_top = view_h - self.row_height() * min(ROWS_SHOWN, len(self.segments))
+        self.draw_overview(canvas[:rows_top], rows_top)
+        self.draw_rows(canvas, rows_top)
 
     def draw_overview(self, strip: np.ndarray, height: int) -> None:
-        """The selected segment's middle frame, whole, with every box the run had on it: the
-        segment's own thick in its identity's colour, the rest thin with their track and identity."""
+        """The selected segment's frame (overview_frame), whole, with every box the run had on it,
+        clipped to the picture: the segment's own thick in its identity's colour, the rest thin. Each
+        box's tag (track and identity), filled in its colour, sits above it (place_tags)."""
         session, segment = self.session, self.segments[self.selected]
         frame = self.overview_frame(segment)
         picture, scale, off_x, off_y = fit_picture(self.clip.frame(frame), session.view_w, height)
         strip[off_y:off_y + picture.shape[0], off_x:off_x + picture.shape[1]] = picture
+        bounds = (off_x, off_y, off_x + picture.shape[1] - 1, off_y + picture.shape[0] - 1)
         ui, thin = session.ui, max(1, int(round(session.ui)))
-        for track, box in sorted(self.boxes_by_frame.get(frame, {}).items(), key=lambda item: item[0] == segment.track):
+        size = 0.5 * ui
+        shown: List[Tuple[str, Box, Colour, bool, str]] = []
+        for track, run_box in self.boxes_by_frame.get(frame, {}).items():
             label = self.labels.get((frame, track))
             own = track == segment.track
             if own:                       # the selected segment: white until it is said who it is
                 colour = IDENTITY_COLOURS[self.identity(segment)] if self.identity(segment) else (255, 255, 255)
             else:
-                colour = IDENTITY_COLOURS[label.player if label else None]
-                colour = colour if label else (170, 170, 170)
-            p1 = (int(box[0] * scale) + off_x, int(box[1] * scale) + off_y)
-            p2 = (int(box[2] * scale) + off_x, int(box[3] * scale) + off_y)
-            cv2.rectangle(strip, p1, p2, colour, 3 * thin if own else thin, cv2.LINE_AA)
-            text = f"{track}" + (f" {label.player}" if label else "")
-            cv2.putText(strip, text, (p1[0], max(int(14 * ui), p1[1] - int(5 * ui))), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5 * ui, colour, thin, cv2.LINE_AA)
+                colour = IDENTITY_COLOURS[label.player] if label else (170, 170, 170)
+            x1, y1, x2, y2 = (min(max(value * scale + (off_y if k % 2 else off_x), bounds[k % 2]), bounds[2 + k % 2])
+                              for k, value in enumerate(run_box[:4]))
+            on_screen: Box = (x1, y1, x2, y2)
+            shown.append((track, on_screen, colour, own, f"{track}" + (f" {label.player}" if label else "")))
+        shown.sort(key=lambda item: not item[3])           # the selected segment's first: its tag is never left out
+        tag_h = int(round(18 * ui))
+        widths = {track: cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, size, thin)[0][0] + int(8 * ui)
+                  for track, _, _, _, text in shown}
+        tags = place_tags([(track, box) for track, box, _, _, _ in shown], bounds, tag_h, widths)
+        for track, box, colour, own, text in reversed(shown):   # the selected one drawn last, on top
+            cv2.rectangle(strip, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), colour, 3 * thin if own else thin,
+                          cv2.LINE_AA)
+        for track, box, colour, own, text in reversed(shown):
+            if track in tags:
+                x, y = tags[track]
+                cv2.rectangle(strip, (x, y), (x + widths[track] - 1, y + tag_h - 1), colour, -1)
+                cv2.putText(strip, text, (x + int(4 * ui), y + tag_h - int(5 * ui)), cv2.FONT_HERSHEY_SIMPLEX, size,
+                            (0, 0, 0), thin, cv2.LINE_AA)
 
     def overview_frame(self, segment: Segment) -> int:
         """The frame the overview shows for `segment`: the label frame nearest its middle that it
-        has a box on (the label frames are the ones the clip's decoder is sure of), else its middle."""
+        has a box on (the label frames are the ones the clip's decoder is sure of), its two ends left
+        out (a box there is the track coming or going, half off the picture); else its middle."""
         middle = segment.frames[len(segment.frames) // 2]
         label_frames = {row.frame for row in self.clip.rows}
-        labelled = [frame for frame in segment.frames if frame in label_frames]
+        ends = {segment.frames[0], segment.frames[-1]}
+        labelled = [frame for frame in segment.frames if frame in label_frames and frame not in ends]
         return min(labelled, key=lambda frame: abs(frame - middle)) if labelled else middle
 
     def draw_rows(self, canvas: np.ndarray, top: int) -> None:
-        """The segment rows under the overview: a caption, then its crops."""
+        """The segment rows under the overview: a caption, the same for every row, then its crops,
+        each letterboxed in a cell of one size."""
         session = self.session
         ui, thin = session.ui, max(1, int(round(session.ui)))
-        row_h = (session.view_h - top) // ROWS_SHOWN
+        row_h = self.row_height()
         caption_w = int(190 * ui)
+        pad = int(6 * ui)
+        crop_h = row_h - 2 * pad
+        cell_w = max(1, int(round(crop_h * CELL_ASPECT)))
         self.rows, self.crop_boxes = [], []
         for slot, index in enumerate(range(self.first_row, min(len(self.segments), self.first_row + ROWS_SHOWN))):
             segment = self.segments[index]
@@ -533,9 +584,8 @@ class PlayerView(ClipView):
             if index == self.selected:
                 cv2.rectangle(canvas, (0, y0), (session.view_w - 1, y1 - 1), (60, 60, 60), -1)
             chip = IDENTITY_COLOURS[identity]
-            pad = int(6 * ui)
             cv2.rectangle(canvas, (pad, y0 + pad), (pad + int(8 * ui), y1 - pad), chip, -1)
-            lines = [(identity or "unassigned", chip if identity else (150, 150, 150), 0.7 if identity else 0.55),
+            lines = [(identity or "unassigned", chip if identity else (150, 150, 150), 0.6),
                      (f"track {segment.track}", (220, 220, 220), 0.48),
                      (f"{segment.first}-{segment.last}", (180, 180, 180), 0.44),
                      (f"{(segment.last - segment.first + 1) / self.fps:.1f}s {segment.side or ''}", (180, 180, 180), 0.44)]
@@ -544,24 +594,23 @@ class PlayerView(ClipView):
                 if y > y1 - pad:
                     break
                 cv2.putText(canvas, fit_text(text, caption_w - int(30 * ui), size * ui, thin), (int(22 * ui), y),
-                            cv2.FONT_HERSHEY_SIMPLEX, size * ui, colour, thin + (1 if size >= 0.7 else 0), cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, size * ui, colour, thin, cv2.LINE_AA)
                 y += int(20 * ui)
             x = caption_w
-            crop_h = row_h - 2 * pad
+            cy0 = y0 + pad
             for frame in self.crop_frames(segment):
-                crop = self.crop(segment, frame)
-                width = int(round(crop_h * 0.6)) if crop is None else int(round(crop.shape[1] * crop_h / crop.shape[0]))
-                width = min(width, int(crop_h * 1.2))
-                if x + width > session.view_w - pad:
+                if x + cell_w > session.view_w - pad:
                     break
-                cy0 = y0 + pad
-                if crop is None:
-                    cv2.rectangle(canvas, (x, cy0), (x + width - 1, cy0 + crop_h - 1), (45, 45, 45), -1)
-                else:
-                    shown = cv2.resize(crop, (width, crop_h), interpolation=cv2.INTER_AREA)
-                    canvas[cy0:cy0 + crop_h, x:x + width] = shown
-                self.crop_boxes.append((index, frame, x, cy0, x + width, cy0 + crop_h))
-                x += width + pad
+                cell = canvas[cy0:cy0 + crop_h, x:x + cell_w]
+                cell[:] = CELL_FILL
+                crop = self.crop(segment, frame)
+                if crop is not None:
+                    fit = min(cell_w / crop.shape[1], crop_h / crop.shape[0])
+                    w, h = max(1, int(round(crop.shape[1] * fit))), max(1, int(round(crop.shape[0] * fit)))
+                    dx, dy = (cell_w - w) // 2, (crop_h - h) // 2
+                    cell[dy:dy + h, dx:dx + w] = cv2.resize(crop, (w, h), interpolation=cv2.INTER_AREA)
+                self.crop_boxes.append((index, frame, x, cy0, x + cell_w, cy0 + crop_h))
+                x += cell_w + pad
             cv2.line(canvas, (0, y1 - 1), (session.view_w - 1, y1 - 1), (35, 35, 35), 1)
 
     def hud_lines(self) -> Tuple[List[HudItem], List[HudItem]]:

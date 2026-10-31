@@ -455,3 +455,37 @@ def test_tab_takes_a_clip_view_back_to_the_frames_and_m_goes_full_screen_there(t
     tool.court_view.open()
     press(tool, "	")
     assert tool.view is tool.frame_view
+
+
+def test_player_rows_are_fixed_cells_sized_to_the_segments_with_the_rest_for_the_overview(tmp_path):
+    tool, _ = open_players(tmp_path)
+    view = tool.player_view
+    tool.fit_view(1280, 720)
+    tool.render()
+    session = tool.session
+    heights = {y1 - y0 for _, y0, y1 in view.rows}
+    assert len(heights) == 1 and len(view.rows) == min(label_players.ROWS_SHOWN, len(view.segments))
+    assert view.rows[-1][2] == session.view_h                                     # the rows end at the picture's foot
+    assert view.rows[0][1] >= session.view_h * label_players.OVERVIEW_SHARE        # the overview takes what is spare
+    widths = {x1 - x0 for _, _, x0, _, x1, _ in view.crop_boxes}
+    assert len(widths) == 1                                                       # every crop in a cell of one size
+
+
+def test_the_overview_frame_is_the_label_frame_nearest_the_middle_but_never_a_lone_one_at_an_end():
+    view = SimpleNamespace(source=SimpleNamespace(rows=[SimpleNamespace(frame=0), SimpleNamespace(frame=20)]))
+    view.clip = view.source
+    frames = list(range(0, 21))
+    segment = Segment("1", frames, {f: (0.0, 0.0, 1.0, 1.0) for f in frames})
+    assert label_players.PlayerView.overview_frame(view, segment) == 10           # 0 and 20 are its ends
+    segment = Segment("1", list(range(5, 31)), {f: (0.0, 0.0, 1.0, 1.0) for f in range(5, 31)})
+    assert label_players.PlayerView.overview_frame(view, segment) == 20
+
+
+def test_overview_tags_sit_filled_above_their_box_or_inside_it_at_the_top_and_never_overlap():
+    from finetune.labeling.label_players import place_tags
+    picture = (0, 0, 1000, 600)
+    boxes = [("1", (100, 200, 160, 360)), ("2", (110, 5, 170, 160)), ("3", (105, 190, 165, 350))]
+    tags = place_tags(boxes, picture, 20, 50)
+    assert tags["1"][1] == 200 - 20                                               # above its box
+    assert tags["2"][1] == 5                                                      # no room above: inside, at the top
+    assert "3" not in tags                                                        # it would cover 1's
