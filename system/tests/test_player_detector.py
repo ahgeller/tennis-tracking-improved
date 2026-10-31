@@ -9,19 +9,28 @@ import pytest
 import torch
 
 from tennis_tracker.config import Config
+from tennis_tracker.engines import player_detector
 from tennis_tracker.engines.player_detector import (
     PlayerDetector, PlayerPending, _load_bytetrack, interpolate_player_boxes, player_detect_interval,
 )
 
 
-def test_load_bytetrack_reports_why_boxmot_is_missing():
+@pytest.fixture
+def uncached_bytetrack(monkeypatch):
+    """No boxmot import cached or in flight, and the cache restored afterwards: a test that hides
+    boxmot must neither see an earlier import nor leave its absence to the tests after it."""
+    monkeypatch.setattr(player_detector, "_bytetrack", None)
+    monkeypatch.setattr(player_detector, "_bytetrack_import", None)
+
+
+def test_load_bytetrack_reports_why_boxmot_is_missing(uncached_bytetrack):
     with patch.dict(sys.modules, {"boxmot": None}):
         tracker, reason = _load_bytetrack()
     assert tracker is None
     assert isinstance(reason, str) and reason
 
 
-def test_configured_engine_without_boxmot_raises_like_a_missing_engine(tmp_path):
+def test_configured_engine_without_boxmot_raises_like_a_missing_engine(tmp_path, uncached_bytetrack):
     with patch.dict(sys.modules, {"boxmot": None}):
         with pytest.raises(RuntimeError, match="requires boxmot.*pip install boxmot"):
             PlayerDetector(Config(player_model_path=str(tmp_path / "player.engine")))

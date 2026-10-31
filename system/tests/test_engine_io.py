@@ -398,8 +398,10 @@ def test_player_outputs_reach_the_host_intact_when_the_next_launch_reuses_the_bu
     if not PLAYER_ENGINE.is_file():
         pytest.skip("player.engine is not present")
     pytest.importorskip("boxmot")
-    # The detector caches the boxmot import; the tests that hide boxmot need it uncached.
-    monkeypatch.setattr(player_detector, "_bytetrack", player_detector._bytetrack)
+    # The detector caches the boxmot import, and a test that hid boxmot may have cached its
+    # absence: import it afresh, and leave the cache as it was afterwards.
+    monkeypatch.setattr(player_detector, "_bytetrack", None)
+    monkeypatch.setattr(player_detector, "_bytetrack_import", None)
     detector = player_detector.PlayerDetector(Config(device="0"))
     if detector.session.stream is None:
         pytest.skip("the session is synchronous")
