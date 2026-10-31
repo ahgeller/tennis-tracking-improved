@@ -104,8 +104,11 @@ background/process flags; `auto` gives `process` to a network whose model class 
   over right after the video opens. Pass 1 consumes rows as they arrive (`PrepassRows`).
 - **Protocol.** `multiprocessing.connection` on a loopback socket (named pipes refused connections
   now and then on Windows) with a random authkey passed in the environment. Messages are
-  dataclasses (`ClipRequest`, `PrepassRows(start, rows)`, `PrepassEnd(error)`), pickled under the
-  module's real name (the child's `__main__` calls the imported module's `_serve`).
+  dataclasses (`PrepassSetup`, `ClipRequest`, `StopRequest`, `PrepassRows(start, rows)`,
+  `PrepassEnd(error)`), dispatched by type and pickled under the module's real name (the child's
+  `__main__` calls the imported module's `_serve`). The parent accepts on its own socket, polling,
+  and runs the key handshake under a 2 s timeout, so a stray client on the port is dropped and the
+  child still connects (section 5).
 - **Lifecycle.** `run` never blocks (a reader thread waits for the connection). A child that dies
   before it connects, fails to build its detector (it answers every clip with the traceback) or
   fails a clip ends the run with its reason. `stop` tells an idle child to exit and terminates a
@@ -156,6 +159,50 @@ crop in model space) plugs in here without touching the parent/child plumbing:
 - **Lag.** The gate observes rows after readback and batching (4 units a call); it must plan with
   that lag or flush before planning, as the Phase C record describes.
 
+## 5. Review fixes (80fb120..7a0b14f)
+
+Two reviews of f43218a..f290f93; every fix is a new commit.
+
+- **ft.py eval scored stream_s4.** The archive scorer defaults to the tracker's detector, now
+  stream_s4, while the workspace trains `models/ball_detector.pt`. `ft.py eval` now passes the
+  workspace's model unless `--weights` is given (a test pins it); "the tracker's model" became the
+  workspace's model across the workspace's commands, menu, trainer help and docs; `promote`'s hint
+  runs the promoted file before `evaluation.parity --existing`, since plain parity runs stream_s4.
+- **stream_prepass_parity.py recorded nothing**: its streaming runs went to the child. Every run
+  names `foreground` now, a run without units is an error, and detectors are closed. On pomona:
+  2014 units in each of the four runs; W-S frames differ at 0.3 / 0.4 / 0.5 in 2 / 2 / 0 of 2022.
+- **close could hang, a stray connection broke the run** (reproduced with the reviewers' scripts:
+  a port scan failed the run, a silent client held `Listener.accept`'s handshake and `close`'s
+  wake-up `Client` then waited forever). The acceptor is now a polling loop over a plain socket,
+  the handshake runs under `HANDSHAKE_TIMEOUT_S`, a client that fails it is dropped, and `close`
+  connects to nothing. The same scripts now: the run ends with the child's answer in 4.3 s and
+  `close` returns at once (0.06 s with a silent client held). Three regression tests run those
+  shapes in fresh interpreters under timeouts.
+- **Thresholds keyed by path.** Kept the path table (gating happens after training, so a record
+  cannot carry its gated threshold when it is written) and made its limits visible: weights the
+  table does not know print `unknown_weights_note` in `clean_tracker`, the archive scorer and
+  pretrack when no `--conf` is given, and `promote` warns that the promoted file inherits the old
+  entry's threshold and says how to gate it. `ball_weights.py` and `models/README.md` document it.
+- **Quality.** Mode names and a `PrepassMode` Literal in `config.py` (no torch), used by the archive
+  scorer, `detect.py` and the tests; `pipeline.run` builds the detector after `_setup_run` and
+  closes it in one `finally`, and `_open_inputs` releases the clip when init fails;
+  `STREAM_S4_WEIGHTS`/`HEATMAP_S4_WEIGHTS`; test fakes call the real `prepass_mode` or name their
+  mode; the 0.42 literal once in the tests; `_gone` tolerates a process that ends between checks;
+  `pseudo_labels`' teacher runs at `operating_conf` (it was a stale 0.50); `PER_CLIP_CONF` says why
+  it is fixed; README fixes (the weights are not in the repository).
+
+Re-verified at 7a0b14f:
+
+- Gate (`--mode pipeline --holdout mixed_v1`, defaults): recall 0.953, false alarm 95 (79 / 16),
+  source recall .913 / .971 / .952; all 24 clips' frames, tracks, chosen track and court events
+  equal to f290f93's run.
+- pomona: 0 of 2022 frames differ from f290f93's. A run interrupted (Ctrl-C) at 3 s with its child
+  running: `KeyboardInterrupt` reached main, no child left.
+- Timing, pomona `--no-video`, f290f93 against 7a0b14f interleaved, 1 warm-up and 4 rounds, no
+  neighbour: total 11.30 [10.80-11.50] against 11.55 [11.10-11.60] s, pass 1 7.01 against 7.04,
+  prepass 2.30 against 2.25; init is bimodal in both (3.1-3.5 or 4.0 s), so the 0.25 s is inside
+  the spread and no regression is measurable.
+
 ## Files
 
 - New: `system/tennis_tracker/ball_weights.py`, `system/tests/test_ball_weights.py`,
@@ -169,16 +216,15 @@ crop in model space) plugs in here without touching the parent/child plumbing:
 
 ## Tests
 
-System suite (`tennis-opt`): 640 passed. Root suite (`tennis-analysis`, which runs both): 1362 passed,
-11 skipped. mypy clean
-in both.
+System suite (`tennis-opt`): 643 passed. Root suite (`tennis-analysis`, which runs both): 1366 passed,
+11 skipped. mypy clean in both (after the review fixes).
 
 ## Open issues
 
 - pomona gains nothing end to end: its init saving goes to pass 1's extra full-frame motion frames.
   Cheaper full-frame CC and packing would turn it into a win.
 - Init is floored by the boxmot import (2.9 s); deferring ByteTrack would let pass 1 start earlier.
-- The training workspace still calls `models/ball_detector.pt` the tracker's model in places, and
-  `pseudo_labels`' `PIPELINE_CONF` 0.5 predates the gated thresholds.
+- A retrained or promoted file's gated threshold still has to be entered in `ball_weights.py` by
+  hand (the runs and `promote` now say so).
 - `tools/link_worktree_data.py` does not link `models/candidates/`, so a new worktree lacks the
   default weights until they are copied (the error says so).
