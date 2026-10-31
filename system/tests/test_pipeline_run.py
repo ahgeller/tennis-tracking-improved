@@ -566,6 +566,9 @@ def test_json_only_run_matches_golden_without_rendering(tmp_path, monkeypatch, f
     assert result["streams"] == {}
     assert "[pass 2] Skipped (no video outputs selected)" in out
     assert not Path(result["cfg"].output_video).exists()
+    # Nothing filters the selector boosts in pass 1 here: the selector filters the ones it reads.
+    timing = result["raw_json"]["timing"]
+    assert timing.get("pass1_pre_cuda_cc", 0.0) == 0.0 and timing.get("selector_boost_cc", 0.0) > 0.0
     assert_json_close(result["json"], expected, "JSON-only run differs from the golden")
 
 

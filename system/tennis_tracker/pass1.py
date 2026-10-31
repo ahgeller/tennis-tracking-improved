@@ -331,7 +331,10 @@ class _Pass1Collector:
         dropped_ghost_rois = self.roi_tracker.update_from_dets(dets, record.frame_index)
         out.detections.append(dets)
         masks = record.masks
-        out.boost_masks.append(masks.deferred_boost() if masks is not None else None)
+        if masks is not None:
+            masks.store_boost(out.boost_masks)
+        else:
+            out.boost_masks.append(None)
         out.raw_motions.append(masks.packed_raw() if masks is not None else None)
         # A track that timed out never had the ball: its coasting ROIs on
         # earlier frames are moved from the visual ROI list to the ghost list,

@@ -1,5 +1,5 @@
 """tennis_tracker.motion on synthetic frames, on the CPU."""
-from types import SimpleNamespace
+import math
 
 import cv2
 import numpy as np
@@ -9,10 +9,12 @@ import torch.nn.functional as F
 from ball_in_play_selector import PackedMask
 
 from tennis_tracker.config import Config
+import tennis_tracker.motion as motion
 from tennis_tracker.frame_window import FrameWindow
 from tennis_tracker.motion import (
-    MASKS_ONLY, BackgroundModel, BoostMasks, DeferredBoost, DetectorInputRequest, MotionMasks, _clean_raw_motion_cuda,
-    _clean_raw_motion_mask, _raw_motion_cuda, filter_boost_mask, preprocess_frame_cuda,
+    MASKS_ONLY, BackgroundModel, BoostMasks, DetectorInputRequest, MotionMasks, _boost_discs, _clean_raw_motion_cuda,
+    _clean_raw_motion_mask, _disc_stamps, _pack_stamps, _raw_motion_cuda, _SqueezedMask,
+    build_court_side_protect_mask, filter_boost_mask, preprocess_frame_cuda,
 )
 from tests._helpers import refine_raw_motion_temporal_cpu
 
@@ -26,10 +28,9 @@ def _zero_background(cfg, h, w):
     return background
 
 
-def test_empty_motion_clears_reused_boost_buffer():
-    buffers = SimpleNamespace(boost_mask_u8=np.full((10, 10), 255, np.uint8))
-    result = filter_boost_mask(np.zeros((10, 10), np.uint8), 0, 600, Config(), buffers=buffers)
-    assert not np.any(result)
+def test_empty_motion_gives_an_empty_boost_mask():
+    result = filter_boost_mask(np.zeros((10, 10), np.uint8), 0, 600, Config())
+    assert result.shape == (10, 10) and not np.any(result)
 
 
 def test_motion_retains_non_yellow_evidence():
@@ -49,7 +50,6 @@ def test_motion_retains_non_yellow_evidence():
 def test_court_side_protect_mask_covers_the_outside_of_each_sideline():
     """A trapezoid court seen from the baseline: the guides run one alley width outside each
     sideline, and the mask keeps what lies beyond them (and nothing when there is no court)."""
-    from tennis_tracker.motion import build_court_side_protect_mask
     keypoints = [0.0] * 28
     for index, (x, y) in {0: (120.0, 20.0), 1: (200.0, 20.0), 2: (60.0, 170.0), 3: (260.0, 170.0),
                           5: (80.0, 170.0), 7: (240.0, 170.0)}.items():
@@ -188,65 +188,124 @@ def _deferral_cases():
     yield (height, width), [(0, 0, width, height)], False, [dense], None, cfg
 
 
-@pytest.mark.parametrize("case", range(5))
-def test_a_deferred_boost_resolves_to_the_packed_boost_without_the_download_buffer(case):
-    """``deferred_boost`` packs the raw mask but leaves the component filter to the first reader;
-    what it resolves to is ``packed_boost`` bit for bit, and it keeps no view of the pinned buffer."""
-    args = list(_deferral_cases())[case]
+class _Stored:
+    """A stand-in for ``BoostMasks`` that keeps what ``MotionMasks.store_boost`` hands it."""
+
+    def __init__(self):
+        self.appended, self.deferred = [], []
+
+    def append(self, mask):
+        self.appended.append(mask)
+
+    def defer(self, pending):
+        self.deferred.append(pending)
+
+
+def _arrays(value):
+    """Every numpy array in `value`, a pending boost: its fields, and theirs."""
+    if isinstance(value, np.ndarray):
+        return [value]
+    if isinstance(value, (tuple, list)):
+        return [array for item in value for array in _arrays(item)]
+    return []
+
+
+@pytest.mark.parametrize("args", list(_deferral_cases()),
+                         ids=["rois", "frame-0", "frame-1-wide", "frame-2-wide", "frame-dense"])
+def test_a_deferred_boost_resolves_to_the_packed_boost_from_packed_bits(args):
+    """``store_boost`` defers the component filter to the first reader, holding the raw motion
+    packed and nothing of the pinned download buffer; what it resolves to is ``packed_boost`` bit
+    for bit, and pass 1's timers never see the filter."""
     perf = {}
     masks = MotionMasks(*args, perf)
     raw = masks.packed_raw()
-    deferred = masks.deferred_boost()
-    assert isinstance(deferred, DeferredBoost) and "pre_cuda_cc_filter" not in perf
-    held = [array for array in (deferred.crops or []) + ([deferred.squeezed.image] if deferred.squeezed else [])]
+    stored = _Stored()
+    masks.store_boost(stored)
+    (pending,) = stored.deferred
+    assert stored.appended == [] and "pre_cuda_cc_filter" not in perf
+    held = _arrays(pending)
     assert held and not any(np.shares_memory(array, masks._host.numpy()) for array in held)
-    got = deferred.resolve()
-    assert "pre_cuda_cc_filter" not in perf             # pass 1 has reported its timers by now
+    raw_bytes = sum(view.size for view in masks._raw_views)
+    assert pending.nbytes < raw_bytes // 4                # packed: an eighth, and the squeezed rows and columns
+    got = pending.resolve()
+    assert "pre_cuda_cc_filter" not in perf               # the reader's time (BoostMasks.filter_seconds)
     expected = MotionMasks(*args, None).packed_boost()
     assert got is not None and got.roi == expected.roi and np.array_equal(got.bits, expected.bits)
     assert np.array_equal(raw.bits, MotionMasks(*args, None).packed_raw().bits)
-    masks.has_blobs                                   # filtered now: the packed mask itself
-    resolved = masks.deferred_boost()
-    assert isinstance(resolved, PackedMask) and np.array_equal(resolved.bits, expected.bits)
+    assert masks.packed_boost() is not None              # filtered now: stored as the packed mask itself
+    again = _Stored()
+    masks.store_boost(again)
+    (resolved,) = again.appended
+    assert again.deferred == [] and np.array_equal(resolved.bits, expected.bits)
+
+
+@pytest.mark.parametrize("args", [args for args in _deferral_cases() if not args[2]],
+                         ids=["frame-0", "frame-1-wide", "frame-2-wide", "frame-dense"])
+def test_the_squeezed_image_is_contiguous_and_not_a_view_of_the_download_buffer(args):
+    masks = MotionMasks(*args, None)
+    masks.packed_raw()
+    image = masks._raw_source.image
+    assert image.flags.c_contiguous and not np.shares_memory(image, masks._host.numpy())
 
 
 def test_motion_masks_with_no_raw_motion_defer_nothing():
     cfg = Config(boost_min_blob_area=1, boost_max_blob_area=600, motion_raw_close_size=0)
     empty = torch.zeros(30, 40, dtype=torch.bool)
-    assert MotionMasks((30, 40), [(0, 0, 40, 30)], False, [empty], None, cfg, None).deferred_boost() is None
-    assert MotionMasks((30, 40), [(5, 5, 20, 20)], True, [empty[5:20, 5:20]], None, cfg, None).deferred_boost() is None
+    for masks in (MotionMasks((30, 40), [(0, 0, 40, 30)], False, [empty], None, cfg, None),
+                  MotionMasks((30, 40), [(5, 5, 20, 20)], True, [empty[5:20, 5:20]], None, cfg, None)):
+        stored = _Stored()
+        masks.store_boost(stored)
+        assert stored.appended == [None] and stored.deferred == []
+
+
+class _FakePending:
+    """A ``PendingBoost`` that records when it is resolved."""
+
+    def __init__(self, tag, resolved, nbytes=10):
+        self.tag, self.resolved, self.nbytes = tag, resolved, nbytes
+
+    def resolve(self):
+        self.resolved.append(self.tag)
+        return PackedMask.pack(np.ones((4, 4), np.uint8))
 
 
 def test_boost_masks_filter_a_deferred_frame_once_when_it_is_first_read():
     resolved = []
-
-    class Counting(DeferredBoost):
-        def resolve(self):
-            resolved.append(self.union[0])
-            return PackedMask.pack(np.ones((4, 4), np.uint8))
-
-    def deferred(tag):
-        return Counting((4, 4), (tag, 0, 4, 4), [], None, None, Config())
-
     stored = PackedMask.pack(np.eye(4, dtype=np.uint8))
     masks = BoostMasks()
-    for mask in (deferred(0), None, stored, deferred(1)):
-        masks.append(mask)
-    assert len(masks) == 4 and resolved == []
+    masks.defer(_FakePending(0, resolved))
+    masks.append(None)
+    masks.append(stored)
+    masks.defer(_FakePending(1, resolved))
+    assert len(masks) == 4 and resolved == [] and masks.pending_bytes == 20
     assert masks[2] is stored and masks[1] is None and resolved == []
     first = masks[0]
-    assert masks[0] is first and resolved == [0]                 # kept once filtered
-    assert masks[-1] is not None and resolved == [0, 1]
+    assert masks[0] is first and resolved == [0] and masks.pending_bytes == 10    # kept once filtered
+    assert masks[-1] is not None and resolved == [0, 1] and masks.pending_bytes == 0
+    assert masks.filter_seconds > 0.0
     masks[0] = None                                              # as ghost erasure repacks a frame
     assert masks[0] is None and masks[1:3] == [None, stored] and list(masks)[2] is stored
     assert resolved == [0, 1]
 
 
+def test_boost_masks_filter_at_once_past_their_budget_and_drop_a_frame_written_over():
+    resolved = []
+    masks = BoostMasks(budget_bytes=25)
+    for tag in range(3):
+        masks.defer(_FakePending(tag, resolved))
+    assert resolved == [2] and masks.pending_bytes == 20         # the third would pass the budget
+    masks[1] = None                                              # written before it was read
+    assert masks.pending_bytes == 10 and masks[1] is None and resolved == [2]
+    masks.defer(_FakePending(3, resolved))
+    assert masks.pending_bytes == 20 and resolved == [2]
+    assert masks.filter_seconds == 0.0
+
+
 def _discs_one_by_one(mask, min_area, max_area, cfg):
     """The component filter as it was written before it was vectorised, one component at a time."""
-    import math
     height, width = mask.shape
-    bypass = max(15, min(150, int(round(0.035 * math.hypot(float(width), float(height))))))
+    bypass = max(motion._BALL_BYPASS_AREA_MIN_PX, min(motion._BALL_BYPASS_AREA_MAX_PX, int(round(
+        motion._BALL_BYPASS_AREA_DIAG_FRAC * math.hypot(float(width), float(height))))))
     if cfg.blob_preserve_tiny:
         bypass = max(bypass, cfg.blob_tiny_max_area)
     num, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -258,11 +317,12 @@ def _discs_one_by_one(mask, min_area, max_area, cfg):
         bw, bh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
         aspect = max(bw, bh) / max(min(bw, bh), 1)
         if area <= bypass:
-            if aspect > (4.5 if area < 50 else 3.5):
+            if aspect > (motion._TINY_BLOB_MAX_ASPECT if area < motion._TINY_BLOB_AREA_PX
+                         else motion._SMALL_BLOB_MAX_ASPECT):
                 continue
         elif cfg.blob_shape_filter and aspect > cfg.blob_max_aspect:
             continue
-        radius = min(int(math.sqrt(area / math.pi) + 0.5), 12)
+        radius = min(int(math.sqrt(area / math.pi) + 0.5), motion._BOOST_DISC_MAX_RADIUS_PX)
         discs.append((int(centroids[i][0] + 0.5), int(centroids[i][1] + 0.5), max(radius, 1)))
     return sorted(discs)
 
@@ -271,7 +331,6 @@ def _discs_one_by_one(mask, min_area, max_area, cfg):
 def test_boost_discs_are_the_ones_the_component_loop_kept(shape_filter, preserve_tiny):
     """The vectorised filter keeps the components, centres and radii the one-at-a-time loop kept:
     ball-sized blobs, streaks of every aspect around the limits, and blobs past the size limits."""
-    from tennis_tracker.motion import _boost_discs
     cfg = Config(blob_shape_filter=shape_filter, blob_preserve_tiny=preserve_tiny, blob_max_aspect=2.5)
     mask = _scattered_motion(7, 240, 400)
     for row, (w, h) in enumerate([(1, 5), (2, 9), (3, 11), (4, 10), (6, 21), (9, 4), (14, 4), (30, 12), (40, 40)]):
@@ -284,14 +343,13 @@ def test_boost_discs_are_the_ones_the_component_loop_kept(shape_filter, preserve
     mask[100:110, 300:304] = 1
     for min_area, max_area in ((1, 600), (4, 60), (20, 2000)):
         num, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        got = _boost_discs(stats[1:num], centroids[1:num], 0, 0, mask.shape, min_area, max_area, cfg)
+        got = _boost_discs(stats[1:num], centroids[1:num], mask.shape, min_area, max_area, cfg)
         assert sorted(map(tuple, got.tolist())) == _discs_one_by_one(mask, min_area, max_area, cfg)
 
 
 def test_boost_disc_stamps_pack_as_discs_drawn_on_the_frame():
     """Every disc radius the filter draws, at the frame's corners and edges and overlapping:
     the stamps, packed, are the discs drawn on the whole frame."""
-    from tennis_tracker.motion import _disc_stamps, _pack_stamps
     height, width = 40, 60
     for radius in range(1, 13):
         discs = np.array([[0, 0, radius], [width - 1, height - 1, radius], [width - 1, 0, radius],
@@ -307,7 +365,6 @@ def test_boost_disc_stamps_pack_as_discs_drawn_on_the_frame():
 def test_squeezing_keeps_components_whole_and_apart():
     """The squeezed image's components are the frame's: the same areas, widths, heights and, moved
     back by their offsets, the same rounded centres."""
-    from tennis_tracker.motion import _SqueezedMask
     mask = _scattered_motion(11)
     squeezed = _SqueezedMask.of(mask, mask.any(axis=1), mask.any(axis=0))
     assert squeezed.image.size < mask.size // 4
@@ -484,7 +541,6 @@ def test_filter_boost_mask_treats_any_nonzero_pixel_as_motion():
 def test_filter_boost_mask_in_the_motion_bounding_box_matches_the_whole_frame_pass(monkeypatch):
     """Components found in the bounding box of the motion give the discs a pass over the whole
     frame gives (the box is forced to the full frame for the reference)."""
-    import tennis_tracker.motion as motion
     cfg = Config(boost_min_blob_area=1, boost_max_blob_area=600)
     rng = np.random.default_rng(4)
     masks = []

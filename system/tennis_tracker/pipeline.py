@@ -224,6 +224,7 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
 
     print("[selector] Running ball-in-play selection...")
     select_t0 = timing.start()
+    filtered_before = pass1.boost_masks.filter_seconds
     per_frame, chosen_track, all_tracks = select_ball_in_play(
         pass1.detections, video.fps, video.width, video.height,
         court_polygon=court_polygon,
@@ -233,6 +234,8 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
         debug=cfg.print_selector_tracks,
         court_keypoints_by_frame=pass1.court_keypoints)
     timing.add("selector_select", select_t0)
+    # The boost masks pass 1 left unfiltered are filtered as the selector first reads them.
+    timing.set("selector_boost_cc", pass1.boost_masks.filter_seconds - filtered_before)
 
     print(f"[selector] {len(all_tracks)} total tracks")
     post_t0 = timing.start()
