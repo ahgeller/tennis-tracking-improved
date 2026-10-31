@@ -140,7 +140,9 @@ so the same `__init__` sets the path up there.
   the selector changes. The root
   `evaluate_archive.py`, `score_court_events.py` and `track_breaks.py` are thin entry points
   to `archive`, `court_events_score` and `track_breaks`; the rest run as
-  `python -m finetune.scoring.<module>`.
+  `python -m finetune.scoring.<module>`. `evaluate_archive.py --mode pipeline --live` tracks
+  each clip with the live tracker (`system/tennis_tracker/live`) and records its selector
+  evidence; `tools/live_lag_sweep.py` replays that evidence at other commit delays on the CPU.
 
 ## Environment and commands
 

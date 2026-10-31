@@ -34,7 +34,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from finetune import REPOSITORY
 from finetune.data.data_policy import clip_source, read_review_status, unscorable_reason
@@ -294,13 +294,16 @@ def run_raw(models: List[str], clips: List[ClipPair], thresholds: List[float], d
 
 def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float], device: str,
                  out_dir: Path, reuse_json: bool = False, court_events: bool = False,
-                 weights: Optional[Dict[str, Path]] = None, window_step: Optional[int] = None) -> None:
+                 weights: Optional[Dict[str, Path]] = None, window_step: Optional[int] = None,
+                 live: Optional[Any] = None, sources: Optional[Dict[str, str]] = None) -> None:
     """Track every clip (``headless.run_headless``) and score the per-frame output; with
     ``court_events`` each clip's tracking JSON also carries its court events, which
     ``score_court_events.py`` reads. `weights` (model name -> file) replaces a model's bundled
     weights, and `window_step` is the prepass's ``Config.gridtracknet_window_step`` (None, the
-    Config default), as both are in ``run_raw``."""
-    from tennis_tracker.headless import run_headless, tracking_payload   # the pipeline: CUDA and TensorRT, only here
+    Config default), as both are in ``run_raw``. `live` (``tennis_tracker.live.pipeline.LiveOptions``)
+    tracks each clip with the live tracker instead, frame by frame on its fixed lag. `sources` (clip ->
+    clips.csv source) adds a pooled line per source."""
+    from tennis_tracker.headless import headless_config, run_headless, tracking_payload   # CUDA and TensorRT, only here
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for name in models:
@@ -313,6 +316,13 @@ def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float
                 print(f"[reuse] {json_path.name} -- NOT re-running the tracker; "
                       f"these numbers are from whenever this file was written")
                 payload = json.loads(json_path.read_text(encoding="utf-8"))
+            elif live is not None:
+                from tennis_tracker.live.pipeline import run_live
+                config = headless_config(video_path, model_path=(weights or {}).get(name) or MODELS[name],
+                                         conf=conf[name], device=device, tracking_json=json_path,
+                                         court_events=court_events, window_step=window_step)
+                result, _ = run_live(config, live)
+                payload = tracking_payload(result)
             else:
                 result = run_headless(video_path, model_path=(weights or {}).get(name) or MODELS[name],
                                       conf=conf[name], device=device,
@@ -332,6 +342,22 @@ def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float
             for key, value in scored.landed.items():
                 pooled_landed[key] = pooled_landed.get(key, 0) + value
         print(fmt("ALL", DetectorMetrics.of_clips(pooled, 1.0)), "| bad outputs landed on:", pooled_landed)
+        source_of = sources or {}
+        for source in sorted({source_of.get(clip, "") for clip, _ in results} - {""}):
+            of_source = [scored.pairs for clip, scored in results if source_of.get(clip) == source]
+            print(fmt(f"source={source}", DetectorMetrics.of_clips(of_source, 1.0)))
+
+
+def _live_options(args: argparse.Namespace) -> Optional[Any]:
+    """The live tracker's options the command line asks for (fast pacing, evidence recorded), or None."""
+    if not args.live:
+        return None
+    from tennis_tracker.live.pipeline import LiveOptions
+    defaults = LiveOptions()
+    return LiveOptions(delay_s=None if args.live_delay == "clip" else float(args.live_delay),
+                       history_s=defaults.history_s if args.live_history is None else args.live_history,
+                       every_s=defaults.every_s if args.live_every is None else args.live_every,
+                       pacing="fast", record_evidence=True, report_every_s=0.0)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -365,6 +391,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "detector on them, pipeline mode the tracker")
     parser.add_argument("--gridtracknet-stride", type=int, default=None,
                         help="Force the frame spacing fed to GridTrackNet (1 = consecutive frames even at 60 FPS)")
+    parser.add_argument("--live", action="store_true",
+                        help="Pipeline mode: track each clip with the live tracker (tennis_tracker/live), frame by "
+                             "frame as fast as it goes, committing on --live-delay; also records each clip's "
+                             "selector evidence for tools/live_lag_sweep.py")
+    parser.add_argument("--live-delay", default="0.5", metavar="SECONDS",
+                        help="The live selector's commit delay in seconds ('clip': the whole clip)")
+    parser.add_argument("--live-history", type=float, default=None, metavar="SECONDS")
+    parser.add_argument("--live-every", type=float, default=None, metavar="SECONDS")
     parser.add_argument("--window-step", type=int, default=None,
                         help="Frames of a phase between the prepass's unit starts, in both modes (default: the "
                              "tracker's Config.gridtracknet_window_step); below 5 a frame's overlapping units are "
@@ -384,11 +418,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_raw(args.models, clips, args.thresholds, args.device, weights, args.gridtracknet_stride, sources,
                 args.cell_histogram, args.window_step)
     else:
+        manifest = read_manifest(archive / MANIFEST_NAME)
         run_pipeline(
             args.models, clips,
             {"gridtracknet": args.gridtracknet_conf},
             args.device, Path(args.out_dir), reuse_json=bool(args.reuse_json), court_events=bool(args.court),
-            weights=weights, window_step=args.window_step,
+            weights=weights, window_step=args.window_step, live=_live_options(args),
+            sources={clip_of(csv_path): clip_source(clip_of(csv_path), manifest) for _, csv_path in clips},
         )
     return 0
 
