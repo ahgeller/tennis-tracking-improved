@@ -87,10 +87,12 @@ def _onnx_bytes(module: Any, probes: Tuple[torch.Tensor, ...], inputs: Sequence[
         # The trace treats the models' shape checks as constants, which they are at a static shape.
         warnings.simplefilter("ignore", torch.jit.TracerWarning)
         # The TorchScript exporter is chosen on purpose (dynamo=False): the cached engines are built
-        # from its graphs. PyTorch 2.9+ marks it deprecated on every call; that notice is known.
-        warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"torch\.onnx")
+        # from its graphs. PyTorch 2.9+ marks it deprecated on every call, and its logging setup
+        # inside the export; those two notices are known.
         warnings.filterwarnings("ignore", message="You are using the legacy TorchScript-based ONNX export",
                                 category=DeprecationWarning)
+        warnings.filterwarnings("ignore", message="The feature will be removed", category=DeprecationWarning,
+                                module=r"torch\.onnx\.")
         torch.onnx.export(module, probes, cast(Any, buffer), input_names=list(inputs), output_names=list(outputs),
                           opset_version=_ONNX_OPSET, dynamo=False)
     return buffer.getvalue()
