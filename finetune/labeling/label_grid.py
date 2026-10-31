@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from finetune.labeling.label_draw import (FILTERS, LANDING, ZOOM_STEP, draw_badge, draw_ticks, draw_tile_mark, enhance,
-                                          fit_text, hit, landing_badge, mark_plan)
+from finetune.labeling.label_draw import (FILTERS, LANDING, ZOOM_STEP, HudItem, draw_badge, draw_ticks, draw_tile_mark,
+                                          enhance, fit_text, hit, hud_text, landing_badge, mark_plan, middle_ellipsis)
 from finetune.labeling.label_timeline import Timeline
 from finetune.labeling.label_view import View
 from finetune.labeling.label_window import KEYS_CONFIRM, KEYS_ZOOM_IN, KEYS_ZOOM_OUT
@@ -157,18 +157,18 @@ class GridView(View):
                         color, max(1, int(ui)))
             cv2.rectangle(canvas, (left, top), (right-1, bottom-1), (255, 180, 50) if index == session.cursor else (65, 65, 65), 2)
             tiles.append((index, (left, y0, right-1, bottom-1), ox, oy, scale))
-        caption =(f"{session.source.clip} | click=center  right click=full frame  SPACE=confirm these {len(tiles)}"
-                   f"{' (orange crosses are hints on offer)' if offers else ''}  a/d=page  TAB=single")
-        thin = max(1, int(ui))
         hud_top = session.view_h + session.timeline_h
         self.timeline.draw(canvas[session.view_h:hud_top], session.view_h)
-        cv2.putText(canvas, fit_text(caption, session.view_w - 12, .48 * ui, thin),
-                    (6, hud_top + int(round(21 * ui))), cv2.FONT_HERSHEY_SIMPLEX, .48 * ui, (255, 255, 255), thin)
-        keys = ("1-9 or ,/. select | y: take hint | x: keep draft | i/j/k/l: 1px (SHIFT 0.25px) | u: undo | "
-                f"v: absent | /: landing | +/- zoom | z: {GRID_SIZES[(GRID_SIZES.index(self.size) + 1) % len(GRID_SIZES)]} tiles"
-                " | q: save/quit")
-        cv2.putText(canvas, fit_text(keys, session.view_w - 12, .42 * ui, thin),
-                    (6, hud_top + int(round(44 * ui))), cv2.FONT_HERSHEY_SIMPLEX, .42 * ui, (200, 200, 200), thin)
+        reviewed = sum(rows[index].reviewed for index, *_ in tiles)
+        line1: List[HudItem] = [(1, middle_ellipsis(session.source.clip)), (0, f"GRID {len(tiles)} frames"),
+                                (2, f"reviewed {reviewed}/{len(tiles)}"),
+                                (3, "orange crosses: hints on offer" if offers else "")]
+        line2: List[HudItem] = [(0, f"SPACE=confirm these {len(tiles)}"), (0, "click=place ball"), (1, "right click=full frame"),
+                                (1, "1-9 or ,/.=select"), (1, "y=take hint"), (2, "x=keep draft"), (1, "v=no ball"),
+                                (2, "ijkl=nudge (SHIFT fine)"), (2, "u=undo"), (2, "/=landing"), (1, "a/d=page"),
+                                (3, "+/-=zoom"), (3, f"z={GRID_SIZES[(GRID_SIZES.index(self.size) + 1) % len(GRID_SIZES)]} tiles"),
+                                (1, "TAB=single frame"), (0, "?=keys")]
+        hud_text(canvas[hud_top:], line1, line2, ui, unsaved=session.dirty)
         self.tiles = tiles
         session.shown_offers = offers
         self.cache_key, self.cache = key, canvas

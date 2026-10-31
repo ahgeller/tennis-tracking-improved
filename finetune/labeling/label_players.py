@@ -36,7 +36,7 @@ import cv2
 import numpy as np
 
 from finetune.data.player_labels import NOT_PLAYER, PLAYERS, Box, PlayerBoxLabel, match_frame
-from finetune.labeling.label_draw import Colour, fit_picture, fit_text
+from finetune.labeling.label_draw import Colour, HudItem, fit_picture, fit_text, middle_ellipsis
 from finetune.labeling.label_store import load_players
 from finetune.labeling.label_view import ClipView
 from finetune.labeling.label_window import KEYS_CONFIRM
@@ -557,20 +557,23 @@ class PlayerView(ClipView):
                 x += width + pad
             cv2.line(canvas, (0, y1 - 1), (session.view_w - 1, y1 - 1), (35, 35, 35), 1)
 
-    def hud_lines(self) -> Tuple[str, str]:
+    def hud_lines(self) -> Tuple[List[HudItem], List[HudItem]]:
         segment = self.segments[self.selected]
         assigned = sum(self.identity(s) is not None for s in self.segments)
         reader = self.reader
         loading = ""
         if reader is not None and not reader.finished:
-            loading = f"  cutting crops {reader.done}/{reader.total}"
+            loading = f"cutting crops {reader.done}/{reader.total}"
         elif reader is not None and reader.error:
-            loading = f"  crops stopped: {reader.error}"
+            loading = f"crops stopped: {reader.error}"
         suggestion = self.suggestion(self.selected)
-        line1 = (f"{self.clip.clip}  PLAYERS  segment {self.selected + 1}/{len(self.segments)}  track {segment.track}  "
-                 f"frames {segment.first}-{segment.last}  {self.identity(segment) or 'unassigned'}  "
-                 f"assigned {assigned}/{len(self.segments)}{loading}{'  *unsaved*' if self.session.dirty else ''}")
-        line2 = (f"1-4=P1-P4  0/v=not a player  SPACE={suggestion or '-'} (suggested)  u=clear  n/p=segment  "
-                 f"f=next unassigned  right click a crop=split there  SHIFT+n=next clip  q=save/quit")
+        line1: List[HudItem] = [(1, middle_ellipsis(self.clip.clip)), (0, "PLAYERS"),
+                                (0, f"segment {self.selected + 1}/{len(self.segments)}"), (2, f"track {segment.track}"),
+                                (3, f"frames {segment.first}-{segment.last}"), (0, self.identity(segment) or "unassigned"),
+                                (2, f"assigned {assigned}/{len(self.segments)}"), (1, loading)]
+        line2: List[HudItem] = [(0, "1-4=P1-P4"), (1, "0/v=not a player"), (0, f"SPACE={suggestion or '-'} (suggested)"),
+                                (1, "u=clear"), (0, "a/d=segment"), (2, "f=next unassigned"),
+                                (2, "right click a crop=split there"), (2, "SHIFT+n=next clip"), (1, "TAB=frames"),
+                                (0, "?=keys")]
         return line1, line2
 

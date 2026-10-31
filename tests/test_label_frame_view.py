@@ -3,6 +3,8 @@ what the text lines say, what a render records for the mouse, and what a click o
 inset does. Frames are blank arrays."""
 import numpy as np
 
+from finetune.labeling.label_draw import SEPARATOR, UNSAVED_COLOUR, fit_items, middle_ellipsis, text_width
+
 from finetune.labeling.label_frame_view import INSET_SHARE, THUMBNAILS_KEPT
 from _workspace_helpers import fake_source, fake_tool
 
@@ -47,13 +49,50 @@ def test_hud_lines_and_counts_follow_the_rows():
     tool.session.rows[0].reviewed = True
     tool.session.rows[1].suspect = True
     line1, line2 = view.hud_lines(tool.session.rows[0], None, None)
-    assert line1.startswith("a [1/6]  frame 0  (100.0, 80.0)  from csv 0.80  ok  landings 0  zoom x1.0")
-    assert line2.startswith("reviewed 1/6  uncertain left 1  flagged left 1   SPACE=good  y=take hint")   # a suspect row is uncertain
+    assert line1 == "a [1/6]  frame 0  (100.0, 80.0)  ok  landings 0  zoom x1.0"     # reviewed: where it came from is moot
+    assert line2.startswith("SPACE=good  y=take hint  v=no ball")
+    assert "reviewed 1/6  uncertain left 1  flagged left 1" in line2                  # a suspect row is uncertain
+    assert "frame 2  (110.0, 84.0)  from csv conf ?  unreviewed" in view.hud_lines(tool.session.rows[2], None, None)[0]
+    tool.session.rows[2].source, tool.session.rows[2].conf = "det", 0.83
+    assert "from det 0.83  unreviewed" in view.hud_lines(tool.session.rows[2], None, None)[0]
     tool.session.source.landings[0] = None
     assert "  ok  LANDING  landings 1  zoom x1.0" in view.hud_lines(tool.session.rows[0], None, None)[0]
-    tool.session.touch("ball")
-    assert "*unsaved*" in view.hud_lines(tool.session.rows[0], None, None)[0]
     assert "SPACE=take hint  x=keep draft" in view.hud_lines(tool.session.rows[0], None, {"x": 1.0, "y": 1.0, "trusted": True})[1]
+
+
+def test_a_hud_line_drops_whole_items_least_important_first():
+    items = [(1, "video6 [86/478]"), (0, "frame 170"), (5, "landings 3"), (6, "zoom x2.0"), (2, "EDITED")]
+    full = SEPARATOR.join(text for _, text in items)
+    width = text_width(full, 0.55, 1)
+    assert fit_items(items, width, 0.55, 1) == full
+    assert fit_items(items, width - 1, 0.55, 1) == "video6 [86/478]  frame 170  landings 3  EDITED"
+    assert fit_items(items, text_width("video6 [86/478]  frame 170", 0.55, 1), 0.55, 1) == "video6 [86/478]  frame 170"
+    assert fit_items(items, text_width("frame 1", 0.55, 1), 0.55, 1) == "frame"                 # the last one is cut
+    assert middle_ellipsis("a" * 10 + "b" * 30 + "c" * 10, 20) == "a" * 9 + "..." + "c" * 8
+    assert middle_ellipsis("video6") == "video6"
+
+
+def test_unsaved_has_a_slot_of_its_own_so_line_one_does_not_move():
+    tool = tool_over()
+    tool.fit_view(1280, 720)
+    session = tool.session
+    hud_top = session.view_h + session.timeline_h
+    before = tool.render()[hud_top:hud_top + int(30 * session.ui)].copy()
+    session.touch("ball")
+    after = tool.render()[hud_top:hud_top + int(30 * session.ui)]
+    changed = np.argwhere((before != after).any(axis=2))
+    assert len(changed) and changed[:, 1].min() > session.view_w * 0.85               # only the slot at the right end
+    assert (after[changed[:, 0], changed[:, 1]] == UNSAVED_COLOUR).all(axis=1).any()
+
+
+def test_the_chips_sit_on_line_two_so_line_one_has_the_whole_width():
+    tool = tool_over()
+    tool.fit_view(1280, 720)
+    tool.render()
+    session, view = tool.session, tool.frame_view
+    line1_bottom = session.view_h + session.timeline_h + int(28 * session.ui)
+    assert all(box[1] >= line1_bottom for box, _ in view.step_buttons)
+    assert view.centre_button[1] >= line1_bottom
 
 
 def test_render_records_the_chips_and_the_inset_for_the_mouse():

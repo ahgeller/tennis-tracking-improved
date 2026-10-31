@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import cv2
 import numpy as np
 
-from finetune.labeling.label_draw import fit_text, hud_text
+from finetune.labeling.label_draw import HudLine, fit_text, hud_text
 from finetune.labeling.label_timeline import Timeline
 from finetune.labeling.label_window import KEY_SAVE, KEY_TAB, next_clip_key
 
@@ -107,7 +107,7 @@ class ClipView(View):
         """The picture part of the window (above the timeline)."""
         raise NotImplementedError
 
-    def hud_lines(self) -> Tuple[str, str]:
+    def hud_lines(self) -> Tuple[HudLine, HudLine]:
         raise NotImplementedError
 
     def view_key(self, code: int, direction: int) -> None:
@@ -152,10 +152,11 @@ class ClipView(View):
             text = self.message or f"nothing to label in {self.source.clip if self.source else 'this clip'}"
             cv2.putText(canvas, fit_text(text, session.view_w - int(40 * ui), 0.6 * ui, 1), (int(20 * ui), int(40 * ui)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui, (255, 255, 255), 1, cv2.LINE_AA)
-            hud_text(hud, self.title, "SHIFT+n=next clip  TAB=frames  q=save/quit", ui)
+            hud_text(hud, self.title, [(0, "SHIFT+n=next clip"), (0, "TAB=frames"), (1, "q=save/quit")], ui,
+                     unsaved=session.dirty)
         else:
             self.draw(canvas[:session.view_h])
             self.timeline.draw(canvas[session.view_h:session.view_h + session.timeline_h], session.view_h)
-            hud_text(hud, *self.hud_lines(), session.ui)
+            hud_text(hud, *self.hud_lines(), session.ui, unsaved=session.dirty)
         self.cache_key, self.cache = key, canvas
         return canvas

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from finetune.labeling.label_draw import HINT_TRUSTED, HINT_UNSURE, hud_text
+from finetune.labeling.label_draw import HINT_TRUSTED, HINT_UNSURE, HudItem, hud_text, middle_ellipsis
 from finetune.labeling.label_store import Row
 from finetune.labeling.label_timeline import Timeline
 from finetune.labeling.label_view import View
@@ -106,12 +106,14 @@ class SheetView(View):
         self.points = self.trace(display, indices, to_sheet)
         differs = self.draw_points(display, selected)
         shown = [rows[i] for i in indices]
-        line1 = (f"{rows[indices[0]].clip}  TRAJECTORY  frames {shown[0].frame}-{shown[-1].frame}  "
-                 f"{sum(r.visible for r in shown)} with a ball  reviewed {sum(r.reviewed for r in shown)}/{len(shown)}"
-                 + (f"  hint differs {differs} (red)" if differs else ""))
-        line2 = "click a point: open that frame   a/d: stretch before/after   w or right click: back   q: save/quit"
+        line1: List[HudItem] = [(1, middle_ellipsis(rows[indices[0]].clip)), (0, "TRAJECTORY"),
+                                (0, f"frames {shown[0].frame}-{shown[-1].frame}"), (2, f"{sum(r.visible for r in shown)} with a ball"),
+                                (2, f"reviewed {sum(r.reviewed for r in shown)}/{len(shown)}"),
+                                (1, f"hint differs {differs} (red)" if differs else "")]
+        line2: List[HudItem] = [(0, "click a point=open that frame"), (1, "a/d=stretch before/after"),
+                                (0, "w or right click=back"), (2, "TAB=grid"), (0, "?=keys")]
         self.timeline.draw(canvas[session.view_h:session.view_h + session.timeline_h], session.view_h)
-        hud_text(canvas[session.view_h + session.timeline_h:], line1, line2, ui)
+        hud_text(canvas[session.view_h + session.timeline_h:], line1, line2, ui, unsaved=session.dirty)
         self.cache_key, self.cache = key, canvas
         return canvas
 

@@ -1,11 +1,13 @@
 """What every view of the label tool is drawn with: the picture filters, the ball marks and
-their colours, text that is cut to fit, and the zoom step the views share. The single-frame
+their colours, text that is cut to fit, the HUD's two lines (``hud_text``: every view's, built from
+items of which whole ones are dropped, least important first, with *unsaved* in a fixed slot), and
+the zoom step the views share. The single-frame
 view (``label_frame_view``), the grid and the trajectory sheet (``label_grid``, ``label_sheet``) all draw from here;
 only the mapping to their own pixels is each view's own."""
 from __future__ import annotations
 
 import math
-from typing import List, NamedTuple, Optional, Tuple
+from typing import List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
@@ -22,10 +24,20 @@ DRAFT_MARK = (160, 160, 160)     # the draft label's ticks while the suggestion 
 GHOST = (255, 200, 0)            # the dashed guess on a frame with no ball, and its dot in the inset
 LANDING = (255, 190, 80)         # the badge of a frame marked as a landing (/), in the frame view and on its tile
 LANDING_BETWEEN = "LANDING 1/2"  # ... worn by both frames a landing lies between (Hershey fonts have no half sign)
-HIT = (90, 110, 250)             # the badge of a frame marked as a hit (.), and its tick on the timeline
+HIT = (255, 90, 170)             # violet: the badge of a frame marked as a hit (.), its contact cross and its tick;
+                                 # apart from EDITED's orange, the landing's sky blue and the flags' magenta
 RALLY = (170, 190, 40)           # a rally's start and end badges (the [ and ] keys), and its bar on the timeline
 
 Colour = Tuple[int, int, int]
+
+SEPARATOR = "  "                 # between the items of a HUD line, in every view
+UNSAVED = "*unsaved*"
+UNSAVED_COLOUR = (60, 200, 255)
+NAME_LIMIT = 28                  # a clip name longer than this is cut in its middle on the HUD
+LINE1_SCALE, LINE2_SCALE = 0.55, 0.48
+LINE1_Y, LINE2_Y = 22, 46        # the two lines' baselines in the HUD, at ui 1 (the chips sit on line 2's)
+HudItem = Tuple[int, str]        # (how much it matters: 0 most, the largest dropped first; its text)
+HudLine = Union[str, Sequence[HudItem]]
 
 
 def enhance(display: np.ndarray, mode: str, previous: Optional[np.ndarray] = None) -> np.ndarray:
@@ -242,8 +254,9 @@ class ChipRow:
         self.thin = max(1, int(round(ui)))
         self.pad = int(6 * ui)
         (_, glyph_h), _ = cv2.getTextSize("Xy8", cv2.FONT_HERSHEY_SIMPLEX, 0.42 * ui, self.thin)
-        self.top = max(0, (hud_h - glyph_h - self.pad) // 2)
-        self.bottom = min(hud_h - 1, self.top + glyph_h + self.pad)
+        # On line 2's baseline (the chip's text sits where line 2's does), so line 1 runs over them.
+        self.bottom = min(hud_h - 1, int(LINE2_Y * ui) + self.pad // 2)
+        self.top = max(0, self.bottom - glyph_h - self.pad)
 
     def chip(self, right_edge: int, text: str, lit: bool) -> Tuple[int, Tuple[int, int, int, int]]:
         """Draw one chip ending at `right_edge`; (its left edge, its box for a click test)."""
@@ -285,6 +298,32 @@ def fit_text(text: str, width: int, scale: float, thin: int) -> str:
     return text.rstrip()
 
 
+def text_width(text: str, scale: float, thin: int) -> int:
+    return cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thin)[0][0]
+
+
+def middle_ellipsis(text: str, limit: int = NAME_LIMIT) -> str:
+    """`text` with its middle cut to ... when longer than `limit` characters: a clip name keeps its
+    start and its end, where the names of a run's clips differ."""
+    if len(text) <= limit:
+        return text
+    tail = (limit - 3) // 2
+    return text[:limit - 3 - tail] + "..." + text[-tail:]
+
+
+def fit_items(line: HudLine, width: int, scale: float, thin: int) -> str:
+    """A HUD line's items in their order, joined by SEPARATOR, whole items dropped, the least
+    important first (the later one of two alike), until the rest fit `width`; the last one left is
+    cut (fit_text) when even it is too long. A plain string is one item."""
+    items = [(0, line)] if isinstance(line, str) else [item for item in line if item[1]]
+    while items:
+        text = SEPARATOR.join(text for _, text in items)
+        if len(items) == 1 or text_width(text, scale, thin) <= width:
+            return fit_text(text, width, scale, thin)
+        del items[max(range(len(items)), key=lambda k: (items[k][0], k))]
+    return ""
+
+
 def fit_picture(image: np.ndarray, width: int, height: int) -> Tuple[np.ndarray, float, int, int]:
     """`image` scaled to fit inside `width` x `height` with its aspect kept: the scaled picture, the
     scale, and the offsets that centre it in the box."""
@@ -294,12 +333,24 @@ def fit_picture(image: np.ndarray, width: int, height: int) -> Tuple[np.ndarray,
     return resized, shown_w / image.shape[1], (width - shown_w) // 2, (height - shown_h) // 2
 
 
-def hud_text(hud: np.ndarray, line1: str, line2: str, ui: float) -> None:
-    """The two text lines of an overview's HUD (the sheet's, the player and court views'), each cut
-    to the strip's width: the state in white, the keys under it in grey."""
+def hud_text(hud: np.ndarray, line1: HudLine, line2: HudLine, ui: float, unsaved: Optional[bool] = None,
+             line2_right: Optional[int] = None) -> None:
+    """The two text lines of every view's HUD: line 1, the state, in white across the strip; line 2,
+    the keys and counts, in grey up to `line2_right` (the chips' left edge; the strip's end by
+    default). Each is built from its items (fit_items). With `unsaved` given, line 1 keeps a fixed
+    slot at its right end where *unsaved* shows while it is True, so nothing shifts as it comes
+    and goes."""
     thin = max(1, int(round(ui)))
-    width = hud.shape[1] - int(16 * ui)
-    cv2.putText(hud, fit_text(line1, width, 0.55 * ui, thin), (int(8 * ui), int(22 * ui)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55 * ui, (255, 255, 255), thin, cv2.LINE_AA)
-    cv2.putText(hud, fit_text(line2, width, 0.48 * ui, thin), (int(8 * ui), int(46 * ui)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.48 * ui, (180, 180, 180), thin, cv2.LINE_AA)
+    left, right = int(8 * ui), hud.shape[1] - int(8 * ui)
+    room1 = right - left
+    if unsaved is not None:
+        slot = text_width(UNSAVED, LINE1_SCALE * ui, thin)
+        room1 -= slot + int(16 * ui)
+        if unsaved:
+            cv2.putText(hud, UNSAVED, (right - slot, int(LINE1_Y * ui)), cv2.FONT_HERSHEY_SIMPLEX, LINE1_SCALE * ui,
+                        UNSAVED_COLOUR, thin, cv2.LINE_AA)
+    cv2.putText(hud, fit_items(line1, room1, LINE1_SCALE * ui, thin), (left, int(LINE1_Y * ui)),
+                cv2.FONT_HERSHEY_SIMPLEX, LINE1_SCALE * ui, (255, 255, 255), thin, cv2.LINE_AA)
+    room2 = (right if line2_right is None else line2_right - int(8 * ui)) - left
+    cv2.putText(hud, fit_items(line2, room2, LINE2_SCALE * ui, thin), (left, int(LINE2_Y * ui)),
+                cv2.FONT_HERSHEY_SIMPLEX, LINE2_SCALE * ui, (180, 180, 180), thin, cv2.LINE_AA)
