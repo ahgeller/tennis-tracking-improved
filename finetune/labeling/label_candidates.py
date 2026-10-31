@@ -1,8 +1,8 @@
 """The tracker's own events, offered in the label tool as candidates: landings, hits and rally
 starts and ends a pipeline run found (``finetune.scoring.tracker_events``), each waiting for the
 person labelling to confirm it - by marking the event with its key, which writes a label - or to
-reject it (``;``). A candidate is only ever a suggestion: nothing about it reaches a label file
-until it is confirmed, and the scorers never read it.
+reject it (the backslash key). A candidate is only ever a suggestion: nothing about it reaches a
+label file until it is confirmed, and the scorers never read it.
 
 A candidate is *answered* once a label of its kind lies within its kind's reach of it
 (``ANSWER_S``: the scorer's tolerance for landings and hits; for a rally start, which the tracker
@@ -12,8 +12,9 @@ rejected. The rejections are kept in ``labels/<clip>_events.review.json``
 rejection within ``REJECT_REACH`` frames of a candidate covers it, so rerunning the tracker
 (which moves an event by a frame or so) does not bring every rejection back.
 
-``'`` walks the candidates nobody has answered yet (``LabelSession.next_candidate``); each label
-row wears the candidates nearest it (``ClipCandidates.on_row``).
+``;`` and ``SHIFT+;`` walk the candidates nobody has answered yet (``Tool.answer_candidate``, from
+``LabelSession.open_events``); each label row wears the candidates nearest it
+(``ClipCandidates.on_row``), and the timeline shows them as hollow ticks.
 """
 from __future__ import annotations
 

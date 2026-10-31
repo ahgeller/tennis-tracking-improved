@@ -82,11 +82,13 @@ you do click.
 | `h` / click the badge | cycle the view filter: OFF, DIM WHITE (court lines, white kit and sky pulled down to a dull blue-grey so a yellow ball stops hiding on them), BALL POP (only tennis-ball yellows keep their colour), MOTION (what moved since the previous label frame lights up magenta). Remembered between sessions in `labels/label_tool.settings.json` |
 | `o` / click the badge | overview inset on / off: while zoomed in, a small copy of the whole frame sits bottom-right with the part on screen boxed and the ball dotted. Click anywhere in it to bring that spot into the zoomed view, the quick way to reach a ball the detector put somewhere else entirely |
 | TAB | toggle the grid: a page of crops around each ball (see *The grid*) |
+| SHIFT+TAB | back to the player or court view, when the frames were reached from one |
 | `w` | the trajectory sheet (see *The trajectory sheet*) |
 | `m` | full screen on / off (the window also maximises normally) |
 | `t` | toggle the trail of the previous labels |
 | `s` | save |
 | `q` / ESC | save and quit |
+| `?` / F1 | the view's keys, listed over the picture; any key closes the list |
 
 ## The grid
 
@@ -179,7 +181,7 @@ the clip's hits. When the contact falls between two frames (the ball still comin
 on one, already going out on the next), press `.` on both: one hit between them, HIT
 1/2 on both, saved as `frame_0412.5`. A hit with no ball label under it (between two
 frames, or on a frame labelled "no ball") waits for a click where the racket met the
-ball, drawn as a small red cross; any other key leaves it without a point and the
+ball, drawn as a small violet cross; any other key leaves it without a point and the
 scorer takes the ball labels either side, as for a landing. Mark serves and every
 stroke of the rally. `,` says who hit it: `near`, `far` or not said, shown on the
 badge as HIT NEAR or HIT FAR. Only `,` says it: a hit is never given the tracker's
@@ -194,8 +196,8 @@ ball is dead (its second bounce, the net, the fence, or the frame it leaves play
 good). A fault is a rally of its own: it ends where the faulted serve is dead, and
 the second serve starts the next one, as the tracker counts them (every serve
 starts a rally). Each start pairs with the next end; the bar says which rally a
-frame is in (`rally 2/5`) and the timeline draws each rally as a bar, dimmer while
-one end is still missing. The scorer leaves a rally missing an end out, and does
+frame is in (`rally 2/5`), counts the clip's rallies by their starts (`rallies 5`),
+and the timeline draws each rally as a bar, dimmer while one end is still missing. The scorer leaves a rally missing an end out, and does
 not count what the tracker found over it against it.
 
 ## Candidates
@@ -229,11 +231,21 @@ within a few seconds for a rally mark, or rejected), across the clips of a run.
 
 ## The timeline
 
-Every view has a strip along the top of its bar: the clip from its first label
-frame at the left to its last at the right, the rallies as bars, landings (blue) and
-hits (red) as ticks, the candidates still open as short dim ticks along its bottom,
-and the frame on screen as a white line. A click on it in the single-frame view goes
-to that frame.
+Every view (the single frame, the grid, the trajectory sheet, the player and court
+views) has a strip along the top of its bar: the clip from its first label frame at
+the left to its last at the right, the rallies as bars, landings (light blue) and
+hits (violet) as solid ticks the strip's full height, the candidates still open as
+hollow ticks in their kind's colour, and the frame on screen as a white caret above
+the strip. A click on it in the single-frame view goes to that frame.
+
+## The bar
+
+The bar under the picture has two lines: what the frame is (clip, frame, label,
+state, counts) and what to press now. When the window is too narrow, the least
+important items are dropped whole, never cut mid-word; a long clip name is shortened
+in its middle. `*unsaved*` at the right of the first line says there are changes not
+yet written. `?` (or F1) lists every key of the view showing over the picture; any
+key closes the list.
 
 ## Player identity (`--players`)
 
@@ -241,8 +253,9 @@ to that frame.
 tracks from the run folder (`--candidates`), cut into *segments*, one track id until
 it drops out for over half a second. Each segment is a row of twelve crops taken
 evenly through it, under the whole frame with every tracked box drawn (the selected
-segment's thick, the others with their track id and identity). Say who it is and the
-next segment comes up:
+segment's thick, the others thin, each with a tag of its track id and identity). Every
+crop is shown whole in a cell of one size; with fewer segments than rows, the whole
+frame takes the room. Say who it is and the next segment comes up:
 
 | key | what it does |
 |---|---|
@@ -250,24 +263,31 @@ next segment comes up:
 | `0` / `v` | the segment is not a player (a spectator, a ball kid, someone on the next court, the umpire) |
 | SPACE / ENTER / `c` | take the suggestion on the bar: the identity whose segments look most like this one, among those not on court at the same time, with a small preference for the same half; the first identity not yet used when nothing looks alike |
 | `u` | take back what was said about this segment |
-| `n` / `p` / arrows, a click on a row | the next / previous segment, or that one |
+| `d` / `a` (or `n` / `p`) / arrows, a click on a row | the next / previous segment, or that one |
 | `f` | the next segment nobody has said anything about |
 | right click on a crop | split the segment there: the track jumped from one person to another |
 | SHIFT+`n` | the next clip of the run |
+| TAB | the single-frame view of the clip; SHIFT+TAB from there (or the grid) comes back |
+| `m` | full screen |
 | `s` | save |
 | `q` / ESC | save and quit |
 
 The crops are cut by reading the clip straight through in the background; the bar
 counts them in. What is said is saved per frame and box to
 `labels/<clip>_players.csv`, so it outlives the run it was made on; reopened, the
-segments are cut again and split wherever the labels change identity.
+segments are cut again and split wherever the labels change identity. A label no box
+of the run overlaps any more (the run was redone and lost that person) is kept as it
+is and written back untouched.
 
 ## The court (`--court`)
 
 `--court` opens the court view: five frames spread over the clip (and any already
 labelled), each with the run's court keypoints drawn on it with the court's lines,
 so only the wrong ones need moving. The loupe in a top corner (the one away from the
-point) shows the selected point enlarged.
+point) shows the selected point enlarged, with a crosshair on the exact pixel it
+names. Points are named one way everywhere: their number and a short name (`3 near
+right`). The keys that throw work away (`x`, `r`, `u`) take SHIFT; pressed alone they
+only say so.
 
 | key | what it does |
 |---|---|
@@ -275,18 +295,22 @@ point) shows the selected point enlarged.
 | click elsewhere | put the selected point there: how the two net posts, which the model does not give, are placed |
 | `,` / `.` | select the previous / next point (0 - 13 the engine's, 14 / 15 the left / right net post tops) |
 | `i` / `j` / `k` / `l` | nudge the selected point a pixel; with SHIFT, a quarter |
-| `v` | the selected point cannot be seen on this frame |
+| `v` | the selected point cannot be seen on this frame: listed under `hidden`, apart from the points `not placed` |
 | SPACE / ENTER / `c` | the frame is right: its points become its label, and the next frame not yet labelled comes up |
-| `y` | copy the nearest labelled frame's points (a still camera's court does not move) |
-| `r` | back to the model's points |
-| `x` | unlabel this frame |
-| `u` | undo the last change on this frame |
-| `n` / `p` / arrows | the next / previous frame, without confirming |
+| `y` | copy the points of the nearest labelled frame before this one, else after it (a still camera's court does not move) |
+| SHIFT+`r` | back to the model's points |
+| SHIFT+`x` | unlabel this frame |
+| SHIFT+`u` | undo the last change on this frame |
+| `d` / `a` (or `n` / `p`) / arrows | the next / previous frame, without confirming |
 | SHIFT+`n` | the next clip of the run |
+| TAB | the single-frame view of the clip; SHIFT+TAB from there (or the grid) comes back |
+| `m` | full screen |
 | `s` | save |
 | `q` / ESC | save and quit |
 
 Only what SPACE confirms is a label; a point outside the picture is never written.
+Leaving a frame (for another, the frames, or the next clip) with changes SPACE has
+not confirmed is held back once with a warning; the same key again leaves them.
 Saved to `labels/<clip>_court.csv`.
 
 ## Scorecards
