@@ -280,3 +280,24 @@ warm-up round, 4 timed rounds, the order reversed each round, no run flagged), m
 | - selector | 0.50 | 0.58 | 0.90 | 1.26 |
 
 End to end 21% faster on pomona and 15% on VolyAvw; pass 1 34% and 26%.
+
+### Review fixes (2026-10-31)
+
+6fcb568 merges the speed round's review fixes from `phase-ABplus-heatmap` (its record,
+`opt_abplus.md`, has them, the memory and the timing): the boxmot cache tests made independent of
+their order, the set-pixel box taken with numpy instead of OpenCV 4.9's `cv2.boundingRect`, the
+pending boosts packed and under a memory budget with their `selector boost cc` row, the ONNX
+export's warning filters scoped by message, the player-side renames, AGENTS.md. The one conflict,
+`test_clean_tracker_cli.py`, keeps this branch's stream_s4 default test with the heatmap branch's
+imports at the top.
+
+Verified at 6fcb568 (the stream_s4 engine is `phases/ABplus`'s build):
+
+- Gate at this branch's defaults (`--court`): 0.953 / 95 (79/16), all 24 clips JSON-equal to the
+  merge's and to the heatmap branch's stream_s4 gate. Changed frames from the boundingRect fix:
+  none.
+- Samples (`--court`): pomona, VolyAvw and PomonaPitzer JSON-equal to the merge's; off court
+  1090 / 0, 2453 / 0, 3142 / 0.
+- Suites: `system/` 694 passed (`tennis-opt`), 683 passed and 11 skipped (`tennis-analysis`); root
+  1420 passed, 11 skipped; mypy clean in both; `pytest tests/test_player_detector.py
+  tests/test_engine_io.py` passes in that order.
