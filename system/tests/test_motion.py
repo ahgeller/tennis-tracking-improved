@@ -11,8 +11,8 @@ from ball_in_play_selector import PackedMask
 from tennis_tracker.config import Config
 from tennis_tracker.frame_window import FrameWindow
 from tennis_tracker.motion import (
-    MASKS_ONLY, BackgroundModel, DetectorInputRequest, MotionMasks, _clean_raw_motion_cuda, _clean_raw_motion_mask,
-    _raw_motion_cuda, filter_boost_mask, preprocess_frame_cuda,
+    MASKS_ONLY, BackgroundModel, BoostMasks, DeferredBoost, DetectorInputRequest, MotionMasks, _clean_raw_motion_cuda,
+    _clean_raw_motion_mask, _raw_motion_cuda, filter_boost_mask, preprocess_frame_cuda,
 )
 from tests._helpers import refine_raw_motion_temporal_cpu
 
@@ -122,6 +122,207 @@ def test_motion_masks_of_the_whole_frame_pack_the_bounding_box():
     empty = MotionMasks((30, 40), [(0, 0, 40, 30)], False, [torch.zeros(30, 40, dtype=torch.bool)], None, cfg, None)
     assert empty.packed_raw() is None and empty.packed_boost() is None and not empty.has_blobs
     assert empty.selector_boost_u8() is None and empty.detector_boost_u8() is None
+
+
+def _scattered_motion(seed, height=180, width=320):
+    """A whole-frame mask with what full-frame motion holds: ball-sized blobs, streaks, single
+    pixels and a noisy patch, spread over the frame, on its edges and corners, some one empty row
+    or column apart (which squeezing must keep apart) and some joined only diagonally."""
+    rng = np.random.default_rng(seed)
+    mask = np.zeros((height, width), np.uint8)
+    for _ in range(25):
+        y, x = int(rng.integers(0, height - 6)), int(rng.integers(0, width - 6))
+        mask[y:y + int(rng.integers(1, 6)), x:x + int(rng.integers(1, 6))] = 1
+    mask[0:3, width - 4:width] = 1                     # corners and edges
+    mask[height - 2:height, 0:9] = 1
+    mask[50:54, 0:2] = 1
+    mask[100:103, 200:204] = 1                         # one empty row apart...
+    mask[104:107, 200:204] = 1
+    mask[100:103, 205:209] = 1                         # ...and one empty column
+    mask[120, 120] = mask[121, 121] = mask[122, 122] = 1   # a diagonal streak, one component
+    mask[60:80, 30:60] = rng.random((20, 30)) < 0.3        # noise: many tiny components
+    return mask
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_whole_frame_masks_squeezed_give_the_masks_of_the_frame_pass(seed):
+    """A whole-frame mask is filtered in its squeezed image and packed from the bounding box its
+    row and column occupancy give, with a stamp per disc: the packed masks, blobs and full arrays
+    are those ``filter_boost_mask`` and ``PackedMask.pack`` give on the frame, bit for bit."""
+    cfg = Config(boost_min_blob_area=1, boost_max_blob_area=600, motion_raw_close_size=0)
+    mask = _scattered_motion(seed)
+    wide = mask.copy()
+    wide[140:146, 280:286] = 1
+    height, width = mask.shape
+    expected_boost = filter_boost_mask(mask, 1, 600, cfg)
+    for wide_masks in (None, [torch.from_numpy(wide > 0)]):
+        masks = MotionMasks((height, width), [(0, 0, width, height)], False, [torch.from_numpy(mask > 0)],
+                            wide_masks, cfg, {})
+        for got, reference in ((masks.packed_raw(), PackedMask.pack(mask)),
+                               (masks.packed_boost(), PackedMask.pack(expected_boost))):
+            assert got.roi == reference.roi and np.array_equal(got.bits, reference.bits)
+        np.testing.assert_array_equal(masks.raw_u8(), mask * 255)
+        np.testing.assert_array_equal(masks.selector_boost_u8(), expected_boost)
+        expected_detector = filter_boost_mask(wide, 1, 600, cfg) if wide_masks else expected_boost
+        np.testing.assert_array_equal(masks.detector_boost_u8(), expected_detector)
+    assert cv2.countNonZero(expected_boost) > 0
+
+
+def _deferral_cases():
+    """MotionMasks arguments: overlapping ROIs whose crops disagree where they overlap (each box is
+    filtered on its own crop), and whole frames with and without a wide mask."""
+    cfg = Config(boost_min_blob_area=1, boost_max_blob_area=600, motion_raw_close_size=0)
+    full = torch.from_numpy(_scattered_motion(0) > 0)
+    boxes = [(10, 10, 90, 70), (60, 40, 150, 120), (190, 90, 260, 150)]
+    crops = [full[y1:y2, x1:x2].clone() for x1, y1, x2, y2 in boxes]
+    crops[1][0:10, 0:10] = False                     # the second box saw less in the overlap
+    height, width = full.shape
+    yield (height, width), boxes, True, crops, None, cfg
+    for seed in range(3):
+        frame = torch.from_numpy(_scattered_motion(seed) > 0)
+        yield (height, width), [(0, 0, width, height)], False, [frame], [frame.flip(1)], cfg
+    dense = torch.zeros(height, width, dtype=torch.bool)   # squeezing would keep the whole box
+    for y in range(20, 60, 4):
+        for x in range(30, 90, 4):
+            dense[y:y + 3, x:x + 3] = True                  # ball-sized blobs one pixel apart
+    yield (height, width), [(0, 0, width, height)], False, [dense], None, cfg
+
+
+@pytest.mark.parametrize("case", range(5))
+def test_a_deferred_boost_resolves_to_the_packed_boost_without_the_download_buffer(case):
+    """``deferred_boost`` packs the raw mask but leaves the component filter to the first reader;
+    what it resolves to is ``packed_boost`` bit for bit, and it keeps no view of the pinned buffer."""
+    args = list(_deferral_cases())[case]
+    perf = {}
+    masks = MotionMasks(*args, perf)
+    raw = masks.packed_raw()
+    deferred = masks.deferred_boost()
+    assert isinstance(deferred, DeferredBoost) and "pre_cuda_cc_filter" not in perf
+    held = [array for array in (deferred.crops or []) + ([deferred.squeezed.image] if deferred.squeezed else [])]
+    assert held and not any(np.shares_memory(array, masks._host.numpy()) for array in held)
+    got = deferred.resolve()
+    assert "pre_cuda_cc_filter" not in perf             # pass 1 has reported its timers by now
+    expected = MotionMasks(*args, None).packed_boost()
+    assert got is not None and got.roi == expected.roi and np.array_equal(got.bits, expected.bits)
+    assert np.array_equal(raw.bits, MotionMasks(*args, None).packed_raw().bits)
+    masks.has_blobs                                   # filtered now: the packed mask itself
+    resolved = masks.deferred_boost()
+    assert isinstance(resolved, PackedMask) and np.array_equal(resolved.bits, expected.bits)
+
+
+def test_motion_masks_with_no_raw_motion_defer_nothing():
+    cfg = Config(boost_min_blob_area=1, boost_max_blob_area=600, motion_raw_close_size=0)
+    empty = torch.zeros(30, 40, dtype=torch.bool)
+    assert MotionMasks((30, 40), [(0, 0, 40, 30)], False, [empty], None, cfg, None).deferred_boost() is None
+    assert MotionMasks((30, 40), [(5, 5, 20, 20)], True, [empty[5:20, 5:20]], None, cfg, None).deferred_boost() is None
+
+
+def test_boost_masks_filter_a_deferred_frame_once_when_it_is_first_read():
+    resolved = []
+
+    class Counting(DeferredBoost):
+        def resolve(self):
+            resolved.append(self.union[0])
+            return PackedMask.pack(np.ones((4, 4), np.uint8))
+
+    def deferred(tag):
+        return Counting((4, 4), (tag, 0, 4, 4), [], None, None, Config())
+
+    stored = PackedMask.pack(np.eye(4, dtype=np.uint8))
+    masks = BoostMasks()
+    for mask in (deferred(0), None, stored, deferred(1)):
+        masks.append(mask)
+    assert len(masks) == 4 and resolved == []
+    assert masks[2] is stored and masks[1] is None and resolved == []
+    first = masks[0]
+    assert masks[0] is first and resolved == [0]                 # kept once filtered
+    assert masks[-1] is not None and resolved == [0, 1]
+    masks[0] = None                                              # as ghost erasure repacks a frame
+    assert masks[0] is None and masks[1:3] == [None, stored] and list(masks)[2] is stored
+    assert resolved == [0, 1]
+
+
+def _discs_one_by_one(mask, min_area, max_area, cfg):
+    """The component filter as it was written before it was vectorised, one component at a time."""
+    import math
+    height, width = mask.shape
+    bypass = max(15, min(150, int(round(0.035 * math.hypot(float(width), float(height))))))
+    if cfg.blob_preserve_tiny:
+        bypass = max(bypass, cfg.blob_tiny_max_area)
+    num, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    discs = []
+    for i in range(1, num):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_area or area > max_area:
+            continue
+        bw, bh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        aspect = max(bw, bh) / max(min(bw, bh), 1)
+        if area <= bypass:
+            if aspect > (4.5 if area < 50 else 3.5):
+                continue
+        elif cfg.blob_shape_filter and aspect > cfg.blob_max_aspect:
+            continue
+        radius = min(int(math.sqrt(area / math.pi) + 0.5), 12)
+        discs.append((int(centroids[i][0] + 0.5), int(centroids[i][1] + 0.5), max(radius, 1)))
+    return sorted(discs)
+
+
+@pytest.mark.parametrize("shape_filter,preserve_tiny", [(True, False), (False, False), (True, True)])
+def test_boost_discs_are_the_ones_the_component_loop_kept(shape_filter, preserve_tiny):
+    """The vectorised filter keeps the components, centres and radii the one-at-a-time loop kept:
+    ball-sized blobs, streaks of every aspect around the limits, and blobs past the size limits."""
+    from tennis_tracker.motion import _boost_discs
+    cfg = Config(blob_shape_filter=shape_filter, blob_preserve_tiny=preserve_tiny, blob_max_aspect=2.5)
+    mask = _scattered_motion(7, 240, 400)
+    for row, (w, h) in enumerate([(1, 5), (2, 9), (3, 11), (4, 10), (6, 21), (9, 4), (14, 4), (30, 12), (40, 40)]):
+        mask[150 + 2 * row:150 + 2 * row + h // 4 + 1, 20 + 40 * row:20 + 40 * row + w] = 1
+        mask[200:200 + h, 5 + 40 * row:5 + 40 * row + w] = 1
+    # Aspects exactly on the limits: a 9 px column with a pixel beside it (a ball-sized 2x9, 4.5)
+    # and a filled 4x10 (2.5, the shape filter's limit here).
+    mask[100:109, 380] = 1
+    mask[104, 381] = 1
+    mask[100:110, 300:304] = 1
+    for min_area, max_area in ((1, 600), (4, 60), (20, 2000)):
+        num, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        got = _boost_discs(stats[1:num], centroids[1:num], 0, 0, mask.shape, min_area, max_area, cfg)
+        assert sorted(map(tuple, got.tolist())) == _discs_one_by_one(mask, min_area, max_area, cfg)
+
+
+def test_boost_disc_stamps_pack_as_discs_drawn_on_the_frame():
+    """Every disc radius the filter draws, at the frame's corners and edges and overlapping:
+    the stamps, packed, are the discs drawn on the whole frame."""
+    from tennis_tracker.motion import _disc_stamps, _pack_stamps
+    height, width = 40, 60
+    for radius in range(1, 13):
+        discs = np.array([[0, 0, radius], [width - 1, height - 1, radius], [width - 1, 0, radius],
+                          [0, height - 1, radius], [30, 20, radius], [31, 21, radius]])
+        frame = np.zeros((height, width), np.uint8)
+        for cx, cy, r in discs:
+            cv2.circle(frame, (int(cx), int(cy)), int(r), 255, -1)
+        got, reference = _pack_stamps(_disc_stamps(discs, (height, width)), (height, width)), PackedMask.pack(frame)
+        assert got.roi == reference.roi and np.array_equal(got.bits, reference.bits), radius
+    assert _disc_stamps(np.empty((0, 3), np.int64), (height, width)) is None
+
+
+def test_squeezing_keeps_components_whole_and_apart():
+    """The squeezed image's components are the frame's: the same areas, widths, heights and, moved
+    back by their offsets, the same rounded centres."""
+    from tennis_tracker.motion import _SqueezedMask
+    mask = _scattered_motion(11)
+    squeezed = _SqueezedMask.of(mask, mask.any(axis=1), mask.any(axis=0))
+    assert squeezed.image.size < mask.size // 4
+
+    def components(image, rows, cols):
+        num, _labels, stats, centroids = cv2.connectedComponentsWithStats(image, connectivity=8)
+        left, top = stats[1:num, cv2.CC_STAT_LEFT], stats[1:num, cv2.CC_STAT_TOP]
+        return sorted(zip(stats[1:num, cv2.CC_STAT_AREA], stats[1:num, cv2.CC_STAT_WIDTH],
+                          stats[1:num, cv2.CC_STAT_HEIGHT], (centroids[1:num, 0] + cols[left] - left + 0.5).astype(int),
+                          (centroids[1:num, 1] + rows[top] - top + 0.5).astype(int)))
+
+    height, width = mask.shape
+    assert (components(squeezed.image, squeezed.rows, squeezed.cols)
+            == components(mask, np.arange(height), np.arange(width)))
+    assert _SqueezedMask.of(np.zeros_like(mask), np.zeros(height, bool), np.zeros(width, bool)) is None
 
 
 def test_motion_masks_share_the_narrow_mask_unless_a_wide_source_differs():

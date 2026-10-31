@@ -387,3 +387,36 @@ def test_player_engine_graph_replay_matches_a_direct_launch():
         got = graphed.forward_tensor(frame)[0]
         graphed.wait(); torch.cuda.synchronize()
         assert torch.equal(got, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA and the shipped player engine")
+def test_player_outputs_reach_the_host_intact_when_the_next_launch_reuses_the_buffers(monkeypatch):
+    """``detect_async_start`` copies the outputs into pinned host memory on the engine's stream;
+    the launch for the next frame, made before this one is finished, does not change them."""
+    from tennis_tracker.engines import player_detector
+    from tennis_tracker.paths import PLAYER_ENGINE
+    if not PLAYER_ENGINE.is_file():
+        pytest.skip("player.engine is not present")
+    pytest.importorskip("boxmot")
+    # The detector caches the boxmot import; the tests that hide boxmot need it uncached.
+    monkeypatch.setattr(player_detector, "_bytetrack", player_detector._bytetrack)
+    detector = player_detector.PlayerDetector(Config(device="0"))
+    if detector.session.stream is None:
+        pytest.skip("the session is synchronous")
+    rng = np.random.default_rng(0)
+    frames = [rng.integers(0, 256, (360, 640, 3), dtype=np.uint8) for _ in range(2)]
+    expected = []
+    for frame in frames:
+        t, _ = detector.session.preprocess_frame(frame)
+        out = detector.session.forward_tensor(t)[0]
+        detector.session.wait(); torch.cuda.synchronize()
+        expected.append(out.cpu())
+    first = detector.detect_async_start(frames[0], 0)
+    second = detector.detect_async_start(frames[1], 1)
+    for pending, want in zip((first, second), expected):
+        out = pending.outputs[0]
+        assert out.device.type == "cpu" and out.is_pinned()
+        pending.done.synchronize()
+        assert torch.equal(out, want)
+    assert isinstance(detector.detect_async_finish(first), list)
+    assert isinstance(detector.detect_async_finish(second), list)
