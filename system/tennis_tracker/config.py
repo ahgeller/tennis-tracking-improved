@@ -89,6 +89,14 @@ class Config:
     # interpolates the boxes between (PlayerDetector). Kept at 1: N=3 cut pass 1 by about
     # 1.2 ms/frame but lost one of 27 labelled landing hits (audit/records/opt_pass1.md).
     player_detect_interval: int = 1
+    # On a clip of this frame rate and above, the interval is at least 2: the player engine and
+    # ByteTrack run on every other frame (17 ms apart, where a player moves little) and the frames
+    # between are interpolated. Nominal 60 FPS clips report 59.5-60.2; 30 and 50 FPS clips stay on
+    # every frame. It saves 1.4-1.7 s of a Pomona run and 3.7 s of VolyAvw's, leaves the ball
+    # gate unchanged, and moves player boxes by a fraction of a pixel, which on stream_s4 let one
+    # extra labelled landing through (audit/records/opt_speed_players.md). 0 turns it off
+    # (`clean_tracker.py --players-every-frame`).
+    player_every_other_frame_fps: float = 55.0
     court_detect_interval: int = 400
     court_conf: float = 0.10
     print_court_raw: bool = False

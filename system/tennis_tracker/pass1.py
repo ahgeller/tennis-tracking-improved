@@ -27,7 +27,7 @@ from .engines.ball_detectors import BallDetectorBackend, FrameInput
 from .engines.player_detector import PlayerPending, interpolate_player_boxes
 from .frame_window import FrameWindow
 from .motion import (
-    BackgroundModel, DetectorInputRequest, MotionMasks, PreprocessResult, build_court_side_protect_mask,
+    BackgroundModel, BoostMasks, DetectorInputRequest, MotionMasks, PreprocessResult, build_court_side_protect_mask,
     preprocess_frame_cuda,
 )
 from .motion_gpu import MotionKernels
@@ -56,7 +56,7 @@ class Pass1Result:
     """Everything pass 1 learned, one entry per decoded frame in source order."""
 
     detections: List[List[RawDetection]] = field(default_factory=list)
-    boost_masks: List[Optional[PackedMask]] = field(default_factory=list)
+    boost_masks: BoostMasks = field(default_factory=BoostMasks)              # filtered when first read
     raw_motions: List[Optional[PackedMask]] = field(default_factory=list)
     rois: List[Optional[List[Box]]] = field(default_factory=list)          # visual ROI boxes
     ghost_rois: List[List[Box]] = field(default_factory=list)              # ROIs of tracks that timed out
@@ -332,7 +332,7 @@ class _Pass1Collector:
         dropped_ghost_rois = self.roi_tracker.update_from_dets(dets, record.frame_index)
         out.detections.append(dets)
         masks = record.masks
-        out.boost_masks.append(masks.packed_boost() if masks is not None else None)
+        out.boost_masks.append(masks.deferred_boost() if masks is not None else None)
         out.raw_motions.append(masks.packed_raw() if masks is not None else None)
         # A track that timed out never had the ball: its coasting ROIs on
         # earlier frames are moved from the visual ROI list to the ghost list,

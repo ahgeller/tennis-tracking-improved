@@ -52,6 +52,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--motion-diagnostics", action="store_true",
                         help="Add per-frame motion diagnostics to the tracking JSON "
                              "(costs ~1.7 ms/frame)")
+    parser.add_argument("--players-every-frame", action="store_true",
+                        help="Run the player detector on every frame of a 60 FPS clip too "
+                             "(by default it runs on every other frame there and interpolates)")
     parser.add_argument("--annotations", help="Validate against this annotation JSON")
     parser.add_argument("--report-json", default=str(OUTPUT / "validation.json"))
     parser.add_argument("--self-test", action="store_true")
@@ -134,6 +137,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         info_timing=bool(args.info),
         motion_diagnostics=bool(args.motion_diagnostics),
         show_all_tracks=bool(args.showtracks),
+        player_every_other_frame_fps=0.0 if args.players_every_frame else Config.player_every_other_frame_fps,
     )
     run(cfg)
     if not args.annotations:
