@@ -1,9 +1,10 @@
 """The clip's timeline: a strip along the top of the HUD, the clip's first label frame at its left
-end and its last at its right, with the rallies drawn as bars, the landings and hits as ticks, the
-tracker's candidates nobody has answered yet as short dim ticks along the bottom and the frame on
-screen as a white line. A click on it goes to the frame under the pointer (``FrameView.click_hud``).
-Every view draws it the same way (the single frame, the grid, the sheet); only the single frame
-takes clicks on it.
+end and its last at its right, with the rallies drawn as bars, the landings and hits as solid ticks
+the strip's full height, the tracker's candidates nobody has answered yet as hollow ticks 3 pixels
+wide in their kind's colour, and the frame on screen as a white caret above the strip (and a thin
+line through it). A click on it goes to the frame under the pointer (``FrameView.click_hud``).
+Every view draws it the same way (the single frame, the grid, the sheet, the player and court
+views); only the single frame takes clicks on it.
 """
 from __future__ import annotations
 
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
 
 BASE = (48, 48, 48)               # the strip where nothing is marked
 RALLY_OPEN = (110, 120, 60)       # a rally with only its start or only its end marked, dimmer than RALLY
-CANDIDATE_DIM = 0.55              # an open candidate's tick, at this share of its kind's colour
 KIND_COLOURS = {"landing": LANDING, "hit": HIT, "rally_start": RALLY, "rally_end": RALLY}
 
 
@@ -42,8 +42,9 @@ class Timeline:
         height, width = strip.shape[:2]
         strip[:] = 0
         pad = max(1, int(round(2 * session.ui)))
+        caret = max(3, int(round(6 * session.ui)))             # the caret's band above the strip
         left, right = pad, max(pad + 1, width - pad)
-        top, bottom = pad, max(pad + 1, height - pad)
+        top, bottom = caret, max(caret + 1, height - pad)
         first, last = source.rows[0].frame, source.rows[-1].frame
         self.span = (first, max(first + 1, last))
         self.box = (left, y0 + top, right - 1, y0 + bottom - 1)
@@ -55,24 +56,21 @@ class Timeline:
             cv2.rectangle(strip, (to_x(marked[0]), top), (max(to_x(marked[0]) + 1, to_x(marked[-1])), bottom - 1),
                           colour, -1)
         tick = max(1, int(round(session.ui)))
+        hollow = max(3, int(round(3 * session.ui)))
+        for x, colour in self.open_candidates(source):
+            cv2.rectangle(strip, (x - hollow // 2, top), (x - hollow // 2 + hollow - 1, bottom - 1), colour, tick)
         for frames, colour in ((source.landings, LANDING), (source.hits, HIT)):
             for frame in frames:
                 x = to_x(frame)
                 cv2.rectangle(strip, (x - tick // 2, top), (x - tick // 2 + tick - 1, bottom - 1), colour, -1)
-        for x, colour in self.open_candidates(source):
-            low = top + (bottom - top) * 2 // 3
-            cv2.rectangle(strip, (x - tick // 2, low), (x - tick // 2 + tick - 1, bottom - 1), colour, -1)
         x = to_x(session.rows[index].frame)
-        cv2.rectangle(strip, (x - tick, 0), (x + tick, height - 1), (255, 255, 255), -1)
+        cv2.line(strip, (x, top), (x, bottom - 1), (255, 255, 255), 1)
+        half = max(2, caret - 1)
+        cv2.fillPoly(strip, [np.array([(x - half, 0), (x + half, 0), (x, caret - 1)], np.int32)], (255, 255, 255))
 
     def open_candidates(self, source: "Source") -> List[Tuple[int, Colour]]:
         """(strip x, colour) of each candidate of the clip nobody has answered yet."""
-        out = []
-        for event, _ in self.session.open_events(source):
-            colour = KIND_COLOURS[event.kind]
-            out.append((self.to_x(event.frame), (int(colour[0] * CANDIDATE_DIM), int(colour[1] * CANDIDATE_DIM),
-                                                 int(colour[2] * CANDIDATE_DIM))))
-        return out
+        return [(self.to_x(event.frame), KIND_COLOURS[event.kind]) for event, _ in self.session.open_events(source)]
 
     def to_x(self, frame: float) -> int:
         """The strip x of source frame `frame` (box-relative to the strip, not to the display)."""

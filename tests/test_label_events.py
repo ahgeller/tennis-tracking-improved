@@ -315,6 +315,32 @@ def test_the_timeline_maps_frames_to_its_strip_and_a_click_on_it_goes_there():
     assert session.rows[session.cursor].frame == 60
 
 
+
+def test_the_timeline_is_tall_enough_to_read_with_solid_labels_hollow_candidates_and_a_caret():
+    """At ui 1 the strip is at least 18 px; a label is a solid tick the strip's full height, an open
+    candidate a hollow tick 3 px wide in its kind's own colour, and the frame on screen a caret
+    above the strip, where nothing else is drawn."""
+    from finetune.labeling.label_draw import HIT, LANDING
+    from finetune.labeling.label_session import TIMELINE
+    assert TIMELINE >= 18
+    tool = fake_tool(clip(count=50, step=2, candidates=[Candidate("landing", 40, "model")]))
+    session = tool.session
+    session.fit(1280, 720)
+    session.source.hits[80] = HitMark()
+    session.cursor = 5
+    canvas = tool.render()
+    timeline = tool.frame_view.timeline
+    left, top, right, bottom = timeline.box
+    strip = canvas[top:bottom + 1]
+    hit_x = timeline.to_x(80)
+    assert (strip[:, hit_x] == HIT).all(axis=1).all()                           # solid, full height
+    land_x = timeline.to_x(40)
+    columns = [(strip[:, x] == LANDING).all(axis=1) for x in range(land_x - 1, land_x + 2)]
+    assert columns[0].all() and columns[2].all() and not columns[1][1:-1].any()   # hollow, 3 wide, full colour
+    caret = canvas[session.view_h:top, timeline.to_x(session.rows[5].frame)]
+    assert (caret == (255, 255, 255)).all(axis=1).any()                          # the caret, above the strip
+
+
 def test_marks_redraw_the_frame_view():
     tool = fake_tool(clip())
     session = tool.session

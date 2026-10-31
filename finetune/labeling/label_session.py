@@ -22,7 +22,7 @@ from finetune.labeling.label_store import Row
 from finetune.refiner.refine import Point, Suggestion
 
 HUD = 58                  # the HUD's two text lines and chips, at ui 1 ...
-TIMELINE = 12             # ... and the clip's timeline above them (label_timeline)
+TIMELINE = 20             # ... and the clip's timeline above them (label_timeline): its caret and strip
 VIEW_EPS = 1e-6           # view pixels: rounding noise to_view never floors across
 MAX_UPSCALE = 2.0         # cap on drawing the frame bigger than it is: past this it only costs time
 UI_REFERENCE = 1280.0     # view width the HUD text sizes were chosen for; bigger views scale up
