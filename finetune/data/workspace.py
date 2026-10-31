@@ -51,6 +51,11 @@ REVIEW_SUFFIX = "_ball.review.json"
 SUSPECT_SUFFIX = "_ball.suspect.json"
 UNSAVED_SUFFIX = "_ball.unsaved.csv"      # the label tool's rescue copy when the label file cannot be written
 BOUNCE_SUFFIX = "_bounces.csv"            # the frames where the ball landed (``finetune.data.bounce_labels``)
+HITS_SUFFIX = "_hits.csv"                 # the frames a racket hit the ball (``finetune.data.event_labels``)
+RALLIES_SUFFIX = "_rallies.csv"           # where each rally starts and ends (``finetune.data.event_labels``)
+PLAYERS_SUFFIX = "_players.csv"           # who each tracked person is (``finetune.data.player_labels``)
+COURT_SUFFIX = "_court.csv"               # the court keypoints on a few frames (``finetune.data.court_labels``)
+EVENTS_REVIEW_SUFFIX = "_events.review.json"   # the tracker's event candidates the label tool was told were wrong
 
 MANIFEST_COLUMNS = ("clip", "source", "section", "group", "width", "height", "fps", "stride",
                     "label_frames", "visible", "camera", "motion_px", "origin", "note")
@@ -124,6 +129,48 @@ def current() -> Workspace:
     return Workspace(Path(override).resolve() if override else DEFAULT_WORKSPACE)
 
 
+def main_checkout(repository: Optional[Path] = None) -> Optional[Path]:
+    """The main working tree of the git repository `repository` (by default this code's) belongs to:
+    `repository` itself in the main checkout, the checkout the shared git directory sits in for a
+    linked worktree (``git worktree add``), None outside git. Read from the ``.git`` entry, without
+    running git: a linked worktree's ``.git`` is a file naming ``<main>/.git/worktrees/<name>``."""
+    repository = DEFAULT_WORKSPACE.parent if repository is None else repository
+    entry = repository / ".git"
+    if entry.is_dir():
+        return repository
+    if not entry.is_file():
+        return None
+    try:
+        line = entry.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not line.startswith("gitdir:"):
+        return None
+    gitdir = Path(line.split(":", 1)[1].strip())
+    if not gitdir.is_absolute():
+        gitdir = (repository / gitdir).resolve()
+    if gitdir.parent.name != "worktrees" or gitdir.parent.parent.name != ".git":
+        return None
+    return gitdir.parent.parent.parent
+
+
+def label_home() -> Path:
+    """The labels folder a person's labelling session reads and writes: the label tool's default,
+    and the new label types' scorers'. Within a git worktree of this repository (``phases/<name>``,
+    made with ``git worktree add``), the main checkout's ``finetune/labels``: a worktree only holds a
+    copy of the labels (``tools/link_worktree_data.py``), and an edit made in a copy would never reach
+    the labels everything else reads. In the main checkout, or with the workspace relocated
+    (``TENNIS_WORKSPACE``, or a test replacing ``current``), the workspace's own ``labels/``."""
+    layout = current()
+    if layout.root != DEFAULT_WORKSPACE:
+        return layout.labels
+    main = main_checkout()
+    if main is None or main.resolve() == DEFAULT_WORKSPACE.parent.resolve():
+        return layout.labels
+    shared = main / DEFAULT_WORKSPACE.name / "labels"
+    return shared if shared.is_dir() else layout.labels
+
+
 class VideoMeta(NamedTuple):
     fps: float
     width: int
@@ -191,6 +238,26 @@ def unsaved_csv(clip: str, labels: Optional[Path] = None) -> Path:
 
 def bounce_csv(clip: str, labels: Optional[Path] = None) -> Path:
     return _labels_dir(labels) / f"{clip}{BOUNCE_SUFFIX}"
+
+
+def hits_csv(clip: str, labels: Optional[Path] = None) -> Path:
+    return _labels_dir(labels) / f"{clip}{HITS_SUFFIX}"
+
+
+def rallies_csv(clip: str, labels: Optional[Path] = None) -> Path:
+    return _labels_dir(labels) / f"{clip}{RALLIES_SUFFIX}"
+
+
+def players_csv(clip: str, labels: Optional[Path] = None) -> Path:
+    return _labels_dir(labels) / f"{clip}{PLAYERS_SUFFIX}"
+
+
+def court_csv(clip: str, labels: Optional[Path] = None) -> Path:
+    return _labels_dir(labels) / f"{clip}{COURT_SUFFIX}"
+
+
+def events_review_json(clip: str, labels: Optional[Path] = None) -> Path:
+    return _labels_dir(labels) / f"{clip}{EVENTS_REVIEW_SUFFIX}"
 
 
 def _files_ending(suffix: str, labels: Optional[Path]) -> List[Path]:

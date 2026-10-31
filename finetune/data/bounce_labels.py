@@ -76,7 +76,10 @@ def between_frames(first: int, second: int) -> float:
     return int(midpoint) if midpoint.is_integer() else midpoint
 
 
-def _point_cells(record: Mapping[str, str], path: Path) -> LabelPoint:
+def point_cells(record: Mapping[str, str], path: Path) -> LabelPoint:
+    """A row's ``ball_x``, ``ball_y`` cells as a point, None when both are blank; one without the
+    other, or one that does not parse, is a LabelFormatError naming `path` (the hit labels'
+    reader shares this)."""
     x_cell, y_cell = (record.get("ball_x") or "").strip(), (record.get("ball_y") or "").strip()
     if not x_cell and not y_cell:
         return None
@@ -104,7 +107,7 @@ def read_bounce_labels(path: Path) -> List[BounceLabel]:
                 frame = landing_frame(record.get("frame") or "")
             except LabelFormatError as error:
                 raise LabelFormatError(f"{path}: {error}") from error
-            labels.append(BounceLabel(frame, _point_cells(record, path)))
+            labels.append(BounceLabel(frame, point_cells(record, path)))
     seen = set()
     for label in labels:
         if label.frame in seen:
@@ -129,7 +132,7 @@ def write_bounce_labels(path: Path, labels: Iterable[BounceLabel]) -> int:
     return len(ordered)
 
 
-def _point_from_ball_labels(frame: float, ball_labels: Mapping[int, LabelPoint]) -> LabelPoint:
+def point_from_ball_labels(frame: float, ball_labels: Mapping[int, LabelPoint]) -> LabelPoint:
     """Where the ball labels put a landing that has no point of its own (see ``resolve_points``):
     the label on its frame, else the midpoint of the labels on the frames either side of it (the
     two a half frame lies between), or the one of them there is."""
@@ -154,5 +157,5 @@ def resolve_points(labels: Iterable[BounceLabel], ball_labels: Mapping[int, Labe
     frame after it (the ball hidden there, or the clip labelled on the other 60 FPS phase), or the
     one of them there is; a landing between two frames takes the same midpoint of the two. A landing
     with no visible ball label on any of those frames keeps ``None``; its timing is still scored."""
-    return [BounceLabel(label.frame, _point_from_ball_labels(label.frame, ball_labels) if label.point is None else label.point)
+    return [BounceLabel(label.frame, point_from_ball_labels(label.frame, ball_labels) if label.point is None else label.point)
             for label in labels]

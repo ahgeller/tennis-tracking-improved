@@ -154,3 +154,36 @@ def test_the_layout_is_one_object_and_nothing_else_holds_a_workspace_path(tmp_pa
     monkeypatch.delenv(workspace.WORKSPACE_VARIABLE)
     assert workspace.current().root == REPOSITORY / "finetune"
 
+
+
+# --------------------------------------------------------------------------- where labelling lands
+
+def test_main_checkout_reads_a_linked_worktrees_git_file(tmp_path):
+    main = tmp_path / "repo"
+    (main / ".git" / "worktrees" / "labels").mkdir(parents=True)
+    tree = main / "phases" / "labels"
+    tree.mkdir(parents=True)
+    (tree / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'labels'}\n", encoding="utf-8")
+    assert workspace.main_checkout(tree) == main
+    assert workspace.main_checkout(main) == main                   # the main checkout is its own
+    assert workspace.main_checkout(tmp_path / "elsewhere") is None  # not in git at all
+    (tree / ".git").write_text("gitdir: /somewhere/modules/sub\n", encoding="utf-8")
+    assert workspace.main_checkout(tree) is None                   # a submodule, not a worktree
+
+
+def test_the_label_home_of_a_relocated_workspace_is_its_own_labels(workspace_dir):
+    assert workspace.label_home() == workspace_dir / "labels"
+
+
+def test_the_label_home_from_a_worktree_is_the_main_checkouts_labels(tmp_path, monkeypatch):
+    main = tmp_path / "repo"
+    (main / ".git" / "worktrees" / "labels").mkdir(parents=True)
+    (main / "finetune" / "labels").mkdir(parents=True)
+    tree = main / "phases" / "labels"
+    (tree / "finetune" / "labels").mkdir(parents=True)
+    (tree / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'labels'}\n", encoding="utf-8")
+    monkeypatch.setattr(workspace, "DEFAULT_WORKSPACE", tree / "finetune")
+    monkeypatch.setattr(workspace, "current", lambda: workspace.Workspace(tree / "finetune"))
+    assert workspace.label_home() == main / "finetune" / "labels"
+    (main / "finetune" / "labels").rmdir()                         # no labels there: the worktree's own
+    assert workspace.label_home() == tree / "finetune" / "labels"
