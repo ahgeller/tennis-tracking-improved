@@ -250,12 +250,17 @@ def test_a_backslash_never_leaves_a_between_candidate_waiting_for_a_habitual_cli
     assert "CLICK WHERE" not in ask and ";=answer it here" in ask
     press_key(tool, ";")                                                 # asked: now a click answers it, here
     assert session.cursor == here and session.awaiting_candidate is not None
-    picture = tool.render()[:session.view_h]
-    banner = picture[:int(30 * session.ui)]
-    assert (banner == HIT).all(axis=2).mean() > 0.3                      # and the picture says so, unmissably
+    edges = band_edges(tool.render()[:session.view_h], int(30 * session.ui))
+    assert (edges == HIT).all()                    # and the picture says so, unmissably: a band edge to edge
     press_key(tool, "k")                                                 # any other key: not answered
     assert session.awaiting_candidate is None
-    assert (tool.render()[:session.view_h][:int(30 * session.ui)] == HIT).all(axis=2).mean() < 0.05   # the badge alone
+    assert not (band_edges(tool.render()[:session.view_h], int(30 * session.ui)) == HIT).all()   # the band is gone
+
+
+def band_edges(picture, height):
+    """The top `height` rows' first and last two columns: a band across the picture covers them all,
+    whatever its text and the frame's own badges do in between."""
+    return np.concatenate([picture[:height, :2], picture[:height, -2:]], axis=1)
 
 
 def test_the_slash_on_a_frame_wearing_a_between_candidate_is_the_plain_landing_key():
