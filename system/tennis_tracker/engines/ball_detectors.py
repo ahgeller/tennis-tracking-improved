@@ -165,6 +165,9 @@ class BallDetectorBackend:
     def prepare_video(self, video_path: Path, fps: float, width: int, height: int, total: int) -> None:
         """Hook for whole-clip backends; ``total`` is the container's frame count hint."""
 
+    def finish_prepass(self) -> None:
+        """Pass 1 has every detection: let a prepass process start exiting (``close`` waits)."""
+
     def close(self) -> None:
         """Release what the backend holds beyond this process's memory (a prepass process)."""
 
@@ -462,8 +465,13 @@ class GridTrackNetBallDetector(BallDetectorBackend):
 
         remote.run(video_path, fps, width, height, total, on_rows, on_end)
 
+    def finish_prepass(self) -> None:
+        """Tell the prepass process, if the prepass runs in one, to exit."""
+        if self._remote is not None:
+            self._remote.stop()
+
     def close(self) -> None:
-        """Stop the prepass process, if the prepass runs in one."""
+        """Stop the prepass process, if the prepass runs in one, and wait for it."""
         if self._remote is not None:
             self._remote.close()
             self._remote = None

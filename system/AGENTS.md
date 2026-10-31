@@ -64,8 +64,9 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   and OpenCV decoding with OpenCV's pixels); `ball_trt.py` builds and caches the ball model's TensorRT engine
   (`Config.ball_prepass_runtime`), or a streaming network's encoder and decoder engines;
   `ball_prepass_process.py` runs the prepass in a child process (`RemotePrepass`: started
-  with the detector, so it builds its engines while the parent builds its own; stopped by `close`, which the pipeline calls whatever ends the run, and
-  it exits with its parent). `Config.ball_prepass_mode` places the prepass: `auto` (the default)
+  with the detector, so it builds its engines while the parent builds its own; told to exit by
+  `finish_prepass` once pass 1 is done, waited for by `close`, which the pipeline calls whatever
+  ends the run, and it exits with its parent). `Config.ball_prepass_mode` places the prepass: `auto` (the default)
   runs a streaming network's (stream_s4's) in the child beside init and pass 1 and any other
   before pass 1 (`audit/records/opt_abplus_s4.md` and `opt_ball_prepass.md` on the
   `optimization` branch have why).

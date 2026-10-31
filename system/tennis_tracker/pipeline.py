@@ -330,10 +330,11 @@ def run(cfg: Config) -> RunResult:
     ctx = _open_inputs(cfg)
     try:
         pass1 = collect_pass1(ctx)
+        ctx.detector.finish_prepass()       # a prepass process exits while the selector runs
+        erase_ghost_rois(pass1)
+        selection = _select(ctx, pass1)
+        events = _court_events(ctx, pass1, selection)
+        rendered = render_pass2(ctx, pass1, selection, events)
+        return _finish(ctx, pass1, selection, events, rendered)
     finally:
-        ctx.detector.close()        # pass 1 has every detection: a prepass process is done
-    erase_ghost_rois(pass1)
-    selection = _select(ctx, pass1)
-    events = _court_events(ctx, pass1, selection)
-    rendered = render_pass2(ctx, pass1, selection, events)
-    return _finish(ctx, pass1, selection, events, rendered)
+        ctx.detector.close()

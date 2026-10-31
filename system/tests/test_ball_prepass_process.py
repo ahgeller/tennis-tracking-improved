@@ -1,5 +1,5 @@
 """The prepass process: where ``Config.ball_prepass_mode`` puts the prepass, and a real child's
-lifecycle (its errors reach the parent, ``close`` stops it, and it never outlives the parent).
+lifecycle (its errors reach the parent, ``stop`` and ``close`` end it, and it never outlives the parent).
 
 The lifecycle tests start real child processes, which import torch: a few seconds each. The
 child fails to build its detector on purpose (weights that do not exist), so no GPU is needed;
@@ -106,11 +106,14 @@ def test_a_child_that_cannot_build_its_detector_reports_why_and_stops_when_close
     remote.run(tmp_path / "clip.mp4", 30.0, 64, 48, 10, second.on_rows, second.on_end)
     assert second.ended.wait(CHILD_EXIT_S) and "missing.pt" in str(second.error)
     pid = remote.pid
-    remote.close()
-    assert _gone(pid) and remote._child.returncode == 0          # told to stop, it exited by itself
-    remote.close()                                               # a second close does nothing
-    with pytest.raises(RuntimeError, match="closed"):
+    remote.stop()                                                # returns at once; the child exits by itself
+    remote.stop()
+    with pytest.raises(RuntimeError, match="stopped"):
         remote.run(tmp_path / "clip.mp4", 30.0, 64, 48, 10, ends.on_rows, ends.on_end)
+    assert _gone(pid) and remote._child.wait(CHILD_EXIT_S) == 0
+    remote.close()
+    remote.close()                                               # a second close does nothing
+    assert not remote._acceptor.is_alive()
 
 
 def test_a_child_that_dies_before_it_connects_fails_the_run(tmp_path, monkeypatch):

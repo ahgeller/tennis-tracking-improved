@@ -198,6 +198,7 @@ class FakeGridTrackNet:
         self.cfg = cfg
         self.prepass_mode = "foreground" if cfg.ball_prepass_mode == "auto" else cfg.ball_prepass_mode
         self.closed = False
+        self.finished = False
         self.prepared: Optional[Dict[str, Any]] = None
         self.precomputed: Optional[List[List[Tuple[List[float], float]]]] = None
         self.inputs_seen: List[Tuple[int, Any]] = []
@@ -226,6 +227,9 @@ class FakeGridTrackNet:
 
     def detect_async_finish(self, pending: _Pending) -> List[Tuple[List[float], float]]:
         return pending.detections
+
+    def finish_prepass(self) -> None:
+        self.finished = True
 
     def close(self) -> None:
         self.closed = True
@@ -740,6 +744,23 @@ def test_a_foreground_or_process_prepass_starts_before_the_engines_and_a_threade
     pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode=mode))
     assert events == (["court", "players", "prepass"] if mode == "thread" else ["prepass", "court", "players"])
     assert FakeGridTrackNet.instances[0].closed
+
+
+def test_the_prepass_is_finished_after_pass_1_and_the_detector_closed_after_the_outputs(
+        tmp_path, monkeypatch, fake_cuda, clip):
+    """A prepass process is told to exit as soon as pass 1 is done, so its exit overlaps the
+    selector, and waited for (closed) only after the outputs."""
+    install_fakes(monkeypatch)
+    seen: List[Tuple[bool, bool]] = []
+    select = pipeline._select
+
+    def recording_select(ctx, pass1):
+        seen.append((ctx.detector.finished, ctx.detector.closed))
+        return select(ctx, pass1)
+
+    monkeypatch.setattr(pipeline, "_select", recording_select)
+    pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode="process"))
+    assert seen == [(True, False)] and FakeGridTrackNet.instances[0].closed
 
 
 @pytest.mark.parametrize("stage", ["init", "pass1"])

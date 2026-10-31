@@ -17,8 +17,8 @@ authentication key; what crosses it is the setup, one ``ClipRequest`` a clip and
 frame back. The messages are dataclasses, so a field (a crop gate's state or window per frame) can
 be added without touching the plumbing.
 
-Lifecycle: the parent owns the child. ``close`` stops it, waiting for an idle child and
-terminating one that is still working (a failed or interrupted run); the child ignores Ctrl-C,
+Lifecycle: the parent owns the child. ``stop`` tells an idle child to exit and terminates one
+that is still working (a failed or interrupted run); ``close`` also waits for it; the child ignores Ctrl-C,
 which the parent handles, and exits by itself when the parent process ends, however it ends
 (``_exit_with_parent``). A child that dies before it connects, or fails to build its detector,
 fails the parent's ``run`` with its reason.
@@ -95,6 +95,7 @@ class RemotePrepass:
         self._connection: Optional[Any] = None
         self._accept_error: Optional[BaseException] = None
         self._connected = threading.Event()
+        self._stopped = False
         self._closed = False
         self._reader: Optional[threading.Thread] = None
         self._acceptor = threading.Thread(target=self._accept, daemon=True, name="prepass-process-accept")
@@ -134,8 +135,8 @@ class RemotePrepass:
         """Start the child's prepass over a clip and return at once: a reader thread sends the clip
         when the child has connected, calls `on_rows` with each run of final frames and `on_end`
         with None or the error (the child's, or its loss). A clip waits for the one before it."""
-        if self._closed:
-            raise RuntimeError("the prepass process is closed")
+        if self._stopped:
+            raise RuntimeError("the prepass process is stopped")
         if self._reader is not None:
             self._reader.join()
         request = ClipRequest(str(video_path), float(fps), int(width), int(height), int(total))
@@ -165,14 +166,15 @@ class RemotePrepass:
             error = failure
         on_end(error)
 
-    def close(self) -> None:
-        """Stop the child and wait for it; safe to call more than once. A child that finished its
-        clip is told to stop; any other (still building its detector or in a clip: the run failed or
-        was interrupted) is terminated, which loses nothing (the engine and kernel caches are
-        written atomically)."""
-        if self._closed:
+    def stop(self) -> None:
+        """Tell the child to end without waiting for it; safe to call more than once, and ``close``
+        waits. A child that finished its clip is told to stop, so it exits while the parent goes on
+        (its CUDA teardown takes most of a second); any other (still building its detector or in a
+        clip: the run failed or was interrupted) is terminated, which loses nothing (the engine and
+        kernel caches are written atomically)."""
+        if self._stopped:
             return
-        self._closed = True
+        self._stopped = True
         if self._reader is not None:        # a clip whose rows are all in ends a moment later
             self._reader.join(timeout=_POLL_S)
         connection = self._connection
@@ -183,6 +185,13 @@ class RemotePrepass:
                 pass
         else:
             self._child.terminate()
+
+    def close(self) -> None:
+        """Stop the child (``stop``) and wait for it to exit; safe to call more than once."""
+        if self._closed:
+            return
+        self.stop()
+        self._closed = True
         try:
             self._child.wait(timeout=STOP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
