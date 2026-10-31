@@ -398,11 +398,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         whose failure raises from here.
         """
         source_stride = self.source_stride_for(fps)
-        cached: List[List[RawDetection]] = []
-        self.precomputed = cached
-        self._ready_upto = 0
-        self._done = False
-        self._worker_error = None
+        cached = self._begin_prepass()
         if background is None:
             background = self.cfg.gridtracknet_prepass_background
         if self._remote is not None:
@@ -476,22 +472,27 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             return self.stream_halves.stream
         return torch.cuda.Stream(device=self.device) if self._worker is not None else None
 
-    def open_stream(self, fps: float, width: int, height: int, eager: bool = True) -> "PrepassStream":
-        """A prepass fed one frame at a time (``PrepassStream.push``) instead of reading a clip, for a
-        caller that gets the frames as they arrive (``live``). Its rows land in ``precomputed`` and are
-        published as they become final, as ``prepare_video``'s are. ``eager`` (the default here) runs
-        every unit as soon as it is cut, so a frame is final as soon as no later unit can cover it
-        rather than when a batch fills. The caller pushes inside ``stream_scope`` and calls
-        ``PrepassStream.finish`` after the last frame."""
-        if self._remote is not None:
-            raise RuntimeError("a prepass in its own process reads the clip itself; it cannot be fed frames")
+    def _begin_prepass(self) -> List[List[RawDetection]]:
+        """A new clip's prepass state: an empty ``precomputed``, which it returns, nothing final yet."""
         cached: List[List[RawDetection]] = []
         self.precomputed = cached
         self._ready_upto = 0
         self._done = False
         self._worker_error = None
+        return cached
+
+    def open_stream(self, fps: float, width: int, height: int) -> "PrepassStream":
+        """A prepass fed one frame at a time (``PrepassStream.push``) instead of reading a clip, for a
+        caller that gets the frames as they arrive (``live``). Its rows land in ``precomputed`` and are
+        published as they become final, as ``prepare_video``'s are. It runs every unit as soon as it
+        is cut (``PrepassStream``'s `eager`), so a frame is final as soon as no later unit can cover
+        it rather than when a batch fills. The caller pushes inside ``stream_scope`` and calls
+        ``PrepassStream.finish`` after the last frame, which ends the prepass."""
+        if self._remote is not None:
+            raise RuntimeError("a prepass in its own process reads the clip itself; it cannot be fed frames")
+        cached = self._begin_prepass()
         self._worker = None
-        return PrepassStream(self, cached, self.source_stride_for(fps), width, height, eager)
+        return PrepassStream(self, cached, self.source_stride_for(fps), width, height, eager=True)
 
     @contextlib.contextmanager
     def stream_scope(self) -> Iterator[Any]:
@@ -504,10 +505,9 @@ class GridTrackNetBallDetector(BallDetectorBackend):
 
     def _prepass(self, capture: Any, cached: List[List[RawDetection]], source_stride: int, width: int, height: int,
                  total_hint: int) -> None:
-        started = time.perf_counter()
         run: Optional[PrepassStream] = None
         try:
-            with self.stream_scope() as stream:
+            with self.stream_scope():
                 run = PrepassStream(self, cached, source_stride, width, height)
                 while True:
                     ok, frame = capture.read()
@@ -515,21 +515,14 @@ class GridTrackNetBallDetector(BallDetectorBackend):
                         break
                     run.push(frame)
                 run.finish()
-                if stream is not None:
-                    stream.synchronize()
-                elif self.device.type == "cuda":
-                    torch.cuda.synchronize(self.device)
         except BaseException as error:  # surfaced to the consumer by _raise_if_failed
             self._worker_error = error
         finally:
             capture.release()
-            self._publish(len(cached))
+            self._publish(len(cached))      # a failed prepass ends here, with what it made final
             self._finish()
-
-        elapsed = time.perf_counter() - started
-        decode = getattr(capture, "backend", video_decode.BACKEND_OPENCV)
-        frames, detected, calls = (run.frame_index, run.detected, run.inference_calls) if run is not None else (0, 0, 0)
-        self._report_prepass(frames, detected, calls, source_stride, elapsed, total_hint, decode)
+        if run is not None:
+            run.report(total_hint, getattr(capture, "backend", video_decode.BACKEND_OPENCV))
 
     def _report_prepass(self, frame_index: int, detected: int, inference_calls: int, source_stride: int,
                         elapsed: float, total_hint: int, decode: str = video_decode.BACKEND_OPENCV) -> None:
@@ -620,6 +613,8 @@ class PrepassStream:
         self.cfg = detector.cfg
         self.cached = cached
         self.eager = bool(eager)
+        self.started = time.perf_counter()
+        self.elapsed: Optional[float] = None
         self.width, self.height = int(width), int(height)
         self.source_stride = int(source_stride)
         self.window_step = detector.window_step()
@@ -667,7 +662,24 @@ class PrepassStream:
                 self._flush()
 
     def finish(self) -> None:
-        """After the last frame: cut each phase's trailing window and make every frame final."""
+        """After the last frame: cut each phase's trailing window, make every frame final, wait for
+        the prepass's CUDA work and end the prepass (``detections_at`` no longer waits). Call it
+        inside the detector's ``stream_scope``; ``report`` prints the prepass's line after it."""
+        self._cut_trailing()
+        device = self.detector.device
+        if device.type == "cuda":
+            torch.cuda.current_stream(device).synchronize()
+        self.detector._publish(len(self.cached))
+        self.detector._finish()
+        self.elapsed = time.perf_counter() - self.started
+
+    def report(self, total_hint: int, decode: str = video_decode.BACKEND_OPENCV) -> None:
+        """The prepass's console line (``GridTrackNetBallDetector._report_prepass``)."""
+        elapsed = self.elapsed if self.elapsed is not None else time.perf_counter() - self.started
+        self.detector._report_prepass(self.frame_index, self.detected, self.inference_calls, self.source_stride,
+                                      elapsed, total_hint, decode)
+
+    def _cut_trailing(self) -> None:
         self.ended = True
         batches = self.batches
         batches.extend(window for window in (stream.trailing_window() for stream in self.streams) if window is not None)

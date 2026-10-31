@@ -66,12 +66,27 @@ def test_a_prepass_in_its_own_process_cannot_be_fed_frames():
         detector.open_stream(30.0, 64, 36)
 
 
-def test_a_streamed_frame_from_the_host_reaches_the_model_unchanged():
-    """``push`` takes a host frame as the clip reader would hand it."""
+def test_push_hands_each_frame_to_the_model_input_as_given_in_order():
+    """``push`` converts the very frame it was given (no copy, no reordering), as the clip reader's."""
     seen = []
     detector = _detector(5, 1, [])
-    detector._frame_tensor = lambda frame, device: seen.append(int(frame[0, 0, 0])) or torch.zeros((3, 1, 1))
+    detector._frame_tensor = lambda frame, device: seen.append(frame) or torch.zeros((3, 1, 1))
     stream = detector.open_stream(30.0, 2, 2)
-    for value in range(3):
-        stream.push(np.full((2, 2, 3), value, np.uint8))
-    assert seen == [0, 1, 2]
+    pushed = [np.full((2, 2, 3), value, np.uint8) for value in range(3)]
+    for frame in pushed:
+        stream.push(frame)
+    assert len(seen) == 3 and all(got is given for got, given in zip(seen, pushed))
+
+
+def test_finishing_a_stream_ends_the_prepass():
+    """After ``finish`` every frame is final and a frame past the end is an error, not a wait."""
+    detector = _detector(1, 1, [])
+    stream = detector.open_stream(30.0, 1920, 1080)
+    capture = Capture(7)
+    with detector.stream_scope():
+        for _ in range(7):
+            stream.push(capture.read()[1])
+        stream.finish()
+    assert detector.ready_upto == 7 and stream.elapsed is not None
+    with pytest.raises(IndexError):
+        detector.detections_at(7)

@@ -336,6 +336,7 @@ class _Pass1Collector:
         # A track that timed out never had the ball: its coasting ROIs on
         # earlier frames are moved from the visual ROI list to the ghost list,
         # and erase_ghost_rois() clears their motion in one batch after pass 1.
+        found: List[Tuple[int, Box]] = []
         for ghost_frame, rx1, ry1, rx2, ry2 in dropped_ghost_rois:
             if not (0 <= ghost_frame < len(out.raw_motions)) or ghost_frame == record.frame_index:
                 continue
@@ -345,6 +346,7 @@ class _Pass1Collector:
             kept = [box for box in out.rois[ghost_frame] if not _same_box(box, ghost)]
             if len(kept) != len(out.rois[ghost_frame]):
                 out.ghost_rois[ghost_frame].append(ghost)
+                found.append((ghost_frame, ghost))
             out.rois[ghost_frame] = kept if kept else None
         out.rois.append(record.rois)
         out.ghost_rois.append([])
@@ -359,6 +361,11 @@ class _Pass1Collector:
             elif record.detector_frame_cuda is not None:
                 self.detector_input_writer.write(record.detector_frame_cuda.detach().cpu().numpy())
         self.timing.add("pass1_store", t0)
+        self.committed(record.frame_index, found)
+
+    def committed(self, frame_index: int, ghosts: List[Tuple[int, Box]]) -> None:
+        """Called once frame `frame_index`'s evidence is stored, with the ghost ROIs ``(frame, box)``
+        added to earlier frames as it was; for a subclass that hands frames on (the live tracker)."""
 
     def _finish_pending(self, pending: PendingDetection) -> None:
         t0 = self.timing.start()
