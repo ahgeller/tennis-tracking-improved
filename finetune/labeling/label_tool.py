@@ -70,6 +70,7 @@ class Tool:
         self.court_view = CourtView(session, self)      # --court: the court keypoints; see label_court
         self.view: View = self.frame_view               # the view the window shows (label_view)
         self.help_shown = False                         # ? or F1: the view's keys over it
+        self.home_view: Optional[View] = None           # the clip view last open: SHIFT+TAB goes back to it
         self.help_cache: Optional[Tuple[int, int, np.ndarray]] = None   # (id of the picture, of the view, the overlay)
         self.pointer = MouseHandler(session, self)      # what clicks and the wheel do; see label_mouse
         self.keys = KeyHandler(session, self)           # what the keys do; see label_keys

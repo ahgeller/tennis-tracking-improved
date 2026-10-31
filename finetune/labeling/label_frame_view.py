@@ -50,6 +50,7 @@ class FrameView(View):
         (",", "who hit it: near, far, not said"), ("[ / ]", "a rally starts / ends here"),
         ("; / SHIFT+;", "next / previous open candidate"), ("\\", "the candidates here are not events"),
         ("TAB", "the grid of crops"), ("w", "the trajectory sheet"), ("z", "the grid's size"),
+        ("SHIFT+TAB", "back to the players or court view, if one was open"),
     ("t", "trail"), ("g", "auto-centre on / off"), ("h", "picture filter"), ("o", "inset"),
     ("m", "full screen"), ("s", "save"), ("q / ESC", "save and quit"), ("? / F1", "these keys"))
 

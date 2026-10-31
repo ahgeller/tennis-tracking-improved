@@ -142,6 +142,9 @@ class KeyHandler:
     def common_key(self, code: int) -> None:
         """The keys the grid and the single frame read the same way."""
         tool = self.tool
+        if code == KEY_TAB and win.shift_held() and tool.home_view is not None:
+            tool.home_view.open()          # back to the players or court view the frames were reached from
+            return
         toggles = {ord("w"): tool.sheet_view.toggle, KEY_TAB: tool.grid_view.toggle, ord("z"): tool.grid_view.toggle_size,
                    ord("t"): tool.toggle_trail, ord("g"): tool.toggle_follow, ord("h"): tool.cycle_filter,
                    ord("o"): tool.toggle_inset, ord("m"): tool.toggle_fullscreen, ord("s"): tool.save,

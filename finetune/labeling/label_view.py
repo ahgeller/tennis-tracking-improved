@@ -86,8 +86,9 @@ class ClipView(View):
         self.timeline = Timeline(session)
 
     def open(self) -> None:
-        """Show the clip at the cursor, loaded afresh."""
+        """Show the clip at the cursor, loaded afresh; SHIFT+TAB from the frames comes back here."""
         super().open()
+        self.tool.home_view = self
         self.source = self.session.source
         self.message = None
         self.revision += 1

@@ -25,7 +25,7 @@ from finetune.labeling import label_window as win
 from finetune.labeling.label_draw import HudItem, fit_picture, fit_text, middle_ellipsis
 from finetune.labeling.label_store import load_court
 from finetune.labeling.label_view import ClipView
-from finetune.labeling.label_window import KEYS_CONFIRM
+from finetune.labeling.label_window import KEY_TAB, KEYS_CONFIRM, next_clip_key
 from finetune.scoring.tracker_events import court_keypoints_by_frame, read_run
 from tennis_tracker.court.court_geometry import LINE_PAIRS_14
 
@@ -140,6 +140,23 @@ class CourtView(ClipView):
         self.hidden.get(self.frame, set()).discard(name)
         self.change(points)
 
+    def held_back(self) -> bool:
+        """Whether leaving this frame (for another, the frames, or the next clip) is held back: the
+        first time, while it has changes SPACE has not confirmed, with a warning; the same move again
+        leaves them."""
+        if self.unconfirmed() and self.leave_warned != self.frame:
+            self.leave_warned = self.frame
+            self.notice = "CHANGES NOT CONFIRMED: SPACE keeps them, the same key again leaves them"
+            self.revision += 1
+            return True
+        self.leave_warned = None
+        return False
+
+    def handle_key(self, code: int, direction: int) -> None:
+        if (code == KEY_TAB or next_clip_key(code)) and self.frames and self.held_back():
+            return
+        super().handle_key(code, direction)
+
     def unconfirmed(self) -> bool:
         """Whether this frame's points were changed here and not confirmed (SPACE) since."""
         court = self.source.court if self.source and self.source.court is not None else {}
@@ -223,12 +240,8 @@ class CourtView(ClipView):
         if not self.frames:
             return
         position = max(0, min(position, len(self.frames) - 1))
-        if position != self.position and self.unconfirmed() and self.leave_warned != self.frame:
-            self.leave_warned = self.frame
-            self.notice = "CHANGES NOT CONFIRMED: SPACE keeps them, the same key again leaves them"
-            self.revision += 1
+        if position != self.position and self.held_back():
             return
-        self.leave_warned = None
         self.position = position
         source = self.source
         if source is not None:

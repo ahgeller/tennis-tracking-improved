@@ -489,3 +489,25 @@ def test_overview_tags_sit_filled_above_their_box_or_inside_it_at_the_top_and_ne
     assert tags["1"][1] == 200 - 20                                               # above its box
     assert tags["2"][1] == 5                                                      # no room above: inside, at the top
     assert "3" not in tags                                                        # it would cover 1's
+
+
+def test_shift_tab_takes_the_frames_back_to_the_clip_view_they_were_reached_from(tmp_path):
+    tool, _ = open_players(tmp_path)
+    press(tool, "\t")
+    assert tool.view is tool.frame_view
+    press(tool, "\t", shift=True)
+    assert tool.view is tool.player_view
+    tool.court_view.open()
+    press(tool, "\t")
+    press(tool, "\t")                                                             # TAB alone: the grid
+    press(tool, "\t", shift=True)
+    assert tool.view is tool.court_view
+
+
+def test_leaving_the_court_view_with_changes_not_confirmed_is_held_back_once(tmp_path):
+    tool, _ = open_court(tmp_path)
+    press(tool, "l")
+    press(tool, "\t")
+    assert tool.view is tool.court_view and "NOT CONFIRMED" in tool.court_view.notice
+    press(tool, "\t")
+    assert tool.view is tool.frame_view

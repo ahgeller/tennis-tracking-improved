@@ -43,6 +43,7 @@ class GridView(View):
         ("x", "keep the draft"), ("v", "no ball"), ("i j k l", "nudge 1 px (SHIFT 0.25 px)"), ("u", "undo"),
         ("/", "a landing"), ("a / d, arrows", "previous / next page"), ("+ -", "zoom the tiles"), ("z", "tiles per page"),
         ("TAB", "back to the single frame"), ("w", "the trajectory sheet"),
+        ("SHIFT+TAB", "back to the players or court view, if one was open"),
     ("t", "trail"), ("g", "auto-centre on / off"), ("h", "picture filter"), ("o", "inset"),
     ("m", "full screen"), ("s", "save"), ("q / ESC", "save and quit"), ("? / F1", "these keys"))
 
