@@ -69,8 +69,13 @@ class PackedMask(NamedTuple):
             if x2 > x1 and y2 > y1:
                 rect = (x1, y1, x2, y2)
         if rect is None:
-            x, y, w, h = cv2.boundingRect(view)
-            rect = (int(x), int(y), int(x + w), int(y + h))
+            # Not cv2.boundingRect: OpenCV 4.9's mask scan can return a box one or two columns
+            # too narrow when every set pixel lies in the first three columns, depending on the
+            # buffer's address.
+            rows = np.flatnonzero(view.any(axis=1))
+            y1, y2 = int(rows[0]), int(rows[-1]) + 1
+            cols = np.flatnonzero(view[y1:y2].any(axis=0))
+            rect = (int(cols[0]), y1, int(cols[-1]) + 1, y2)
         x1, y1, x2, y2 = rect
         flat = (mask_u8[y1:y2, x1:x2].reshape(-1) > 0).astype(np.uint8)
         return cls(np.packbits(flat), int(height), int(width), x1, y1, x2, y2)

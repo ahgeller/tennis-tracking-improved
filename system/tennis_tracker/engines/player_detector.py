@@ -61,7 +61,7 @@ def _load_bytetrack() -> ByteTrackImport:
     return _bytetrack
 
 
-def player_detect_interval(cfg: Config, fps: Optional[float]) -> int:
+def effective_player_interval(cfg: Config, fps: Optional[float]) -> int:
     """Every how many frames the player engine and ByteTrack run on a clip of ``fps``:
     ``cfg.player_detect_interval``, and at least every other frame from
     ``cfg.player_every_other_frame_fps`` up (0 turns that off; an unknown rate keeps the interval)."""
@@ -103,11 +103,11 @@ class PlayerDetector:
         self._frame_diag = 1.0
         self.session: Optional[TensorRTRuntimeSession] = None
         self.tracker: Optional[Any] = None
-        # The engine and ByteTrack run on every Nth frame only (``player_detect_interval``); the
+        # The engine and ByteTrack run on every Nth frame only (``effective_player_interval``); the
         # frames between get their boxes from ``interpolate_player_boxes`` once pass 1 has them
         # all.  (ByteTrack cannot fill them: an update with no detections marks every track lost
         # and returns no boxes.)
-        self._current_interval = player_detect_interval(cfg, fps)
+        self._current_interval = effective_player_interval(cfg, fps)
         # ByteTrack's live boxes keyed by track id.
         self.slots: Dict[int, List[float]] = {}
 
@@ -120,8 +120,9 @@ class PlayerDetector:
                 f"[player] player tracking requires boxmot ({reason}): pip install boxmot, "
                 "or unset player_model_path to run without players"
             )
-        # The engine runs every frame, so its launch is replayed from a CUDA graph, captured as the
-        # session is built (the pipeline builds this detector before any worker thread starts).
+        # The engine runs on every frame it tracks (every frame or every other one), the same launch
+        # each time, so the launch is replayed from a CUDA graph, captured as the session is built
+        # (the pipeline builds this detector before any worker thread starts).
         self.session = open_engine_session("player", cfg.player_model_path, cfg, cuda_graph=cfg.trt_cuda_graph)
         # ByteTrack counts its buffer in updates: a lost track is kept for 60 frames whatever N is.
         self.tracker = bytetrack(

@@ -50,6 +50,13 @@ def test_timing_summary_skips_zero_stages(capsys):
     assert "pass2 total" not in out
 
 
+def test_timing_summary_reports_the_selector_boost_filter_after_selector_select(capsys):
+    print_timing_summary({"selector_select": 1.0, "selector_boost_cc": 0.25}, 4.0, 100, 50)
+    lines = [line for line in capsys.readouterr().out.splitlines() if "selector" in line]
+    assert len(lines) == 2 and "selector select" in lines[0]
+    assert "selector boost cc" in lines[1] and "0.250s" in lines[1] and "2.50 ms/frame" in lines[1]
+
+
 def test_timing_summary_init_row_has_no_per_frame_cost(capsys):
     print_timing_summary({"init_total": 1.0}, 2.0, 10, 10)
     init = [line for line in capsys.readouterr().out.splitlines() if "init" in line]

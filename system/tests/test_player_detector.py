@@ -9,19 +9,28 @@ import pytest
 import torch
 
 from tennis_tracker.config import Config
+from tennis_tracker.engines import player_detector
 from tennis_tracker.engines.player_detector import (
-    PlayerDetector, PlayerPending, _load_bytetrack, interpolate_player_boxes, player_detect_interval,
+    PlayerDetector, PlayerPending, _load_bytetrack, effective_player_interval, interpolate_player_boxes,
 )
 
 
-def test_load_bytetrack_reports_why_boxmot_is_missing():
+@pytest.fixture
+def uncached_bytetrack(monkeypatch):
+    """No boxmot import cached or in flight, and the cache restored afterwards: a test that hides
+    boxmot must neither see an earlier import nor leave its absence to the tests after it."""
+    monkeypatch.setattr(player_detector, "_bytetrack", None)
+    monkeypatch.setattr(player_detector, "_bytetrack_import", None)
+
+
+def test_load_bytetrack_reports_why_boxmot_is_missing(uncached_bytetrack):
     with patch.dict(sys.modules, {"boxmot": None}):
         tracker, reason = _load_bytetrack()
     assert tracker is None
     assert isinstance(reason, str) and reason
 
 
-def test_configured_engine_without_boxmot_raises_like_a_missing_engine(tmp_path):
+def test_configured_engine_without_boxmot_raises_like_a_missing_engine(tmp_path, uncached_bytetrack):
     with patch.dict(sys.modules, {"boxmot": None}):
         with pytest.raises(RuntimeError, match="requires boxmot.*pip install boxmot"):
             PlayerDetector(Config(player_model_path=str(tmp_path / "player.engine")))
@@ -101,11 +110,11 @@ def test_pending_defaults_to_a_coasting_frame():
     (None, 1, 1),                                 # a rate the container did not report
 ])
 def test_the_player_interval_is_every_other_frame_from_60_fps(fps, configured, expected):
-    assert player_detect_interval(Config(player_detect_interval=configured), fps) == expected
+    assert effective_player_interval(Config(player_detect_interval=configured), fps) == expected
 
 
 def test_the_every_other_frame_rule_can_be_turned_off():
-    assert player_detect_interval(Config(player_every_other_frame_fps=0.0), 60.0) == 1
+    assert effective_player_interval(Config(player_every_other_frame_fps=0.0), 60.0) == 1
 
 
 def test_a_disabled_detector_tracks_every_frame_so_nothing_is_interpolated():

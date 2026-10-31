@@ -7,40 +7,48 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from ball_in_play_selector import PackedMask
 
 from tennis_tracker.live.evidence import EMPTY_EVIDENCE, replay
 from tennis_tracker.live.fixed_lag import LagSettings
 from tennis_tracker.live.pipeline import LiveOptions, LiveStats, _LiveRun, _Pump, _stop_on_interrupt, camera_name
 from tennis_tracker.live.source import ArrivedFrame, DropPolicy, FrameQueue
-from tennis_tracker.motion import BoostMasks, DeferredBoost
+from tennis_tracker.motion import BoostMasks
 from tennis_tracker.pass1 import Pass1Result
 from tests._helpers import RALLY_FPS, RALLY_HEIGHT, RALLY_WIDTH, rally, same_row
 
 DROPPED = {40, 41, 90, 91, 92, 93}
 
 
-class _Deferred(DeferredBoost):
-    """A boost mask pass 1 left unfiltered (``motion.DeferredBoost``): resolves to `mask`, counted."""
+class _Pending:
+    """A boost mask pass 1 left unfiltered (a ``motion.PendingBoost``): resolves to `mask`, and
+    records the processed frame it was resolved for in `resolved`."""
 
-    resolved: list = []
+    def __init__(self, processed, mask, resolved):
+        self.processed, self.mask, self.resolved = processed, mask, resolved
+        self.nbytes = int(mask.bits.nbytes)
 
     def resolve(self):
-        _Deferred.resolved.append(self.union)
-        return self.boxes[0]
+        self.resolved.append(self.processed)
+        return self.mask
 
 
-def _run_with_drops(selector_process=False, deferred=False):
+def _run_with_drops(selector_process=False, resolved=None):
     """A ``_LiveRun`` fed as pass 1 feeds it, with the source frames in ``DROPPED`` never seen:
     pass 1 numbers the others 0, 1, 2... A ghost found as processed frame 60 was committed lies on
-    processed frame 55. With `deferred`, pass 1's boost masks are stored as pass 1 stores them,
-    unfiltered (``BoostMasks`` of ``DeferredBoost``)."""
+    processed frame 55. With a `resolved` list, pass 1's boost masks are stored as pass 1 stores
+    them, unfiltered (``BoostMasks.defer``), and each records its processed frame there when it is
+    filtered."""
     detections, masks = rally()
     seen = [frame for frame in range(len(detections)) if frame not in DROPPED]
     boost_masks = [masks[f] for f in seen]
-    if deferred:
+    if resolved is not None:
         boost_masks = BoostMasks()
         for processed, f in enumerate(seen):
-            boost_masks.append(None if masks[f] is None else _Deferred((0, 0), processed, [masks[f]], None, None, None))
+            if masks[f] is None:
+                boost_masks.append(None)
+            else:
+                boost_masks.defer(_Pending(processed, masks[f], resolved))
     result = Pass1Result(detections=[detections[f] for f in seen], boost_masks=boost_masks,
                          raw_motions=[masks[f] for f in seen], player_boxes=[{} for _ in seen],
                          court_keypoints=[None for _ in seen])
@@ -87,11 +95,11 @@ def test_committing_a_frame_hands_on_its_boost_mask_filtered_once_and_keeps_none
     the selector and the record its filtered mask, filtered once, and keeps nothing behind."""
     eager, *_ = _run_with_drops()
     for selector_process in (False, True):
-        _Deferred.resolved = []
-        run, seen, result, _, _ = _run_with_drops(selector_process=selector_process, deferred=True)
+        resolved = []
+        run, seen, result, _, _ = _run_with_drops(selector_process=selector_process, resolved=resolved)
         filled = [processed for processed, f in enumerate(seen) if rally()[1][f] is not None]
-        assert _Deferred.resolved == filled
-        assert not any(isinstance(mask, DeferredBoost) for mask in run.recorded.boost_masks)
+        assert resolved == filled
+        assert all(mask is None or isinstance(mask, PackedMask) for mask in run.recorded.boost_masks)
         assert all((a is None and b is None) or np.array_equal(a.unpack(), b.unpack())
                    for a, b in zip(run.recorded.boost_masks, eager.recorded.boost_masks, strict=True))
         assert all(same_row(a, b) for a, b in zip(run.committed, eager.committed))

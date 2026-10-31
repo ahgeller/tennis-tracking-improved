@@ -83,14 +83,21 @@ def _clean_raw_motion_mask(mask_u8: Optional[np.ndarray], cfg: MotionSettings) -
     return out
 
 
-class BoostMaskBuffers(Protocol):
-    """Where ``filter_boost_mask`` may write its result instead of allocating one."""
+def _set_pixel_box(mask: np.ndarray) -> Optional[Roi]:
+    """The ``(x1, y1, x2, y2)`` bounding box of the nonzero pixels of a 2D mask; None when it has none.
 
-    boost_mask_u8: np.ndarray
+    Not ``cv2.boundingRect``: OpenCV 4.9's mask scan can return a box one or two columns too
+    narrow when every set pixel lies in the first three columns, depending on the buffer's
+    address (a misaligned crop of the download buffer hits it)."""
+    rows = np.flatnonzero(mask.any(axis=1))
+    if not rows.size:
+        return None
+    y1, y2 = int(rows[0]), int(rows[-1]) + 1
+    cols = np.flatnonzero(mask[y1:y2].any(axis=0))
+    return int(cols[0]), y1, int(cols[-1]) + 1, y2
 
 
-def filter_boost_mask(raw_motion: np.ndarray, min_area: int, max_area: int, cfg: MotionSettings,
-                      buffers: Optional[BoostMaskBuffers] = None) -> np.ndarray:
+def filter_boost_mask(raw_motion: np.ndarray, min_area: int, max_area: int, cfg: MotionSettings) -> np.ndarray:
     """The boost mask: a filled disc for every ball-sized component of ``raw_motion``.
 
     Components outside ``[min_area, max_area]`` px are dropped; ball-sized ones
@@ -98,34 +105,29 @@ def filter_boost_mask(raw_motion: np.ndarray, min_area: int, max_area: int, cfg:
     must pass ``cfg.blob_max_aspect``.  Any nonzero pixel is motion.  One
     connected-components pass, over the bounding box of the set pixels only
     (motion is sparse, and the pass costs in proportion to the area it scans;
-    the components, their stats and the rounded disc centres are the same);
-    with ``buffers`` the result is written into ``buffers.boost_mask_u8``.
+    the components, their stats and the rounded disc centres are the same).
     The result is all zero when nothing survives.
     """
     img_h, img_w = raw_motion.shape[:2]
-    if buffers is not None:
-        result = buffers.boost_mask_u8
-        result.fill(0)
-    else:
-        result = np.zeros((img_h, img_w), dtype=np.uint8)
-    off_x, off_y, box_w, box_h = cv2.boundingRect(raw_motion)
-    if box_w == 0 or box_h == 0:
+    result = np.zeros((img_h, img_w), dtype=np.uint8)
+    box = _set_pixel_box(raw_motion)
+    if box is None:
         return result
-    num, _labels, stats, centroids = cv2.connectedComponentsWithStats(
-        raw_motion[off_y:off_y + box_h, off_x:off_x + box_w], connectivity=8)
-    for cx, cy, radius in _boost_discs(stats[1:num], centroids[1:num], off_x, off_y, (img_h, img_w),
+    off_x, off_y, x2, y2 = box
+    num, _labels, stats, centroids = cv2.connectedComponentsWithStats(raw_motion[off_y:y2, off_x:x2], connectivity=8)
+    for cx, cy, radius in _boost_discs(stats[1:num], centroids[1:num] + (off_x, off_y), (img_h, img_w),
                                        min_area, max_area, cfg):
         cv2.circle(result, (int(cx), int(cy)), int(radius), 255, -1)
     return result
 
 
-def _boost_discs(stats: np.ndarray, centroids: np.ndarray, off_x: Union[int, np.ndarray],
-                 off_y: Union[int, np.ndarray], frame_shape: Tuple[int, int], min_area: int, max_area: int,
-                 cfg: MotionSettings) -> np.ndarray:
+def _boost_discs(stats: np.ndarray, centres: np.ndarray, frame_shape: Tuple[int, int], min_area: int,
+                 max_area: int, cfg: MotionSettings) -> np.ndarray:
     """The boost disc of every ball-sized component, as ``(cx, cy, radius)`` int rows: the filter
     ``filter_boost_mask`` documents, over the components' ``cv2.connectedComponentsWithStats`` rows
     (the background row left out).  The components were found in a part of a ``frame_shape``
-    frame; ``off_x`` and ``off_y`` (scalars, or one per component) move them into the frame.
+    frame; ``centres`` are their centroids moved into the frame (the part's centroids plus its
+    offset, per component).
 
     A centroid in the part plus the part's offset rounds to the same pixel as the frame's centroid:
     both are an integer sum over the area, and they could only round apart within an ulp of .5,
@@ -149,12 +151,8 @@ def _boost_discs(stats: np.ndarray, centroids: np.ndarray, off_x: Union[int, np.
         return np.empty((0, 3), dtype=np.int64)
     # A disc at the centroid; its radius is capped so motion blur and shadows cannot balloon the
     # boost far beyond the ball.
-    if isinstance(off_x, np.ndarray):
-        off_x = off_x[keep]
-    if isinstance(off_y, np.ndarray):
-        off_y = off_y[keep]
-    cx = (centroids[keep, 0] + off_x + 0.5).astype(np.int64)
-    cy = (centroids[keep, 1] + off_y + 0.5).astype(np.int64)
+    cx = (centres[keep, 0] + 0.5).astype(np.int64)
+    cy = (centres[keep, 1] + 0.5).astype(np.int64)
     radius = np.minimum((np.sqrt(area[keep] / math.pi) + 0.5).astype(np.int64), _BOOST_DISC_MAX_RADIUS_PX)
     return np.stack([cx, cy, np.maximum(radius, 1)], axis=1)
 
@@ -680,55 +678,37 @@ class _Placed(NamedTuple):
     y: int
 
 
+def _paste(layers: List[_Placed], box: Roi, scale: int = 1) -> np.ndarray:
+    """The union of `layers` on the ``(x1, y1, x2, y2)`` box of the frame that holds them, times `scale`."""
+    x1, y1, x2, y2 = box
+    out = np.zeros((y2 - y1, x2 - x1), np.uint8)
+    for mask, x, y in layers:
+        part = out[y - y1:y - y1 + mask.shape[0], x - x1:x - x1 + mask.shape[1]]
+        np.maximum(part, mask * scale if scale != 1 else mask, out=part)
+    return out
+
+
+def _pack_box(mask: np.ndarray, box: Roi) -> PackedMask:
+    """``PackedMask.pack(mask)`` for a frame mask whose set pixels have the bounding box ``box``,
+    known without a scan of the frame.  (``np.packbits`` counts any nonzero byte as a set bit, as
+    ``PackedMask.pack``'s ``> 0`` does.)"""
+    x1, y1, x2, y2 = box
+    return PackedMask(np.packbits(mask[y1:y2, x1:x2].reshape(-1)), mask.shape[0], mask.shape[1], x1, y1, x2, y2)
+
+
+def _pack_union(union_mask: np.ndarray, union: Roi, frame_shape: Tuple[int, int]) -> Optional[PackedMask]:
+    """A union-box-sized mask (ROI mode) packed as that box; None when it has no set pixel."""
+    if not cv2.countNonZero(union_mask):
+        return None
+    x1, y1, x2, y2 = union
+    return PackedMask(np.packbits(union_mask.reshape(-1) > 0), frame_shape[0], frame_shape[1], x1, y1, x2, y2)
+
+
 def _with_gaps(occupied: np.ndarray) -> np.ndarray:
     """The ``occupied`` indices (ascending) plus the first index of every gap between two of them,
     so each run of empty rows (or columns) between set pixels is squeezed to one."""
     gaps = np.flatnonzero(np.diff(occupied) > 1)
     return np.sort(np.concatenate([occupied, occupied[gaps] + 1]))
-
-
-class _SqueezedMask(NamedTuple):
-    """A sparse frame mask with every run of empty rows and of empty columns squeezed to one.
-
-    A component (8-connected) never spans an empty row or column, so the squeezed image holds the
-    frame's components whole and apart, each with its area, width and height, its pixels moved by
-    one offset per axis: a full-frame mask of a few thousand set pixels spread over the frame scans
-    a few percent of the area its bounding box covers.  ``rows`` and ``cols`` give the frame row and
-    column of each image row and column; ``box`` is the bounding box of the set pixels.
-    """
-
-    image: np.ndarray
-    rows: np.ndarray
-    cols: np.ndarray
-    box: Roi
-
-    @classmethod
-    def of(cls, mask: np.ndarray, row_any: np.ndarray, col_any: np.ndarray) -> Optional["_SqueezedMask"]:
-        """``mask`` squeezed, given which of its rows and columns hold a set pixel; None when none
-        does.  When squeezing would keep more than half the bounding box, the box is kept as it is."""
-        occupied_rows, occupied_cols = np.flatnonzero(row_any), np.flatnonzero(col_any)
-        if not occupied_rows.size:
-            return None
-        x1, y1 = int(occupied_cols[0]), int(occupied_rows[0])
-        x2, y2 = int(occupied_cols[-1]) + 1, int(occupied_rows[-1]) + 1
-        rows, cols = _with_gaps(occupied_rows), _with_gaps(occupied_cols)
-        if 2 * rows.size * cols.size > (y2 - y1) * (x2 - x1):
-            return cls(mask[y1:y2, x1:x2], np.arange(y1, y2), np.arange(x1, x2), (x1, y1, x2, y2))
-        return cls(mask[rows][:, cols], rows, cols, (x1, y1, x2, y2))      # rows first: whole-row copies
-
-    def discs(self, frame_shape: Tuple[int, int], min_area: int, max_area: int, cfg: MotionSettings) -> np.ndarray:
-        """``_boost_discs`` of the frame's components, found in the squeezed image."""
-        num, _labels, stats, centroids = cv2.connectedComponentsWithStats(self.image, connectivity=8)
-        left, top = stats[1:num, cv2.CC_STAT_LEFT], stats[1:num, cv2.CC_STAT_TOP]
-        return _boost_discs(stats[1:num], centroids[1:num], self.cols[left] - left, self.rows[top] - top,
-                            frame_shape, min_area, max_area, cfg)
-
-    def packed(self, frame: np.ndarray) -> PackedMask:
-        """``PackedMask.pack(frame)`` for the frame mask this was squeezed from, its bounding box
-        known without a scan of the frame.  (``np.packbits`` counts any nonzero byte as a set bit,
-        as ``PackedMask.pack``'s ``> 0`` does.)"""
-        x1, y1, x2, y2 = self.box
-        return PackedMask(np.packbits(frame[y1:y2, x1:x2].reshape(-1)), frame.shape[0], frame.shape[1], x1, y1, x2, y2)
 
 
 # A filled disc of radius r drawn at (cx, cy) stays inside cx +- (r + this), and likewise in y.
@@ -769,66 +749,203 @@ def _pack_stamps(stamps: List[_Placed], frame_shape: Tuple[int, int]) -> Optiona
     return PackedMask(bits, frame_shape[0], frame_shape[1], x1, y1, x2, y2)
 
 
-def _pack_union(union_mask: np.ndarray, union: Roi, frame_shape: Tuple[int, int]) -> Optional[PackedMask]:
-    """A union-box-sized mask (ROI mode) packed as that box; None when it has no set pixel."""
-    if not cv2.countNonZero(union_mask):
-        return None
-    x1, y1, x2, y2 = union
-    return PackedMask(np.packbits(union_mask.reshape(-1) > 0), frame_shape[0], frame_shape[1], x1, y1, x2, y2)
+class _PackedArrays(NamedTuple):
+    """0/1 uint8 arrays kept as one packed bit string and their shapes: an eighth of the bytes."""
+
+    bits: np.ndarray
+    shapes: Tuple[Tuple[int, int], ...]
+
+    @classmethod
+    def of(cls, arrays: Sequence[np.ndarray]) -> "_PackedArrays":
+        flat = np.concatenate([array.reshape(-1) for array in arrays])
+        return cls(np.packbits(flat), tuple((int(array.shape[0]), int(array.shape[1])) for array in arrays))
+
+    def unpack(self) -> List[np.ndarray]:
+        sizes = [height * width for height, width in self.shapes]
+        flat = np.unpackbits(self.bits, count=sum(sizes))
+        return [part.reshape(shape) for part, shape in zip(np.split(flat, np.cumsum(sizes)[:-1]), self.shapes)]
 
 
-def _roi_boost(crops: List[np.ndarray], boxes: List[Roi], union: Roi, cfg: MotionSettings) -> Optional[_Placed]:
-    """The ball-sized components of each box's crop (``filter_boost_mask``, box by box), assembled
-    in the union box; None when none survived."""
-    ux1, uy1, ux2, uy2 = union
-    out = np.zeros((uy2 - uy1, ux2 - ux1), np.uint8)
-    for crop, (x1, y1, x2, y2) in zip(crops, boxes):
-        if cv2.countNonZero(crop):
-            part = out[y1 - uy1:y2 - uy1, x1 - ux1:x2 - ux1]
-            np.maximum(part, filter_boost_mask(crop, cfg.boost_min_blob_area, cfg.boost_max_blob_area, cfg), out=part)
-    return _Placed(out, ux1, uy1) if cv2.countNonZero(out) else None
+class PendingBoost(Protocol):
+    """A frame's selector boost mask whose components are not filtered yet."""
 
-
-def _frame_boost(squeezed: Optional[_SqueezedMask], frame_shape: Tuple[int, int],
-                 cfg: MotionSettings) -> Optional[List[_Placed]]:
-    """A stamp for each boost disc of a whole-frame mask's components; None when there are none."""
-    if squeezed is None:
-        return None
-    return _disc_stamps(squeezed.discs(frame_shape, cfg.boost_min_blob_area, cfg.boost_max_blob_area, cfg),
-                        frame_shape)
-
-
-class DeferredBoost(NamedTuple):
-    """One frame's selector boost mask before its components are filtered: ``resolve`` returns
-    what ``MotionMasks.packed_boost`` would have.  It holds its own copy of the raw motion (the
-    ROI crops, or the squeezed whole-frame mask), not the pinned download buffer.  It runs after
-    pass 1 has reported its timers, so its time is the reader's (the selector's)."""
-
-    frame_shape: Tuple[int, int]
-    union: Roi
-    boxes: List[Roi]
-    crops: Optional[List[np.ndarray]]          # ROI mode: each box's raw crop
-    squeezed: Optional[_SqueezedMask]          # whole frame: the squeezed raw mask
-    cfg: MotionSettings
+    @property
+    def nbytes(self) -> int:
+        """The host memory it holds."""
+        ...
 
     def resolve(self) -> Optional[PackedMask]:
-        if self.crops is not None:
-            placed = _roi_boost(self.crops, self.boxes, self.union, self.cfg)
-            return _pack_union(placed.mask, self.union, self.frame_shape) if placed is not None else None
-        stamps = _frame_boost(self.squeezed, self.frame_shape, self.cfg)
-        return _pack_stamps(stamps, self.frame_shape) if stamps is not None else None
+        """The boost mask, packed: what ``MotionMasks.packed_boost`` gives."""
+        ...
+
+
+class _RoiCrops(NamedTuple):
+    """ROI mode's raw motion: each box's crop (0/1), and ``union``, the box that holds them all.
+
+    Its boost is the ball-sized components of each crop (``filter_boost_mask``, box by box),
+    assembled in the union box, and is packed as that box.
+    """
+
+    crops: List[np.ndarray]
+    boxes: List[Roi]
+    union: Roi
+    frame_shape: Tuple[int, int]
+
+    def boost(self, cfg: MotionSettings) -> Optional[List[_Placed]]:
+        """The boost discs, as one layer on the union box; None when none survived."""
+        ux1, uy1, ux2, uy2 = self.union
+        out = np.zeros((uy2 - uy1, ux2 - ux1), np.uint8)
+        for crop, (x1, y1, x2, y2) in zip(self.crops, self.boxes):
+            if cv2.countNonZero(crop):
+                part = out[y1 - uy1:y2 - uy1, x1 - ux1:x2 - ux1]
+                np.maximum(part, filter_boost_mask(crop, cfg.boost_min_blob_area, cfg.boost_max_blob_area, cfg),
+                           out=part)
+        return [_Placed(out, ux1, uy1)] if cv2.countNonZero(out) else None
+
+    def pack_boost(self, layers: List[_Placed]) -> Optional[PackedMask]:
+        return _pack_union(_paste(layers, self.union), self.union, self.frame_shape)
+
+    def deferred(self, cfg: MotionSettings) -> "_DeferredRoiBoost":
+        return _DeferredRoiBoost(_PackedArrays.of(self.crops), self.boxes, self.union, self.frame_shape, cfg)
+
+
+class _SqueezedMask(NamedTuple):
+    """A sparse frame mask with every run of empty rows and of empty columns squeezed to one.
+
+    A component (8-connected) never spans an empty row or column, so the squeezed image holds the
+    frame's components whole and apart, each with its area, width and height, its pixels moved by
+    one offset per axis: a full-frame mask of a few thousand set pixels spread over the frame scans
+    a few percent of the area its bounding box covers.  ``image`` is C-contiguous and its own (not
+    a view of the frame); ``rows`` and ``cols`` give the frame row and column of each of its rows
+    and columns; ``box`` is the bounding box of the set pixels in the ``frame_shape`` frame.
+
+    Its boost is a stamp for each boost disc of the frame's components, packed as the bounding
+    box of the discs.
+    """
+
+    image: np.ndarray
+    rows: np.ndarray
+    cols: np.ndarray
+    box: Roi
+    frame_shape: Tuple[int, int]
+
+    @classmethod
+    def of(cls, mask: np.ndarray, row_any: np.ndarray, col_any: np.ndarray) -> Optional["_SqueezedMask"]:
+        """``mask`` squeezed, given which of its rows and columns hold a set pixel; None when none
+        does.  When squeezing would keep more than half the bounding box, the box is kept as it is."""
+        occupied_rows, occupied_cols = np.flatnonzero(row_any), np.flatnonzero(col_any)
+        if not occupied_rows.size:
+            return None
+        x1, y1 = int(occupied_cols[0]), int(occupied_rows[0])
+        x2, y2 = int(occupied_cols[-1]) + 1, int(occupied_rows[-1]) + 1
+        box, frame_shape = (x1, y1, x2, y2), (int(mask.shape[0]), int(mask.shape[1]))
+        rows, cols = _with_gaps(occupied_rows), _with_gaps(occupied_cols)
+        if 2 * rows.size * cols.size > (y2 - y1) * (x2 - x1):
+            return cls(mask[y1:y2, x1:x2].copy(), np.arange(y1, y2), np.arange(x1, x2), box, frame_shape)
+        # Rows first (whole-row copies); the column gather leaves a transposed buffer, made C-contiguous.
+        return cls(np.ascontiguousarray(mask[rows][:, cols]), rows, cols, box, frame_shape)
+
+    def boost(self, cfg: MotionSettings) -> Optional[List[_Placed]]:
+        """The boost discs of the frame's components (``_boost_discs``, found in the squeezed
+        image), a stamp each; None when none survived."""
+        num, _labels, stats, centroids = cv2.connectedComponentsWithStats(self.image, connectivity=8)
+        left, top = stats[1:num, cv2.CC_STAT_LEFT], stats[1:num, cv2.CC_STAT_TOP]
+        offsets = np.stack([self.cols[left] - left, self.rows[top] - top], axis=1)
+        discs = _boost_discs(stats[1:num], centroids[1:num] + offsets, self.frame_shape,
+                             cfg.boost_min_blob_area, cfg.boost_max_blob_area, cfg)
+        return _disc_stamps(discs, self.frame_shape)
+
+    def pack_boost(self, layers: List[_Placed]) -> Optional[PackedMask]:
+        return _pack_stamps(layers, self.frame_shape)
+
+    def deferred(self, cfg: MotionSettings) -> "_DeferredFrameBoost":
+        return _DeferredFrameBoost(_PackedArrays.of([self.image]), self.rows, self.cols, self.box,
+                                   self.frame_shape, cfg)
+
+
+_RawSource = Union[_RoiCrops, _SqueezedMask]
+
+
+def _filtered_boost(source: _RawSource, cfg: MotionSettings) -> Optional[PackedMask]:
+    """The selector boost of `source`'s raw motion, packed; None when no blob survives."""
+    layers = source.boost(cfg)
+    return source.pack_boost(layers) if layers is not None else None
+
+
+class _DeferredRoiBoost(NamedTuple):
+    """ROI mode's ``PendingBoost``: the crops packed, filtered when resolved."""
+
+    crops: _PackedArrays
+    boxes: List[Roi]
+    union: Roi
+    frame_shape: Tuple[int, int]
+    cfg: MotionSettings
+
+    @property
+    def nbytes(self) -> int:
+        return int(self.crops.bits.nbytes)
+
+    def resolve(self) -> Optional[PackedMask]:
+        return _filtered_boost(_RoiCrops(self.crops.unpack(), self.boxes, self.union, self.frame_shape), self.cfg)
+
+
+class _DeferredFrameBoost(NamedTuple):
+    """A whole-frame mask's ``PendingBoost``: the squeezed image packed, filtered when resolved."""
+
+    image: _PackedArrays
+    rows: np.ndarray
+    cols: np.ndarray
+    box: Roi
+    frame_shape: Tuple[int, int]
+    cfg: MotionSettings
+
+    @property
+    def nbytes(self) -> int:
+        return int(self.image.bits.nbytes + self.rows.nbytes + self.cols.nbytes)
+
+    def resolve(self) -> Optional[PackedMask]:
+        (image,) = self.image.unpack()
+        return _filtered_boost(_SqueezedMask(image, self.rows, self.cols, self.box, self.frame_shape), self.cfg)
+
+
+# Past this much host memory held by pending boosts, ``BoostMasks.defer`` filters a frame as it is
+# stored: the pending boosts of a long clip would otherwise grow with its length.
+DEFERRED_BOOST_BUDGET_BYTES = 256 << 20
 
 
 class BoostMasks(Sequence[Optional[PackedMask]]):
-    """Pass 1's per-frame selector boost masks.  An entry stored as a ``DeferredBoost`` is
-    filtered the first time it is read and kept from then on: the selector reads the boost only
-    at frames with a detection or a motion search, so the other frames never filter theirs."""
+    """Pass 1's per-frame selector boost masks.
 
-    def __init__(self) -> None:
-        self._items: List[Union[PackedMask, DeferredBoost, None]] = []
+    A frame stored with ``defer`` is filtered the first time it is read and kept from then on:
+    the selector reads the boost only at frames with a detection or a motion search, so the other
+    frames never filter theirs.  ``filter_seconds`` sums the time those first reads spent
+    filtering.  Once the pending frames hold ``budget_bytes``, a deferred frame is filtered as it
+    is stored instead.  Writing a frame (ghost erasure repacks one) replaces whatever it held.
+    """
 
-    def append(self, mask: Union[PackedMask, DeferredBoost, None]) -> None:
+    def __init__(self, budget_bytes: int = DEFERRED_BOOST_BUDGET_BYTES) -> None:
+        self.budget_bytes = budget_bytes
+        self.filter_seconds = 0.0
+        self._items: List[Optional[PackedMask]] = []
+        self._pending: Dict[int, PendingBoost] = {}       # by frame; the frame's item is None until read
+        self._pending_bytes = 0
+
+    @property
+    def pending_bytes(self) -> int:
+        """The host memory the frames not filtered yet hold."""
+        return self._pending_bytes
+
+    def append(self, mask: Optional[PackedMask]) -> None:
         self._items.append(mask)
+
+    def defer(self, pending: PendingBoost) -> None:
+        nbytes = pending.nbytes
+        if self._pending_bytes + nbytes > self.budget_bytes:
+            self._items.append(pending.resolve())
+            return
+        self._pending[len(self._items)] = pending
+        self._pending_bytes += nbytes
+        self._items.append(None)
 
     def __len__(self) -> int:
         return len(self._items)
@@ -843,32 +960,42 @@ class BoostMasks(Sequence[Optional[PackedMask]]):
         if isinstance(index, slice):
             return [self[i] for i in range(*index.indices(len(self._items)))]
         mask = self._items[index]
-        if isinstance(mask, DeferredBoost):
-            mask = self._items[index] = mask.resolve()
+        if mask is None and self._pending:
+            frame = index + len(self._items) if index < 0 else index
+            pending = self._take_pending(frame)
+            if pending is not None:
+                t0 = time.perf_counter()
+                mask = self._items[frame] = pending.resolve()
+                self.filter_seconds += time.perf_counter() - t0
         return mask
 
     def __setitem__(self, index: int, mask: Optional[PackedMask]) -> None:
         self._items[index] = mask
+        self._take_pending(index + len(self._items) if index < 0 else index)
+
+    def _take_pending(self, frame: int) -> Optional[PendingBoost]:
+        pending = self._pending.pop(frame, None)
+        if pending is not None:
+            self._pending_bytes -= pending.nbytes
+        return pending
 
 
 class MotionMasks:
     """One frame's motion masks on their way to the host, and what the CPU makes of them.
 
-    ``preprocess_frame_cuda`` cleans the gated mask on the GPU box by box,
-    then copies each box's cleaned mask (and, for the detector boost, its
-    ungated mask) into one pinned host buffer behind a CUDA event, so pass 1
-    never waits for the copy while it preprocesses: the frame's evidence is
-    read when the frame is committed, a frame later.  The first accessor
-    waits for the copy and keeps the ball-sized components of each box
-    (``filter_boost_mask``, box by box as before), assembled in the box that
-    holds them all.
+    ``preprocess_frame_cuda`` cleans the gated mask on the GPU box by box and copies each box's
+    cleaned mask (and, for the detector boost, its ungated mask) into one pinned host buffer
+    behind a CUDA event, so pass 1 never waits for the copy while it preprocesses.  The first
+    accessor waits for the copy and assembles the raw mask (``packed_raw``, ``raw_u8``); the boost
+    accessors (``packed_boost``, ``selector_boost_u8``, ``detector_boost_u8``, ``has_blobs``) also
+    filter the ball-sized components.  Pass 1 stores the selector's boost with ``store_boost``,
+    which leaves the filter to the boost's first reader unless the detector input needed it.
 
-    ``roi_mode``: the boxes are motion ROIs, and the packed masks store their
-    union box; otherwise the single box is the frame and the packed masks
-    store the bounding box of their set pixels (``PackedMask.pack``).  A
-    frame-sized mask also brings which of its rows and columns hold a set
-    pixel, reduced on the device, so the host squeezes its empty rows and
-    columns out (``_SqueezedMask``) instead of scanning the frame for the
+    ``roi_mode``: the boxes are motion ROIs, filtered box by box (``_RoiCrops``), and the packed
+    masks store their union box; otherwise the single box is the frame and the packed masks store
+    the bounding box of their set pixels (``PackedMask.pack``).  A frame-sized mask also brings
+    which of its rows and columns hold a set pixel, reduced on the device, so the host squeezes
+    its empty rows and columns out (``_SqueezedMask``) instead of scanning the frame for the
     components and the packing; the masks are the same bits.
     """
 
@@ -896,19 +1023,26 @@ class MotionMasks:
             dst.copy_(crop.view(torch.uint8), non_blocking=device.type == "cuda")
             views.append(dst.numpy())
             offset += n
-        self._views, self._occupancy = views[:len(crops)], views[len(crops):]
-        self._wide_distinct = wide is not None
+        self._raw_views, self._wide_views = views[:len(raw)], views[len(raw):len(crops)]
+        # Whole-frame masks: the (rows, cols) occupancy of the raw mask, and of the wide one.
+        pairs = [(views[i], views[i + 1]) for i in range(len(crops), len(views), 2)]
+        self._raw_occupancy = pairs[0] if pairs else None
+        self._wide_occupancy = pairs[1] if len(pairs) > 1 else None
         self._event: Optional[torch.cuda.Event] = None
         if device.type == "cuda":
             self._event = torch.cuda.Event(blocking=False)
             self._event.record(torch.cuda.current_stream(device=device))
         self._raw_resolved = False
-        self._resolved = False
+        self._boost_resolved = False
         self._raw = _Placed(np.empty((0, 0), np.uint8), 0, 0)    # 0/1
-        self._raw_squeezed: Optional[_SqueezedMask] = None          # whole-frame masks only
-        # 0/255 discs: the union box's (ROI mode), else one stamp a disc (``_disc_stamps``).
+        # What the selector's boost is filtered from; None when the raw mask has no set pixel.
+        self._raw_source: Optional[_RawSource] = None
+        # 0/255 boost discs: one layer on the union box (ROI mode), else one stamp a disc.
         self._narrow: Optional[List[_Placed]] = None
         self._wide: Optional[List[_Placed]] = None
+
+    def _crops(self, views: List[np.ndarray]) -> _RoiCrops:
+        return _RoiCrops(views, self.boxes, self.union, (self.height, self.width))
 
     def _resolve_raw(self) -> None:
         """Wait for the download and assemble the raw mask: the union box's (ROI mode), else the
@@ -922,40 +1056,33 @@ class MotionMasks:
         if self.perf is not None:
             self.perf["pre_cuda_raw_d2h"] = self.perf.get("pre_cuda_raw_d2h", 0.0) + (time.perf_counter() - t_start)
         if self.roi_mode:
-            ux1, uy1, ux2, uy2 = self.union
-            raw = np.zeros((uy2 - uy1, ux2 - ux1), np.uint8)
-            for crop, (x1, y1, x2, y2) in zip(self._views, self.boxes):
-                part = raw[y1 - uy1:y2 - uy1, x1 - ux1:x2 - ux1]
-                np.maximum(part, crop, out=part)
-            self._raw = _Placed(raw, ux1, uy1)
+            placed = [_Placed(view, x1, y1) for view, (x1, y1, _x2, _y2) in zip(self._raw_views, self.boxes)]
+            self._raw = _Placed(_paste(placed, self.union), self.union[0], self.union[1])
+            self._raw_source = self._crops(self._raw_views) if cv2.countNonZero(self._raw.mask) else None
         else:
-            self._raw = _Placed(self._views[0], 0, 0)
-            self._raw_squeezed = _SqueezedMask.of(self._views[0], self._occupancy[0], self._occupancy[1])
+            assert self._raw_occupancy is not None
+            self._raw = _Placed(self._raw_views[0], 0, 0)
+            self._raw_source = _SqueezedMask.of(self._raw_views[0], *self._raw_occupancy)
         if self.perf is not None:
             self.perf["pre_cuda_total"] = self.perf.get("pre_cuda_total", 0.0) + (time.perf_counter() - t_start)
 
-    def _resolve(self) -> None:
+    def _resolve_boost(self) -> None:
         """The boost discs: the selector's (from the raw mask) and the detector's (from the wide
         mask when it was downloaded)."""
-        if self._resolved:
+        if self._boost_resolved:
             return
-        self._resolved = True
+        self._boost_resolved = True
         self._resolve_raw()
         t0 = time.perf_counter()
-        cfg, shape, n_boxes = self.cfg, (self.height, self.width), len(self.boxes)
-        if self.roi_mode:
-            narrow = _roi_boost(self._views[:n_boxes], self.boxes, self.union, cfg)
-            self._narrow = [narrow] if narrow is not None else None
-            if self._wide_distinct:
-                wide = _roi_boost(self._views[n_boxes:], self.boxes, self.union, cfg)
-                self._wide = [wide] if wide is not None else None
-        else:
-            self._narrow = _frame_boost(self._raw_squeezed, shape, cfg)
-            if self._wide_distinct:
-                self._wide = _frame_boost(_SqueezedMask.of(self._views[1], self._occupancy[2], self._occupancy[3]),
-                                          shape, cfg)
-        if not self._wide_distinct:
+        self._narrow = self._raw_source.boost(self.cfg) if self._raw_source is not None else None
+        if not self._wide_views:
             self._wide = self._narrow
+        elif self.roi_mode:
+            self._wide = self._crops(self._wide_views).boost(self.cfg)
+        else:
+            assert self._wide_occupancy is not None
+            wide = _SqueezedMask.of(self._wide_views[0], *self._wide_occupancy)
+            self._wide = wide.boost(self.cfg) if wide is not None else None
         if self.perf is not None:
             seconds = time.perf_counter() - t0
             self.perf["pre_cuda_cc_filter"] = self.perf.get("pre_cuda_cc_filter", 0.0) + seconds
@@ -963,70 +1090,56 @@ class MotionMasks:
 
     def _full(self, layers: List[_Placed], scale: int = 1) -> np.ndarray:
         """The frame-sized mask of `layers` (their union), times `scale`."""
-        out = np.zeros((self.height, self.width), np.uint8)
-        for mask, x, y in layers:
-            part = out[y:y + mask.shape[0], x:x + mask.shape[1]]
-            np.maximum(part, mask * scale if scale != 1 else mask, out=part)
-        return out
-
-    def _pack(self, layers: Optional[List[_Placed]]) -> Optional[PackedMask]:
-        """A boost mask packed: the union box in ROI mode, else the bounding box of its discs."""
-        if layers is None:
-            return None
-        if not self.roi_mode:
-            return _pack_stamps(layers, (self.height, self.width))
-        return _pack_union(layers[0].mask, self.union, (self.height, self.width))
+        return _paste(layers, (0, 0, self.width, self.height), scale)
 
     @property
     def has_blobs(self) -> bool:
-        self._resolve()
+        self._resolve_boost()
         return self._narrow is not None or self._wide is not None
 
     def packed_raw(self) -> Optional[PackedMask]:
         """The cleaned gated raw-motion mask, packed (None when it has no set pixel)."""
         self._resolve_raw()
-        if not self.roi_mode:
-            return self._raw_squeezed.packed(self._raw.mask) if self._raw_squeezed is not None else None
-        return _pack_union(self._raw.mask, self.union, (self.height, self.width))
+        if isinstance(self._raw_source, _SqueezedMask):
+            return _pack_box(self._raw.mask, self._raw_source.box)
+        if self.roi_mode:
+            return _pack_union(self._raw.mask, self.union, (self.height, self.width))
+        return None
 
     def packed_boost(self) -> Optional[PackedMask]:
         """The selector's boost mask (discs on the gated motion's ball-sized blobs), packed."""
-        self._resolve()
-        return self._pack(self._narrow)
+        self._resolve_boost()
+        if self._raw_source is None or self._narrow is None:
+            return None
+        return self._raw_source.pack_boost(self._narrow)
 
-    def deferred_boost(self) -> Union[PackedMask, DeferredBoost, None]:
-        """``packed_boost``, left for its first reader (a ``DeferredBoost``) while the components
-        are not filtered yet; None when there is no raw motion to filter."""
-        if self._resolved:
-            return self.packed_boost()
+    def store_boost(self, boost_masks: BoostMasks) -> None:
+        """Append the selector's boost mask to `boost_masks`: packed when the components are
+        filtered already, else left for its first reader (``BoostMasks.defer``), with its raw
+        motion packed (nothing of the download buffer is kept)."""
+        if self._boost_resolved:
+            boost_masks.append(self.packed_boost())
+            return
         self._resolve_raw()
-        if self.roi_mode:
-            if not cv2.countNonZero(self._raw.mask):
-                return None
-            crops: Optional[List[np.ndarray]] = [view.copy() for view in self._views[:len(self.boxes)]]
-            squeezed = None
+        if self._raw_source is None:
+            boost_masks.append(None)
         else:
-            if self._raw_squeezed is None:
-                return None
-            crops, squeezed = None, self._raw_squeezed
-            if not squeezed.image.flags.owndata:             # a view of the download buffer
-                squeezed = squeezed._replace(image=squeezed.image.copy())
-        return DeferredBoost((self.height, self.width), self.union, self.boxes, crops, squeezed, self.cfg)
+            boost_masks.defer(self._raw_source.deferred(self.cfg))
 
     def raw_u8(self) -> np.ndarray:
         """The cleaned gated raw-motion mask as a full-frame uint8 {0, 255} array."""
-        self._resolve()
+        self._resolve_raw()
         return self._full([self._raw], 255)
 
     def selector_boost_u8(self) -> Optional[np.ndarray]:
         """The selector's boost mask as a full-frame uint8 array; None when no blob survived."""
-        self._resolve()
+        self._resolve_boost()
         return self._full(self._narrow) if self._narrow is not None else None
 
     def detector_boost_u8(self) -> Optional[np.ndarray]:
         """The detector-input boost mask (from the ungated motion when it was downloaded, else the
         selector's), full-frame; None when no blob survived."""
-        self._resolve()
+        self._resolve_boost()
         source = self._wide if self._wide is not None else self._narrow
         return self._full(source) if source is not None else None
 
@@ -1176,8 +1289,9 @@ def preprocess_frame_cuda(window: FrameWindow, background: BackgroundModel, cfg:
     asynchronously (``MotionMasks``) unless the detector input needs them now.
     ``perf`` accumulates ``pre_cuda_total`` (all of the motion work, the
     host side of the masks included), ``pre_cuda_raw_d2h`` (waiting for the
-    masks' copy) and ``pre_cuda_cc_filter`` (their connected components)
-    seconds when given.  With ``kernels`` the masks are built by ``motion_gpu``'s kernels, which
+    masks' copy) and ``pre_cuda_cc_filter`` (the component filter of the
+    boosts filtered while the frame is in pass 1; a boost left to its first
+    reader is timed by ``BoostMasks.filter_seconds``) seconds when given.  With ``kernels`` the masks are built by ``motion_gpu``'s kernels, which
     give the same bits as the PyTorch ops in a few launches.
     """
     perf_t0 = time.perf_counter() if perf is not None else 0.0

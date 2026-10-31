@@ -81,8 +81,9 @@ def _no_rows() -> np.ndarray:
 
 
 def _postprocessed_rows(preds: EngineOutput, conf_threshold: float) -> np.ndarray:
-    """The engine's own NMS'd rows at or above ``conf_threshold``, as float64."""
-    rows = _host(preds).astype(np.float32)
+    """The engine's own NMS'd rows at or above ``conf_threshold``, as float64 (straight from the
+    engine's FP16 or FP32: every value of either is exact in float64)."""
+    rows = _host(preds)
     if rows.ndim == 3:
         rows = rows[0]
     if rows.ndim != 2 or rows.size == 0 or rows.shape[1] < POSTPROCESSED_COLUMNS:

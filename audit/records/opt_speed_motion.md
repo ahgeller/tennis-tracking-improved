@@ -30,12 +30,12 @@ base and on each tree; `frames` (with players and court keypoints), `tracks`, `c
 | tree | gate clips (2 models) | samples (2 models) |
 |---|---|---|
 | idea 1 (c9ecc05) | 48 / 48 equal | 4 / 4 equal |
-| all ideas (0c89deb, the code of 21f88bc) | 48 / 48 equal | 4 / 4 equal |
+| all ideas (21f88bc) | 48 / 48 equal | 4 / 4 equal |
 
 The motion diagnostics and player boxes of the sample JSONs are equal too, every timed run's
 tracking JSON (below) equals its base run's, and the `--video` runs' `tracking.mp4` are
-byte-identical to the base's. 21f88bc only drops a timer update from 0c89deb (see idea 2); its two
-pomona samples were checked again (section 5).
+byte-identical to the base's. These runs were made before 21f88bc dropped a timer update (see idea
+2), which changes no output; 21f88bc's two pomona samples were checked again (section 5).
 
 Gate, all trees (the base's numbers): shipped recall 0.952, FA 89/518 (79 bridged / 10 false),
 median 1.0 px; stream_s4 recall 0.953, FA 95/518 (79 / 16), median 1.0 px.
@@ -52,7 +52,8 @@ same engine file.
 
 `timing.py`: `clean_tracker.py --info` from each tree's `system/`, the trees and both models
 interleaved in one lock, a warm-up round then 3 timed rounds (order reversed each round), median
-[min-max] seconds. Trees: base f43218a, idea 1 c9ecc05, ideas 1+3 30a1f42, all 0c89deb.
+[min-max] seconds. Trees: base f43218a, idea 1 c9ecc05, ideas 1+3 30a1f42, all 21f88bc (before its
+timer fix, which changes no work).
 
 **pomona, `--no-video`** (no run left out)
 
@@ -177,12 +178,12 @@ None, as before.
 filtering of the frames it reads), so end to end it saves 0.05-0.5 s. The saving in pass 1 is larger
 than the unread frames' cost: the work that moved runs faster in the selector than in pass 1 (see
 idea 3: pass 1's host work runs about twice as slow as the same work alone). The `pre(cuda cc)`
-row now covers only frames filtered in pass 1 and is absent from the normal runs above. 0c89deb
-also added the deferred filter's time to pass 1's perf dict after pass 1 had reported it; 21f88bc
-drops that (nothing read it). Tests: a deferred boost resolves to `packed_boost` bit for bit for
+row now covers only frames filtered in pass 1 and is absent from the normal runs above. The first
+version also added the deferred filter's time to pass 1's perf dict after pass 1 had reported it;
+21f88bc drops that (nothing read it). Tests: a deferred boost resolves to `packed_boost` bit for bit for
 overlapping ROIs whose crops disagree in the overlap, three scattered whole frames with a wide
-mask and a dense whole frame (where the squeezed image is a view, so it must be copied), and keeps
-no view of the download buffer; nothing is deferred without raw motion; `BoostMasks` filters an
+mask and a dense whole frame (where the squeezed image is a view of the box), and keeps no view of
+the download buffer; nothing is deferred without raw motion; `BoostMasks` filters an
 entry once, on first read, and supports slicing, iteration and assignment. Dropping the cache, the
 crop copy or the view copy each fail them.
 
