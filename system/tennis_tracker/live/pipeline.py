@@ -73,7 +73,7 @@ class LiveOptions:
 
     delay_s: Optional[float] = 0.5
     history_s: float = 1.0
-    every_s: float = 0.1
+    every_s: float = 0.2
     pacing: str = "realtime"
     drop: DropPolicy = DropPolicy.BACKLOG
     max_backlog_s: float = 0.25
@@ -127,6 +127,9 @@ class LiveStats:
             "frames": self.frames, "dropped": len(self.dropped), "dropped_frames": self.dropped,
             "flushed_at_end": self.flushed_at_end, "latency": quantiles(self.latencies_s),
             "evidence_latency": quantiles(self.evidence_latencies_s),
+            # The latency spikes: the processed frames pass 1 committed latest after they arrived.
+            "slowest_evidence": [{"frame": int(index), "ms": 1000 * self.evidence_latencies_s[index]}
+                                 for index in np.argsort(self.evidence_latencies_s)[::-1][:10]],
             "selector_runs": self.selector_runs,
             "selector_ms_per_run": 1000 * float(np.mean(self.run_seconds)) if self.run_seconds else None,
             "selector_p99_ms": 1000 * float(np.quantile(self.run_seconds, 0.99)) if self.run_seconds else None,
