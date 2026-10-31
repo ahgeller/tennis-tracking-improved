@@ -30,9 +30,11 @@ class Config:
     # Where the five-frame prepass runs: "foreground" (before pass 1, alone), "thread" (a worker thread,
     # beside pass 1), "process" (a child process, engines/ball_prepass_process.py, beside pass 1 and from
     # the start of init) or "auto": the process for a network that streams (stream_s4 with
-    # ball_prepass_streaming), the foreground for the others. Measured in audit/records/opt_abplus_s4.md:
-    # the streamed prepass in the child saves its time end to end; the windowed heatmap_s4 prepass, ~4 s,
-    # slowed pass 1 by more than that beside it (opt_ball_prepass.md item 3, opt_abplus.md item 3).
+    # ball_prepass_streaming), the foreground for the others. The answers are the same in every mode.
+    # In the child, stream_s4's prepass leaves init (1.0 to 2.4 s shorter than heatmap_s4's foreground
+    # one, audit/records/opt_abplus_s4.md) and costs pass 1 up to 0.4 s beside it; the windowed
+    # heatmap_s4 prepass, ~4 s, slowed pass 1 by more than that (opt_ball_prepass.md item 3,
+    # opt_abplus.md item 3).
     ball_prepass_mode: str = "auto"
     # Frames of a phase between one five-frame unit's start and the next: 1 starts a unit at every
     # frame and averages the up-to-five answers each frame gets (the default since 2026-10-26: on
