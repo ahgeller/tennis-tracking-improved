@@ -8,7 +8,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, overload
+from typing import Any, Dict, List, Optional, Sequence, Tuple, overload
 
 import cv2
 import numpy as np
@@ -378,8 +378,8 @@ def _motion_diagnostic_reason(
 def build_motion_diagnostics(
     per_frame: List[Optional[FrameResult]],
     detections_by_frame: List[List[RawDetection]],
-    boost_masks: List[Optional[PackedMask]],
-    raw_motions: List[Optional[PackedMask]],
+    boost_masks: Sequence[Optional[PackedMask]],
+    raw_motions: Sequence[Optional[PackedMask]],
     width: int,
     height: int,
     max_candidates_per_frame: int = _MAX_CANDIDATES_PER_FRAME,
