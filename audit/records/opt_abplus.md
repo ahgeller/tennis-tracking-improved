@@ -343,3 +343,64 @@ stream_s4.
 - The child-process prepass for stream_s4 (item 3, 0.9 s) if stream_s4 ships.
 - In-pipeline host costs are inflated about 3x over their isolated cost (player box decode 0.18 ms
   alone, 0.67 ms in pass 1) by contention with the reader thread; unexplained in detail.
+
+## Speed round merged (2026-10-31)
+
+What came in, on `phase-ABplus-heatmap` from f43218a:
+
+- 77669c2, merge of `speed-motion` (c9ecc05, 1d637ec, 30a1f42, a47c753, 21f88bc, 44ddbeb; record
+  `opt_speed_motion.md`): whole-frame motion masks squeezed and packed without a frame scan, the
+  player head decoded channel by channel and copied to pinned memory on the engine's stream, the
+  boost's component filter left to its first reader. Output-identical. This closes open issues 1
+  (CC and packing on demand) and 4 (pass 1 host overhead) above.
+- ae39290, merge of `speed-players` (9280805, 3739a92; record `opt_speed_players.md`): the record,
+  and the onnx skip in `test_ball_trt.py`, which both speed branches had added; one line kept,
+  the one `phase-ABplus-s4` carries (4a21ee3).
+- 16dcad9: player detection every other frame on 60 FPS clips (`Config.player_every_other_frame_fps
+  = 55.0`, 0 or `clean_tracker.py --players-every-frame` turns it off), the speed-players idea 2
+  patch. It failed that round's strict landing rule on stream_s4 and ships by the owner's decision;
+  `opt_speed_players.md` has the decision and its cost. This answers open issue 2 (no exact schedule
+  exists; this one is not exact). Idea 3 (deferred boxmot import) is not merged: it saved nothing.
+- 8cce6a0: a README typo. a5a5bfb: `tools/link_worktree_data.py` copies `system/models/candidates`
+  and `system/models/engine_cache` from this worktree (the reference) into a new one, so stream_s4
+  outputs compare across worktrees on the same engine (the trap in `opt_speed_motion.md`).
+  c2b75f3: the legacy ONNX exporter's deprecation notice (the 4 warnings of the `tennis-opt`
+  suite) is filtered where the export chooses that exporter; the engines are unchanged.
+
+Verified at the merged tree (stream_s4 on this tree's own engine, the reference build):
+
+- **Identity.** The gate (`--court`, both models) and the pomona, VolyAvw and PomonaPitzer samples
+  (`--court`, both models): all 48 gate clips and 6 sample runs equal, JSON for JSON (`frames`
+  with players and court, `tracks`, `chosen_track`, `court_events`), to the speed-players round's
+  idea-2 runs on f43218a, so
+  the merge adds nothing beyond speed-motion's identical changes and idea 2. Against f43218a itself:
+  ball rows equal on all 14 held-out 30 FPS clips and all 10 60 FPS clips, both models; the 30 FPS
+  clips' player boxes, tracks and court events are equal too once player ids are renumbered by first
+  appearance (ByteTrack's id counter is process-global, and the 60 FPS clips before them now create
+  a different number of tracks).
+- **Gate** (`evaluate_archive.py --archive finetune --mode pipeline --holdout mixed_v1`, recall /
+  FA (bridged / false) / custom grid prof / median): shipped 0.952 / 89 (79/10) / .966 .896 .962 /
+  1.0 px; stream_s4 (`--gridtracknet-weights system/models/candidates/stream_s4_e60.pt
+  --gridtracknet-conf 0.42`) 0.953 / 95 (79/16) / .971 .913 .952 / 1.0 px. Both equal f43218a's.
+- **Off court** (`tools/off_court.py`, present / off): pomona 1075 / 0 and 1090 / 0, VolyAvw
+  2578 / 0 and 2453 / 0, PomonaPitzer 3108 / 0 and 3142 / 0 (shipped and stream_s4). VolyAvw
+  stream_s4's 2453 is idea 2's (2457 before), the other five equal f43218a's.
+- **Suites**: `system/` 652 passed in `tennis-opt` (no warning after c2b75f3), 641 passed and 11 skipped in `tennis-analysis`;
+  the root suite 1377 passed, 11 skipped; mypy clean in `system/` (20 files) and at the root.
+
+Timing, `clean_tracker.py --info --no-video`, f43218a (`phases/speed_motion_base`) against the
+merge, both models, interleaved in one lock (a warm-up round, 3 timed rounds, the order reversed
+each round, no run flagged by the CPU and GPU neighbour check), median [min-max] s:
+
+| | f43218a shipped | merged shipped | f43218a stream_s4 | merged stream_s4 |
+|---|---|---|---|---|
+| pomona total | 11.90 [11.80-12.50] | **9.80** [9.60-9.90] | 12.20 [12.00-12.20] | **9.60** [9.50-10.00] |
+| - pass 1 | 6.04 | 3.89 | 6.55 | 3.93 |
+| - pass 1 aux wait (player d2h) | 2.53 | 1.44 | 2.52 | 1.40 |
+| VolyAvw total | 18.00 [18.00-18.10] | **15.20** [14.80-15.20] | 17.10 [16.90-17.10] | **13.90** [13.80-14.10] |
+| - pass 1 | 10.13 | 6.87 | 10.30 | 6.86 |
+| - pass 1 aux wait (player d2h) | 4.97 | 2.70 | 4.98 | 2.65 |
+
+Pass 1 is 36-40% faster on pomona and 32-33% on VolyAvw; end to end 18-21% and 16-19%. The
+selector grows by 0.06-0.08 s on pomona and 0.30-0.34 s on VolyAvw (the deferred filter runs
+there).
