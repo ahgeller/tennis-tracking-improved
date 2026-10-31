@@ -3,13 +3,12 @@ the court, each from its own scorer, on the same clips.
 
     python score_labels.py --out-dir output/label_candidates [--holdout mixed_v1] [--only hits rallies]
 
-The run folder is ``evaluate_archive.py --mode pipeline --court --out-dir <folder>``'s. The labels
-are read from the label home (``workspace.label_home``) unless ``--archive`` says otherwise, the
-landing scorer's included, so every section reads the labels the label tool writes. A type nobody
-has labelled yet says so and the rest carry on (the landing scorer counts that as a failure of
-its own: it is listed at the end, and nothing else is affected). For ``--compare``, run a type's
-scorer alone (``python -m finetune.scoring.<type>_score``) and give it an earlier log of that
-scorer.
+The run folder is ``evaluate_archive.py --mode pipeline --court --out-dir <folder>``'s. Every section
+reads its labels by the one rule of ``label_scoring`` (the label home's, ``workspace.label_home``,
+unless ``--archive`` says otherwise), so each reads the labels the label tool writes. A type nobody
+has labelled yet says so and the rest carry on; a section that fails (a clip's run missing) is
+listed at the end, and nothing else is affected. For ``--compare``, run a type's scorer alone
+(``python -m finetune.scoring.<type>_score``) and give it an earlier log of that scorer.
 """
 from __future__ import annotations
 

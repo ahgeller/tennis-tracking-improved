@@ -242,13 +242,14 @@ def test_a_missing_run_is_an_error_naming_it(tmp_path, capsys):
 
 def test_the_scorecard_runs_every_section_and_names_the_ones_that_failed(tmp_path, capsys):
     archive = archive_with(tmp_path, hits="frame,ball_x,ball_y,hitter\nframe_100,,,near\n")
+    (archive / "labels" / "video2_rallies.csv").write_text("start,end\nframe_090,frame_400\n", encoding="utf-8")
     out = write_run(tmp_path, contacts=[{"frame": 100, "x": 1, "y": 2, "player_id": 9, "score": 5.0, "source": "kink"}])
-    assert scorecard.main(["--archive", str(archive), "--out-dir", str(out)]) == 1       # no landing labels: its own failure
+    assert scorecard.main(["--archive", str(archive), "--out-dir", str(out)]) == 1       # video2 was not run
     text = capsys.readouterr().out
     for name in ("landings", "hits", "rallies", "players", "court"):
         assert f"######## {name} ########" in text
-    assert "precision=1.000 recall=1.000" in text and "has rally labels" in text
-    assert "[scorecard] failed: landings" in text
+    assert "precision=1.000 recall=1.000" in text and "has landing labels" in text and "has court labels" in text
+    assert "[scorecard] failed: rallies" in text                                    # nothing labelled is not a failure
     assert scorecard.main(["--archive", str(archive), "--out-dir", str(out), "--only", "hits", "court"]) == 0
 
 
@@ -256,3 +257,43 @@ def test_the_new_scorers_read_the_label_home_by_default(monkeypatch, tmp_path):
     from finetune.data import workspace
     monkeypatch.setattr(workspace, "label_home", lambda: tmp_path / "main" / "finetune" / "labels")
     assert label_scoring.label_archive() == tmp_path / "main" / "finetune"
+
+
+
+def test_one_label_source_rule_the_ball_review_gates_only_the_points_borrowed_from_the_ball_labels(tmp_path, capsys):
+    """Every scorer, the landing scorer's included, reads a clip's labels of its type unless the clip
+    is in exclude.txt. Whether its ball labels were reviewed holds back only the points a landing or
+    a hit borrows from them, and a clip needs no ball labels at all for its other labels to count."""
+    from finetune.data import workspace as ws
+    from finetune.scoring import court_events_score
+    archive = archive_with(tmp_path, hits="frame,ball_x,ball_y,hitter\nframe_100,,,near\n",
+                           bounces="frame,ball_x,ball_y\nframe_100,,\n")
+    labels = archive / "labels"
+    (archive / "review_status.json").write_text(json.dumps({"verified_clips": []}), encoding="utf-8")
+    (labels / "video2_court.csv").write_text("frame,point,x,y\nframe_000,far_left,10,10\n", encoding="utf-8")
+    assert label_scoring.labelled_clips(None, archive, False, None, ws.hits_csv) == [
+        ("video1", None, labels / "video1_hits.csv")]                         # scored; its ball labels lend no point
+    assert "video1: its ball labels are still under review" in capsys.readouterr().out
+    assert [clip for clip, _, _ in label_scoring.labelled_clips(None, archive, False, None, ws.court_csv)] == ["video2"]
+    assert label_scoring.labelled_clips(None, archive, True, None, ws.hits_csv) == [
+        ("video1", labels / "video1_ball.csv", labels / "video1_hits.csv")]
+    (archive / "exclude.txt").write_text("video1\n", encoding="utf-8")
+    assert label_scoring.labelled_clips(None, archive, False, None, ws.bounce_csv) == []
+    assert "[skip] video1: listed in exclude.txt" in capsys.readouterr().out
+    (archive / "exclude.txt").unlink()
+    out = write_run(tmp_path, contacts=[{"frame": 100, "x": 1, "y": 2, "player_id": 9, "score": 5.0, "source": "kink"}],
+                    bounces=[{"frame": 100, "x": 100.0, "y": 200.0, "score": 0.9, "origin": "model", "position": "filtered"}])
+    assert hits_score.main(["--archive", str(archive), "--out-dir", str(out)]) == 0
+    assert "precision=1.000 recall=1.000" in capsys.readouterr().out
+    assert court_events_score.main(["--archive", str(archive), "--out-dir", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "recall=1.000" in text and "px med=  n/a" in text                   # its point was not borrowed
+
+
+def test_the_landing_scorer_reads_the_label_home_and_says_so_when_nothing_is_labelled(monkeypatch, tmp_path, capsys):
+    from finetune.data import workspace
+    from finetune.scoring import court_events_score
+    archive = archive_with(tmp_path)
+    monkeypatch.setattr(workspace, "label_home", lambda: archive / "labels")
+    assert court_events_score.main(["--out-dir", str(tmp_path / "run")]) == 0
+    assert f"no scorable clip in {archive} has landing labels (labels/<clip>_bounces.csv)" in capsys.readouterr().out

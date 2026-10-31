@@ -302,7 +302,11 @@ python -m finetune.scoring.hits_score --out-dir <run> --compare before.log  # on
 (`players_score`) and court (`court_score`) scorers on one pipeline run folder, each
 on the clips with labels of its type, and says so for a type nobody has labelled
 yet. Every scorer takes `--clips`, `--holdout`, `--include-excluded`, `--models` and
-`--compare`, and reads the label home unless `--archive` says otherwise:
+`--compare`, and reads its labels by one rule (`finetune/scoring/label_scoring.py`):
+the label home unless `--archive` says otherwise, every clip with that type's file
+except those in `exclude.txt`. Whether a clip's ball labels have been reviewed only
+decides whether a landing or hit without its own point may take one from them (it
+is still scored for its timing); it never holds the clip's other labels back.
 
 - hits: precision, recall, timing error in frames (median and p90), hitter
   accuracy, contact point error in pixels at 1080p;
@@ -311,7 +315,9 @@ yet. Every scorer takes `--clips`, `--holdout`, `--include-excluded`, `--models`
 - player identity: coverage of the labelled player boxes, the share of them on the
   track given that player (each track one player, each player one track, over the
   whole clip), identity switches, spectators taken for players;
-- court: keypoint error in pixels at 1080p and on the court plane in metres.
+- court: keypoint error in pixels at 1080p and on the court plane in metres, the
+  metres only on frames whose labelled points pin the plane down (`no_plane`
+  counts the others, and a note under the clip says why).
 
 ## `--uncertain`
 

@@ -23,9 +23,7 @@ the engine does not give them, so they are counted (``posts``) and not scored.
 """
 from __future__ import annotations
 
-import argparse
 import math
-import sys
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Sequence, Tuple
 
@@ -36,8 +34,7 @@ from finetune.data import workspace as ws
 from finetune.data.court_labels import (COURT_LENGTH_M, COURT_METRES, DOUBLES_WIDTH_M, GROUND_POINTS, CourtLabel, CourtPoints,
                                         engine_points, read_court_labels)
 from finetune.data.detector_metrics import scale_for_width
-from finetune.scoring.label_scoring import (ALL, LabelledClip, add_run_arguments, finish, label_archive, labelled_clips,
-                                            median, metric, metric_line, no_labels, percentile, share)
+from finetune.scoring.label_scoring import (ALL, LabelledClip, median, metric, metric_line, percentile, run_scorer, share)
 from finetune.scoring.tracker_events import court_keypoints_by_frame, read_run, run_json
 
 KEYS = ("found", "px_med", "px_p90", "m_med", "m_p90")
@@ -151,20 +148,8 @@ def score_run(clips: Sequence[LabelledClip], out_dir: Path, model: str) -> List[
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    add_run_arguments(parser)
-    args = parser.parse_args(argv)
-    archive = args.archive or label_archive()
-    clips = labelled_clips(args.clips, archive, args.include_excluded, args.holdout, ws.court_csv)
-    if not clips:
-        return no_labels("court", archive, "labels/<clip>_court.csv")
-    print(f"[archive] {archive}  ({len(clips)} clip{'' if len(clips) == 1 else 's'} with court labels: {', '.join(clip for clip, _, _ in clips)})")
-    try:
-        lines = [line for model in args.models for line in score_run(clips, args.out_dir, model)]
-    except (FileNotFoundError, ValueError) as error:
-        print(error, file=sys.stderr)
-        return 1
-    return finish(lines, args.compare, KEYS)
+    return run_scorer(argv, __doc__ or "", "court", ws.court_csv,
+                      lambda clips, out_dir, model, args: score_run(clips, out_dir, model), KEYS)
 
 
 if __name__ == "__main__":

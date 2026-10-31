@@ -20,8 +20,6 @@ tracker split over three ids is right on one of them only). Per clip and pooled:
 """
 from __future__ import annotations
 
-import argparse
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
@@ -31,8 +29,7 @@ from scipy.optimize import linear_sum_assignment
 
 from finetune.data import workspace as ws
 from finetune.data.player_labels import MATCH_IOU, NOT_PLAYER, PLAYERS, PlayerBoxLabel, match_frame, read_player_labels
-from finetune.scoring.label_scoring import (ALL, LabelledClip, add_run_arguments, finish, label_archive, labelled_clips,
-                                            metric, metric_line, no_labels, share)
+from finetune.scoring.label_scoring import (ALL, LabelledClip, metric, metric_line, run_scorer, share)
 from finetune.scoring.tracker_events import player_boxes_by_frame, read_run, run_json
 
 KEYS = ("coverage", "identity", "switches", "non_players")
@@ -116,20 +113,8 @@ def score_run(clips: Sequence[LabelledClip], out_dir: Path, model: str) -> List[
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    add_run_arguments(parser)
-    args = parser.parse_args(argv)
-    archive = args.archive or label_archive()
-    clips = labelled_clips(args.clips, archive, args.include_excluded, args.holdout, ws.players_csv)
-    if not clips:
-        return no_labels("player identity", archive, "labels/<clip>_players.csv")
-    print(f"[archive] {archive}  ({len(clips)} clip{'' if len(clips) == 1 else 's'} with player labels: {', '.join(clip for clip, _, _ in clips)})")
-    try:
-        lines = [line for model in args.models for line in score_run(clips, args.out_dir, model)]
-    except (FileNotFoundError, ValueError) as error:
-        print(error, file=sys.stderr)
-        return 1
-    return finish(lines, args.compare, KEYS)
+    return run_scorer(argv, __doc__ or "", "player", ws.players_csv,
+                      lambda clips, out_dir, model, args: score_run(clips, out_dir, model), KEYS)
 
 
 if __name__ == "__main__":

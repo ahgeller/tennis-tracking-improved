@@ -9,7 +9,7 @@ candidates to confirm or reject (``finetune.labeling.label_candidates``), and th
 So the tracker's answer is turned into events here, once, for both.
 
 - Landings: every landing of every list, as the landing scorer's ``all`` tier keeps them
-  (``court_events_score.landings_at_tier``).
+  (``landings_at_tier``, whose tiers the landing scorer offers: ``court_events_score``).
 - Hits: the racket contacts (``court_events.contacts``), each with the side of the court its
   player stands on (``court_side``: the contact is anchored at the player's feet).
 - Rallies: the rally legs grouped into rallies (``rallies_from_legs``): a serve leg, or a leg
@@ -25,10 +25,10 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple, cast
 
 from finetune.data.event_labels import Hitter
-from finetune.scoring.court_events_score import landings_at_tier
 from tennis_tracker.court.court_geometry import NET_V, build_ground_projection_model, homography_apply
-from tennis_tracker.court.court_scene import BounceEvent, seconds_to_frames
-from tennis_tracker.tracking_schema import CourtEventsJson, FrameRow, RallyLegJson, TrackingJson
+from tennis_tracker.court.court_scene import EVENT_MERGE_S, BounceEvent, seconds_to_frames
+from tennis_tracker.court.rally_legs import inferred_landings
+from tennis_tracker.tracking_schema import BounceEventJson, CourtEventsJson, FrameRow, RallyLegJson, TrackingJson
 
 RUN_MODEL = "gridtracknet"      # the model name evaluate_archive.py writes into the JSON names by default
 RALLY_GAP_S = 2.5               # a leg starting this long after the last one ended starts a new rally
@@ -46,6 +46,43 @@ class TrackerHit(NamedTuple):
     source: str
     hitter: Optional[Hitter]
     ball: Optional[Tuple[float, float]] = None
+
+
+TIERS = ("confirmed", "placed", "all")     # the landing tiers (landings_at_tier)
+
+
+# --------------------------------------------------------------------------- landings
+
+def bounce_from_json(row: BounceEventJson) -> BounceEvent:
+    return BounceEvent(int(row["frame"]), float(row["x"]), float(row["y"]), float(row["score"]),
+                       row["origin"], row["position"])
+
+
+def without_repeats(events: Sequence[BounceEvent], fps: float) -> List[BounceEvent]:
+    """``events`` in the order given, dropping each one within ``EVENT_MERGE_S`` of one already kept."""
+    merge = seconds_to_frames(EVENT_MERGE_S, fps)
+    kept: List[BounceEvent] = []
+    for event in events:
+        if not any(abs(event.frame - other.frame) <= merge for other in kept):
+            kept.append(event)
+    return kept
+
+
+def landings_at_tier(block: CourtEventsJson, tier: str, fps: float) -> List[BounceEvent]:
+    """The block's landings the tier admits, in frame order (the tiers: ``court_events_score``)."""
+    confirmed = [bounce_from_json(row) for row in block.get("bounces", [])]
+    candidates = [bounce_from_json(row) for row in block.get("bounce_candidates", [])]
+    kinematic = [bounce_from_json(row) for row in block.get("kinematic_bounces", [])]
+    if tier == "confirmed":
+        landings = list(confirmed)
+    elif tier == "placed":
+        landings = confirmed + inferred_landings(confirmed, candidates, kinematic, fps)
+    elif tier == "all":
+        inferred = sorted(candidates + kinematic, key=lambda event: -event.score)
+        landings = without_repeats(confirmed + inferred, fps)
+    else:
+        raise ValueError(f"unknown tier {tier!r}; expected one of {', '.join(TIERS)}")
+    return sorted(landings, key=lambda event: event.frame)
 
 
 def run_json(out_dir: Path, clip: str, model: str = RUN_MODEL) -> Path:

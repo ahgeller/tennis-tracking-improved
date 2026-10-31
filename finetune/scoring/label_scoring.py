@@ -1,14 +1,23 @@
-"""What the scorers of the new label types share: the command line, the clips that have labels of a
+"""What the label scorers share: the command line (``run_scorer``), the clips that have labels of a
 type, the metric lines and comparing two logs of them.
 
-The hit, rally, player and court scorers (``hits_score``, ``rallies_score``, ``players_score``,
-``court_score``) follow the landing scorer's conventions (``court_events_score``): a pipeline run's
-folder of tracking JSONs (``--out-dir``, written by ``evaluate_archive.py --mode pipeline --court``),
-the archive's scorable clips narrowed by ``--clips`` and ``--holdout``, one metric line per clip and a
-pooled ``ALL`` line, and ``--compare before.log`` for the deltas against an earlier log.
+The landing, hit, rally, player and court scorers (``court_events_score``, ``hits_score``,
+``rallies_score``, ``players_score``, ``court_score``) each score a pipeline run's folder of
+tracking JSONs (``--out-dir``, written by ``evaluate_archive.py --mode pipeline --court``), one
+metric line per clip and a pooled ``ALL`` line, with ``--compare before.log`` for the deltas
+against an earlier log.
 
-Their archive defaults to the label home's (``workspace.label_home``): the main checkout's labels,
-which is where the label tool writes, even when a scorer runs from a worktree.
+Which labels they score is one rule for all five (``labelled_clips``):
+
+- the archive is ``--archive``, else the label home's (``workspace.label_home``): the main
+  checkout's labels, where the label tool writes, even when a scorer runs from a worktree;
+- a clip is scored for a type when it has that type's label file, narrowed by ``--clips`` and
+  ``--holdout``, unless it is listed in exclude.txt (``--include-excluded`` scores it anyway);
+- whether its ball labels have been reviewed (``verified_clips`` in the review policy) is about the
+  ball labels alone. It does not hold the clip's other labels back, and a clip needs no ball labels
+  for them to count. It only decides whether a landing or a hit without a point of its own may
+  borrow one from the ball labels (``LabelledClip``'s ball path is None when it may not): such a
+  label is then still scored for its timing, and left out of the pixel error.
 
 A metric line is the clip's name and then ``key=value`` pairs, some values with a unit
 (``0.913``, ``2.0fr``, ``0.41s``, ``3.2px``, ``0.08m``) or ``n/a``; ``read_metric_lines`` reads any of
@@ -17,6 +26,7 @@ them back, so one ``compare`` serves every scorer.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import math
 import re
 import statistics
@@ -25,7 +35,10 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from finetune.data import workspace as ws
-from finetune.scoring.archive import archive_folders, list_clips
+from finetune.data.data_policy import is_verified, read_review_status
+from finetune.data.holdouts import holdout_clips
+from finetune.data.labels import Labels, read_labels
+from finetune.scoring.archive import archive_folders
 from finetune.scoring.tracker_events import RUN_MODEL
 
 ALL = "ALL"
@@ -33,7 +46,10 @@ NAME_WIDTH = 14
 METRIC = re.compile(r"(?P<key>[a-z_@.0-9]+)=\s*(?P<value>-?[\d.]+|n/a)(?P<unit>fr|ms|px|m|s)?")
 
 Metrics = Dict[str, Optional[float]]
-LabelledClip = Tuple[str, Path, Path]      # (clip, ball label csv, the type's label file)
+# (clip, its ball labels when points may be borrowed from them (None: unreviewed, or none), the type's label file)
+LabelledClip = Tuple[str, Optional[Path], Path]
+LabelPath = Callable[[str, Path], Path]    # clip, labels folder -> the type's label file (workspace.hits_csv)
+ScoreRun = Callable[[Sequence[LabelledClip], Path, str, argparse.Namespace], List[str]]
 
 
 def label_archive() -> Path:
@@ -57,15 +73,62 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def labelled_clips(names: Optional[List[str]], archive: Path, include_excluded: bool, holdout: Optional[str],
-                   label_path: Callable[[str, Path], Path]) -> List[LabelledClip]:
-    """(clip, ball labels, the type's labels) for every scorable clip that has the type's label file."""
+                   label_path: LabelPath) -> List[LabelledClip]:
+    """Every clip with the type's label file that may be scored, by the rule of the module
+    docstring, in natural order; the clips left out, and those whose ball labels lend no point,
+    said on a ``[skip]`` or ``[note]`` line."""
     label_dir, _ = archive_folders(archive)
-    found = []
-    for video, csv_path in list_clips(names, archive, include_excluded, holdout):
-        path = label_path(video.stem, label_dir)
-        if path.is_file():
-            found.append((video.stem, csv_path, path))
+    suffix = label_path("", label_dir).name
+    clips = sorted((path.name[:-len(suffix)] for path in label_dir.glob(f"*{suffix}")), key=ws.natural_key)
+    if names:
+        clips = [clip for clip in clips if any(fnmatch.fnmatchcase(clip, pattern) for pattern in names)]
+    if holdout:
+        held_out = set(holdout_clips(holdout, clips, ws.read_manifest(archive / ws.MANIFEST_NAME), archive / ws.HOLDOUTS_NAME))
+        clips = [clip for clip in clips if clip in held_out]
+    excluded = set(ws.read_exclusions(archive))
+    status = read_review_status(archive)
+    found: List[LabelledClip] = []
+    for clip in clips:
+        if clip in excluded and not include_excluded:
+            print(f"[skip] {clip}: listed in exclude.txt")
+            continue
+        ball = ws.label_csv(clip, label_dir)
+        lends = ball.is_file() and (include_excluded or is_verified(clip, status))
+        if ball.is_file() and not lends:
+            print(f"[note] {clip}: its ball labels are still under review, so no point is borrowed from them")
+        found.append((clip, ball if lends else None, label_path(clip, label_dir)))
     return found
+
+
+def ball_labels(path: Optional[Path], width: int, height: int) -> Labels:
+    """A clip's ball labels for the points its landings or hits borrow; none when it may lend none."""
+    return read_labels(path, width, height) if path is not None else {}
+
+
+def run_scorer(argv: Optional[Sequence[str]], description: str, kind: str, label_path: LabelPath, score_run: ScoreRun,
+               keys: Sequence[str] = (), add_arguments: Optional[Callable[[argparse.ArgumentParser], None]] = None,
+               report: Optional[Callable[[List[str], argparse.Namespace], int]] = None) -> int:
+    """A scorer's command: its arguments (``add_run_arguments`` and `add_arguments`), the clips with
+    `kind` labels (``labelled_clips``), `score_run` per model, then `report` (by default the lines
+    printed and ``--compare`` read back with ``read_metric_lines`` for `keys`). A missing or
+    unreadable run is 1, with the error; no clip labelled is a note, and 0."""
+    parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_run_arguments(parser)
+    if add_arguments is not None:
+        add_arguments(parser)
+    args = parser.parse_args(argv)
+    archive = args.archive or label_archive()
+    clips = labelled_clips(args.clips, archive, args.include_excluded, args.holdout, label_path)
+    if not clips:
+        return no_labels(kind, archive, label_path("<clip>", Path("labels")).as_posix())
+    print(f"[archive] {archive}  ({len(clips)} clip{'' if len(clips) == 1 else 's'} with {kind} labels: "
+          f"{', '.join(clip for clip, _, _ in clips)})")
+    try:
+        lines = [line for model in args.models for line in score_run(clips, args.out_dir, model, args)]
+    except (FileNotFoundError, ValueError) as error:
+        print(error, file=sys.stderr)
+        return 1
+    return report(lines, args) if report is not None else finish(lines, args.compare, keys)
 
 
 # --------------------------------------------------------------------------- numbers

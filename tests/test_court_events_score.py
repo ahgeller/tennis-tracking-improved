@@ -183,8 +183,8 @@ def test_main_refuses_a_run_without_court_events_or_without_the_json(tmp_path, c
     _write_json(out, _payload([]))                                         # written without --court
     assert scorer.main(["--archive", str(archive), "--out-dir", str(out)]) == 1
     assert "has no court events" in capsys.readouterr().err
-    assert scorer.main(["--archive", str(archive), "--out-dir", str(out), "--clips", "video2"]) == 1
-    assert "No clip in" in capsys.readouterr().out
+    assert scorer.main(["--archive", str(archive), "--out-dir", str(out), "--clips", "video2"]) == 0   # nothing to score
+    assert "has landing labels (labels/<clip>_bounces.csv) yet: nothing to score" in capsys.readouterr().out
 
 
 def test_main_compares_against_an_earlier_log(tmp_path, capsys):
