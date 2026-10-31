@@ -404,3 +404,61 @@ each round, no run flagged by the CPU and GPU neighbour check), median [min-max]
 Pass 1 is 36-40% faster on pomona and 32-33% on VolyAvw; end to end 18-21% and 16-19%. The
 selector grows by 0.06-0.08 s on pomona and 0.30-0.34 s on VolyAvw (the deferred filter runs
 there).
+
+### Review fixes (2026-10-31)
+
+On top of the merge, from the review of the speed round:
+
+- 4861f5a: `test_engine_io`'s player-buffer test failed after `test_player_detector` (it kept the
+  cached absence of boxmot those tests leave). Both now clear and restore the import cache through
+  `monkeypatch`; `pytest tests/test_player_detector.py tests/test_engine_io.py` passes in that order.
+- 2ad70fc: OpenCV 4.9's `cv2.boundingRect` on a mask can return a box a column or two too narrow
+  when every set pixel lies in the first three columns, depending on the buffer address mod 4
+  (reproduced: 99 of 4000 random misaligned masks). `filter_boost_mask` runs it on ROI crops of
+  the download buffer; `PackedMask.pack`'s fallback box had the same scan. Both take the box from
+  `np.any` over rows, then columns, with a regression test on a misaligned buffer each. **Changed
+  frames: none.** Both gates (48 clips) and the six samples are JSON-equal to the runs before it.
+- 86955b2: a pending boost held its raw motion unpacked, and nearly every frame is held until the
+  selector runs. It now holds it packed (`np.packbits` with the shapes; ROI and whole-frame
+  variants split, both a `PendingBoost`), `BoostMasks` keeps the pending frames apart and filters
+  a frame at once past `DEFERRED_BOOST_BUDGET_BYTES` (256 MiB), and the filter's time is the new
+  `selector boost cc` row. One object (`_RoiCrops` or `_SqueezedMask`) filters and packs for both
+  `packed_boost` and the pending boost. Outputs unchanged (the reviewer's 3000-case fuzz: 0
+  mismatches, against 7 before 2ad70fc).
+- 746c5bf: the ONNX export's warning filters name the two notices (no module-wide filter);
+  `test_ball_trt` passes under `-W error::DeprecationWarning`. 4e02656: `effective_player_interval`,
+  the `--players-every-frame` help, the stale comments, FP16 rows straight to float64, test fixes.
+  37c592d, b0a952a: AGENTS.md and the speed-motion record.
+
+Memory, `--no-video`, shipped model (the bytes the pending boosts hold when the selector starts,
+and the process's peak working set):
+
+| clip | pending before | pending after | peak before | peak after |
+|---|---|---|---|---|
+| pomona (2022 frames) | 108.3 MB | **13.8 MB** | 2021 MB | 1929 MB |
+| Vereinsduell, first 6000 frames | 398.0 MB | **51.4 MB** | 2416 MB | 2075 MB |
+
+About 8 KB a frame now (66 KB before): the full Vereinsduell would hold about 0.4 GB instead of
+3.3 GB, and a longer clip stops growing at the 256 MiB budget.
+
+Verified at 37c592d (b0a952a after it is the record only):
+
+- Gate, both models: 0.952 / 89 (79/10) and 0.953 / 95 (79/16), all 24 clips each JSON-equal to
+  the merge's. Samples (`--court`, both models) JSON-equal; off court unchanged (pomona 1075 / 0
+  and 1090 / 0, VolyAvw 2578 / 0 and 2453 / 0, PomonaPitzer 3108 / 0 and 3142 / 0).
+- Suites: `system/` 660 passed (`tennis-opt`), 649 passed and 11 skipped (`tennis-analysis`); root
+  1385 passed, 11 skipped; mypy clean in both.
+
+Timing, as above (f43218a, the merge a4aebbc, the fixes 37c592d interleaved, 3 timed rounds, no run
+flagged), total median [min-max] s:
+
+| | f43218a | a4aebbc | 37c592d | selector boost cc (37c592d) |
+|---|---|---|---|---|
+| pomona shipped | 11.90 [11.80-12.20] | 9.90 [9.20-10.10] | 9.90 [9.80-10.10] | 0.10-0.16 |
+| pomona stream_s4 | 12.20 [12.10-12.40] | 9.60 [9.50-9.70] | 9.80 [9.80-9.80] | 0.11-0.12 |
+| VolyAvw shipped | 18.10 [17.80-18.40] | 15.10 [15.10-15.30] | 15.30 [15.30-15.70] | 0.25-0.29 |
+| VolyAvw stream_s4 | 17.00 [16.90-17.10] | 14.00 [13.90-14.30] | 14.40 [14.20-14.50] | 0.25-0.28 |
+
+The speedup held: 2.0-2.8 s faster than f43218a. The fixes cost 0.0-0.4 s against the
+merge, nearly all in the selector (packing in pass 1 and unpacking where the boost is read): the
+price of holding an eighth of the memory.
