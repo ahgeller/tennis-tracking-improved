@@ -53,6 +53,8 @@ def test_hud_lines_and_counts_follow_the_rows():
     assert line2.startswith("SPACE=good  y=take hint  v=no ball")
     assert "reviewed 1/6  uncertain left 1  flagged left 1" in line2                  # a suspect row is uncertain
     assert "frame 2  (110.0, 84.0)  from csv conf ?  unreviewed" in view.hud_lines(tool.session.rows[2], None, None)[0]
+    tool.session.rows[2].source = "none"                                 # no guess came with it: nothing to say
+    assert "from" not in view.hud_lines(tool.session.rows[2], None, None)[0]
     tool.session.rows[2].source, tool.session.rows[2].conf = "det", 0.83
     assert "from det 0.83  unreviewed" in view.hud_lines(tool.session.rows[2], None, None)[0]
     tool.session.source.landings[0] = None

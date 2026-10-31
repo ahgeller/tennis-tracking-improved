@@ -97,13 +97,14 @@ class FrameView(View):
         if event is None:
             return
         ui = self.session.ui
-        height = int(round(34 * ui))
+        text_h = cv2.getTextSize("A", cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui, 2)[0][1]
+        height = int(24 * ui) + text_h + int(round(6 * ui))   # over the badges along the top (draw_badge), wholly
         colour = KIND_COLOURS[event.kind]
         cv2.rectangle(display, (0, 0), (display.shape[1] - 1, height), colour, -1)
         what = "WHERE THE BALL BOUNCED" if event.kind == "landing" else "WHERE THE RACKET MET THE BALL"
         text = fit_text(f"CLICK {what}: CONFIRMS THE TRACKER'S {CANDIDATE_TEXT[event.kind][:-1]} BETWEEN FRAMES"
                         "   any key: no click", display.shape[1] - int(24 * ui), 0.6 * ui, 2)
-        cv2.putText(display, text, (int(12 * ui), int(round(24 * ui))), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui,
+        cv2.putText(display, text, (int(12 * ui), (height + text_h) // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui,
                     (0, 0, 0), 2, cv2.LINE_AA)
 
     def warp_picture(self, image: np.ndarray, before: Optional[np.ndarray], mode: str) -> np.ndarray:
@@ -281,7 +282,7 @@ class FrameView(View):
         session = self.session
         source = session.source
         line1: List[HudItem] = self.place_items() + [(0, f"frame {row.frame}"), (1, self.hud_state(row, hint, offer))]
-        if not row.reviewed:
+        if not row.reviewed and row.source != "none":   # "none": no guess came with the frame, nothing to say
             line1.append((4, f"from {row.source} " + (f"{row.conf:.2f}" if row.source == "det" else "conf ?")))
         line1.append((2, "EDITED" if row.edited else "ok" if row.reviewed else "unreviewed"))
         worn_hit = session.hit_for(session.cursor)
