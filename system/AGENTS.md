@@ -91,6 +91,16 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   motion masks and ROI tracking; `motion_gpu.py` builds the same masks, bit for
   bit, with two NVRTC kernels (`Config.motion_kernels`; the PyTorch ops in
   `motion.py` are the reference and the fallback).
+- `tennis_tracker/live/`: the live tracker (`clean_tracker.py --live`, `--camera`): frames in one at
+  a time, each frame's ball out a fixed delay later, the offline stages unchanged. `pipeline.py`
+  drives them (`run_live`; `_Pump._push_ball` is the one place a frame reaches the ball model, the
+  Phase C seam); `source.py` is the frame source and its drop policy; `fixed_lag.py` re-runs the
+  unchanged selector over a sliding window and commits frames `delay` old (`delay` None: the
+  offline answer, exactly); `evidence.py` records the selector's input so
+  `tools/live_lag_sweep.py` (on `train`) replays another lag on the CPU; `selector_process.py`
+  runs the selector in a child process. The prepass is fed through
+  `GridTrackNetBallDetector.open_stream` (`PrepassStream`, which `_prepass` also runs).
+  `audit/records/opt_live.md` has the measurements and what is not live yet.
 - `tennis_tracker/court/`: `court_geometry.py`, keypoints, side guides, polygon,
   homography; the court-event stages, each reading one `CourtScene`:
   `court_scene.py` (`CourtScene`, the event types and the player-box queries),

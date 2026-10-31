@@ -10,6 +10,8 @@ from typing import Iterable, Optional, Tuple
 
 from tennis_tracker.config import Config
 from tennis_tracker.paths import BOUNCE_MODEL, COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE, ROOT
+from tennis_tracker.live.pipeline import LiveOptions, run_live
+from tennis_tracker.live.source import PACINGS, DropPolicy
 from tennis_tracker.pipeline import run
 from evaluation.validate import main as validate_tracking
 
@@ -49,7 +51,39 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--annotations", help="Validate against this annotation JSON")
     parser.add_argument("--report-json", default=str(OUTPUT / "validation.json"))
     parser.add_argument("--self-test", action="store_true")
+    live = parser.add_argument_group("live", "Track frame by frame as they arrive (tennis_tracker/live); "
+                                             "writes the tracking JSON and <json stem>.live.json, no video")
+    live.add_argument("--live", action="store_true", help="Run the live tracker on --input or --camera")
+    live.add_argument("--camera", type=int, help="Capture from this camera index (implies --live)")
+    live.add_argument("--pace", choices=PACINGS, default="realtime",
+                      help="realtime: a file's frames arrive at its frame rate; fast: as fast as the tracker takes them")
+    live.add_argument("--live-delay", type=_live_delay, default=LiveOptions.delay_s, metavar="SECONDS",
+                      help="Commit each frame's output this long after the prepass has it (beyond the ball "
+                           "model's own lookahead, 4 phase frames); 'clip': only at the end, the offline answer")
+    live.add_argument("--live-history", type=float, default=LiveOptions.history_s, metavar="SECONDS",
+                      help="Committed context each selector run keeps")
+    live.add_argument("--live-every", type=float, default=LiveOptions.every_s, metavar="SECONDS",
+                      help="Time between selector runs")
+    live.add_argument("--live-drop", choices=[policy.value for policy in DropPolicy], default=LiveOptions.drop.value,
+                      help="backlog: drop the oldest frames once more than --live-backlog wait; never: report the lag")
+    live.add_argument("--live-backlog", type=float, default=LiveOptions.max_backlog_s, metavar="SECONDS")
+    live.add_argument("--record-evidence", action="store_true",
+                      help="Also write <json stem>.evidence.pkl, the selector's input, for tools/live_lag_sweep.py")
+    live.add_argument("--live-selector-inline", action="store_true",
+                      help="Run the selector on the tracking thread instead of its own process")
     return parser
+
+
+def _live_delay(value: str) -> Optional[float]:
+    return None if value == "clip" else float(value)
+
+
+def live_options(args: argparse.Namespace) -> LiveOptions:
+    """The ``LiveOptions`` the command line asks for."""
+    return LiveOptions(delay_s=args.live_delay, history_s=args.live_history, every_s=args.live_every,
+                       pacing=args.pace, drop=DropPolicy(args.live_drop), max_backlog_s=args.live_backlog,
+                       camera=args.camera, record_evidence=bool(args.record_evidence),
+                       selector_process=not args.live_selector_inline)
 
 
 # What ``--self-test`` runs: the selector, court-event, ROI-tracker and
@@ -105,7 +139,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
     output_video, tracking_json = resolve_output_paths(args.input, args.output, args.tracking_json)
-    if not args.no_video:
+    live = bool(args.live or args.camera is not None)
+    if not args.no_video and not live:
         print(f"[init] Tracking video: {output_video}")
     print(f"[init] Tracking JSON: {tracking_json}")
     cfg = Config(
@@ -117,7 +152,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         court_model_path=str(COURT_ENGINE),
         conf=float(args.conf),
         device=str(args.device),
-        save_tracking_video=not args.no_video,
+        save_tracking_video=not (args.no_video or live),
         court_events=bool(args.court),
         draw_court_minimap=bool(args.court),
         bounce_model_path=str(BOUNCE_MODEL),
@@ -126,7 +161,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         motion_diagnostics=bool(args.motion_diagnostics),
         show_all_tracks=bool(args.showtracks),
     )
-    run(cfg)
+    if live:
+        run_live(cfg, live_options(args))
+    else:
+        run(cfg)
     if not args.annotations:
         return 0
     return validate_tracking([
