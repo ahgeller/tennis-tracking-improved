@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from finetune.labeling.label_tool import Tool
 
 SEGMENT_GAP_S = 0.5           # a track missing this long ends its segment
-CROPS = 12                    # crops shown per segment, evenly through it
+CROPS = 24                    # crops cut per segment, evenly through it: as many as a wide window shows
 MIN_WHOLE = 0.8               # a crop is taken only where the box shows at least this share of the person
 CROP_H = 176                  # crops are kept at this height in pixels, scaled to the row when drawn
 CROP_PAD = 0.12               # each crop takes this share of the box's size around it
@@ -376,15 +376,12 @@ class PlayerView(ClipView):
         with self.crop_lock:
             return self.crops.get((segment.track, frame))
 
-    def crop_frames(self, segment: Segment) -> List[int]:
-        """The frames of `segment` its row shows a crop of: its own samples before a split, and after
-        one, those of the frames the reader cuts (or has cut) that fall in the part."""
+    def crop_frames(self, segment: Segment, count: int = CROPS) -> List[int]:
+        """The frames of `segment` there are crops of (the ones the reader cuts, or has cut, that
+        fall in it; after a split, those in the part), `count` of them evenly through it."""
         wanted = self.reader.wanted if self.reader is not None else {}
         frames = [frame for frame in segment.frames if any(track == segment.track for track, _ in wanted.get(frame, ()))]
-        if len(frames) <= CROPS:
-            return frames
-        step = (len(frames) - 1) / (CROPS - 1)
-        return sorted({frames[int(round(k * step))] for k in range(CROPS)})
+        return evenly(frames, count)
 
     def look(self, segment: Segment) -> Optional[np.ndarray]:
         """The segment's appearance from the crops cut so far, worked out when asked."""
@@ -597,7 +594,9 @@ class PlayerView(ClipView):
 
     def draw_rows(self, canvas: np.ndarray, top: int) -> None:
         """The segment rows under the overview: a caption, the same for every row, then its crops,
-        each letterboxed in a cell of one size."""
+        each letterboxed in a cell of one size. The cells are as tall as the row allows, and as many
+        as fit across the window are shown, on columns from the caption to the right edge that every
+        row shares: a wider window shows more of each segment rather than wider gaps."""
         session = self.session
         ui, thin = session.ui, max(1, int(round(session.ui)))
         row_h = self.row_height()
@@ -605,6 +604,9 @@ class PlayerView(ClipView):
         pad = int(6 * ui)
         crop_h = row_h - 2 * pad
         cell_w = max(1, int(round(crop_h * CELL_ASPECT)))
+        span = session.view_w - pad - caption_w                     # from the caption to the right edge
+        count = max(1, (span + pad) // (cell_w + pad))
+        pitch = (span - cell_w) / (count - 1) if count > 1 else 0.0
         self.rows, self.crop_boxes = [], []
         for slot, index in enumerate(range(self.first_row, min(len(self.segments), self.first_row + ROWS_SHOWN))):
             segment = self.segments[index]
@@ -627,11 +629,9 @@ class PlayerView(ClipView):
                 cv2.putText(canvas, fit_text(text, caption_w - int(30 * ui), size * ui, thin), (int(22 * ui), y),
                             cv2.FONT_HERSHEY_SIMPLEX, size * ui, colour, thin, cv2.LINE_AA)
                 y += int(20 * ui)
-            x = caption_w
             cy0 = y0 + pad
-            for frame in self.crop_frames(segment):
-                if x + cell_w > session.view_w - pad:
-                    break
+            for column, frame in enumerate(self.crop_frames(segment, count)):
+                x = caption_w + int(round(column * pitch))
                 cell = canvas[cy0:cy0 + crop_h, x:x + cell_w]
                 cell[:] = CELL_FILL
                 crop = self.crop(segment, frame)
@@ -641,7 +641,6 @@ class PlayerView(ClipView):
                     dx, dy = (cell_w - w) // 2, (crop_h - h) // 2
                     cell[dy:dy + h, dx:dx + w] = cv2.resize(crop, (w, h), interpolation=cv2.INTER_AREA)
                 self.crop_boxes.append((index, frame, x, cy0, x + cell_w, cy0 + crop_h))
-                x += cell_w + pad
             cv2.line(canvas, (0, y1 - 1), (session.view_w - 1, y1 - 1), (35, 35, 35), 1)
 
     def hud_lines(self) -> Tuple[List[HudItem], List[HudItem]]:

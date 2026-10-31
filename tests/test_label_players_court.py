@@ -70,7 +70,7 @@ def test_tracks_are_cut_into_segments_at_every_gap_over_half_a_second():
         boxes.setdefault(frame, {})["2"] = [5, 5, 6, 6]
     segments = cut_segments(boxes, 30.0)
     assert [(s.track, s.first, s.last) for s in segments] == [("1", 0, 19), ("2", 0, 2), ("2", 30, 31)]
-    assert segments[0].samples()[0] == 0 and segments[0].samples()[-1] == 19 and len(segments[0].samples()) == 12
+    assert segments[0].samples()[0] == 0 and segments[0].samples()[-1] == 19 and len(segments[0].samples()) == min(20, label_players.CROPS)
 
 
 def test_a_segment_is_split_where_its_labels_change_identity():
@@ -511,6 +511,23 @@ def test_leaving_the_court_view_with_changes_not_confirmed_is_held_back_once(tmp
     assert tool.view is tool.court_view and "NOT CONFIRMED" in tool.court_view.notice
     press(tool, "\t")
     assert tool.view is tool.frame_view
+
+
+@pytest.mark.parametrize("size", [(1280, 720), (1366, 768), (1920, 1080), (2560, 1440)])
+def test_a_long_segments_crops_run_the_full_width_in_columns_that_line_up(tmp_path, size):
+    tool, _ = open_players(tmp_path)
+    view = tool.player_view
+    tool.fit_view(*size)
+    tool.render()
+    session = tool.session
+    pad = int(6 * session.ui)
+    first = [box for box in view.crop_boxes if box[0] == 0]                       # track 1: 40 frames
+    assert first[-1][4] >= session.view_w - pad - 1                               # the last cell at the right edge
+    columns = [box[2] for box in first]
+    others = [box[2] for box in view.crop_boxes if box[0] != 0]
+    assert set(others) <= set(columns)                                            # shorter rows on the same columns
+    if size[0] >= 1920:
+        assert len(first) > 12                                                    # more of the segment, not wider gaps
 
 
 def test_a_box_cut_by_the_pictures_side_is_never_a_crop_when_whole_ones_are_there():
