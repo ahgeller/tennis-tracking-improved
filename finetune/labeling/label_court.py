@@ -81,6 +81,7 @@ class CourtView:
         self.revision += 1
         try:
             if source.court is None:
+                source.remember(source.court_path)
                 source.court = load_court(source.court_path)
         except LabelFormatError as error:
             self.message = str(error)
@@ -146,7 +147,7 @@ class CourtView:
             return
         source.court[self.frame] = inside
         self.drafts[self.frame] = dict(inside)
-        session.dirty = source.dirty = True
+        session.touch("court", source=source)
         self.revision += 1
         nxt = next((k for k in range(self.position + 1, len(self.frames)) if self.frames[k] not in source.court), None)
         self.go(nxt if nxt is not None else min(self.position + 1, len(self.frames) - 1))
@@ -154,7 +155,7 @@ class CourtView:
     def unlabel(self) -> None:
         source = self.source
         if source is not None and source.court is not None and source.court.pop(self.frame, None) is not None:
-            self.session.dirty = source.dirty = True
+            self.session.touch("court", source=source)
             print(f"[court] frame {self.frame} unlabelled")
         self.revision += 1
 

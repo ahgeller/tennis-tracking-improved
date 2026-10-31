@@ -3,14 +3,15 @@ hits and rallies, the candidates rejected, the player and court labels, and the 
 The on-disk formats are those of ``finetune.data.labels``, ``finetune.data.bounce_labels``,
 ``finetune.data.event_labels``, ``finetune.data.player_labels`` and ``finetune.data.court_labels``;
 this module turns them into ``Row`` objects and the tool's maps and back. ``load_*`` functions read
-and return; ``apply_*`` functions write what a sidecar says onto the rows they are given; every
-``save_*`` of a clip's marks removes the file when nothing is left in it, since the scorers read
-any file, empty included, as the whole truth about its clip."""
+and return; ``apply_*`` functions write what a sidecar says onto the rows they are given; ``save_*``
+functions write what they are given to the path they are given, an empty file (its header) when
+there is nothing. Which kinds are written, and when an emptied file is removed instead, is
+``label_saving``'s."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from finetune.data.bounce_labels import BounceLabel, read_bounce_labels, write_bounce_labels
 from finetune.data.court_labels import CourtLabel, CourtPoints, read_court_labels, write_court_labels
@@ -21,10 +22,6 @@ from finetune.data.labels import (FLAG_KINDS, FlagKind, Flags, LabelFormatError,
                                   format_point, frame_list, is_visible, read_flags, read_json_object, read_label_rows,
                                   read_review, write_flags, write_label_cells)
 from finetune.data.player_labels import PlayerBoxLabel, read_player_labels, write_player_labels
-from finetune.data.workspace import unsaved_csv
-
-if TYPE_CHECKING:
-    from finetune.labeling.label_source import Source
 
 CONFIDENT_CONF = 0.70       # a draft at or above this confidence is not "uncertain"
 SETTINGS_NAME = "label_tool.settings.json"             # in the labels folder: filter, inset, trail
@@ -81,23 +78,6 @@ def load_rows(csv_path: Path, width: int, height: int, origin: str = "det") -> L
 def save_rows(csv_path: Path, rows: List[Row], width: int, height: int) -> None:
     write_label_cells(csv_path, [(row.frame, *format_point((row.x, row.y) if row.visible else None, width, height))
                                  for row in rows])
-
-
-def rescue_unsaved(sources: Iterable[Source]) -> None:
-    """Labels that still could not be written at exit go to <clip>_ball.unsaved.csv beside the
-    real file, so closing the tool never throws edits away. Nothing reads that file; copy it
-    over the label file once whatever held it open has let go."""
-    for source in sources:
-        if not source.dirty:
-            continue
-        rescue = unsaved_csv(source.clip, source.out_csv.parent)
-        try:
-            save_rows(rescue, source.rows, source.width, source.height)
-            print(f"[save] {source.out_csv.name} could not be written; your labels are in {rescue.name}")
-        except OSError as error:
-            # The last resort has failed and the tool is closing: there is nowhere left to put
-            # these rows, so say so plainly and go on to rescue the other clips of the run.
-            print(f"[error] {source.clip}: unsaved labels lost, {rescue.name} failed too: {error}")
 
 
 def save_flags(path: Path, rows: List[Row]) -> None:
@@ -201,13 +181,7 @@ def load_landings(path: Path) -> Landings:
 
 
 def save_landings(path: Path, landings: Landings) -> None:
-    """Write the landings, or remove the file when there are none left: the court-event scorer
-    reads any landing file, empty included, as the whole truth about its clip, so a clip with
-    no landings marked must have no file."""
-    if landings:
-        write_bounce_labels(path, (BounceLabel(frame, point) for frame, point in landings.items()))
-    else:
-        path.unlink(missing_ok=True)
+    write_bounce_labels(path, (BounceLabel(frame, point) for frame, point in landings.items()))
 
 
 # A clip's hits (``event_labels``), kept exactly as its landings are (the same keys, points None
@@ -228,10 +202,7 @@ def load_hits(path: Path) -> Tuple[Hits, Hitters]:
 
 
 def save_hits(path: Path, hits: Hits, hitters: Hitters) -> None:
-    if hits:
-        write_hit_labels(path, (HitLabel(frame, point, hitters.get(frame)) for frame, point in hits.items()))
-    else:
-        path.unlink(missing_ok=True)
+    write_hit_labels(path, (HitLabel(frame, point, hitters.get(frame)) for frame, point in hits.items()))
 
 
 def load_rallies(path: Path) -> Tuple[Set[int], Set[int]]:
@@ -246,10 +217,7 @@ def load_rallies(path: Path) -> Tuple[Set[int], Set[int]]:
 
 def save_rallies(path: Path, starts: Set[int], ends: Set[int]) -> None:
     rallies: List[RallyLabel] = pair_rally_marks(starts, ends)
-    if rallies:
-        write_rally_labels(path, rallies)
-    else:
-        path.unlink(missing_ok=True)
+    write_rally_labels(path, rallies)
 
 
 # The candidates rejected (``label_candidates``): candidate kind -> the frames of the ones rejected.
@@ -270,11 +238,13 @@ def load_event_review(path: Path) -> Rejected:
 
 
 def save_event_review(path: Path, rejected: Rejected) -> None:
+    """Write the candidates rejected into the event review file, keeping whatever else it holds."""
+    try:
+        state = read_json_object(path, "event review file") or {}
+    except LabelFormatError:
+        state = {}                    # a rescue copy over a damaged one: what this session knows
     kept = {kind: sorted(frames) for kind, frames in sorted(rejected.items()) if frames}
-    if kept:
-        write_atomic(path, json.dumps({"rejected": kept}, indent=1))
-    else:
-        path.unlink(missing_ok=True)
+    write_atomic(path, json.dumps({**state, "rejected": kept}, indent=1))
 
 
 def load_players(path: Path) -> List[PlayerBoxLabel]:
@@ -283,10 +253,7 @@ def load_players(path: Path) -> List[PlayerBoxLabel]:
 
 
 def save_players(path: Path, labels: List[PlayerBoxLabel]) -> None:
-    if labels:
-        write_player_labels(path, labels)
-    else:
-        path.unlink(missing_ok=True)
+    write_player_labels(path, labels)
 
 
 # A clip's court labels (``court_labels``): frame -> the points placed on it.
@@ -299,11 +266,7 @@ def load_court(path: Path) -> CourtFrames:
 
 
 def save_court(path: Path, frames: CourtFrames) -> None:
-    labelled = [CourtLabel(frame, points) for frame, points in frames.items() if points]
-    if labelled:
-        write_court_labels(path, labelled)
-    else:
-        path.unlink(missing_ok=True)
+    write_court_labels(path, [CourtLabel(frame, points) for frame, points in frames.items() if points])
 
 
 # The settings file holds the toggles worth keeping between sessions: filter, inset, grid size, trail.

@@ -68,7 +68,6 @@ class LabelSession:
         self.filter = 0               # index into FILTERS; h cycles it, the HUD chip shows it
         self.inset = True             # the small whole-frame overview drawn while zoomed in
         # what the frame on screen is about
-        self.dirty = False            # unsaved edits in some clip
         self.ghost: Optional[Point] = None     # a frame with no guess: where the neighbours say the ball is
         self.shown_offers: Dict[int, Point] = {}   # row index -> the suggestion drawn as the mark on
                                                    # offer in the last render; what SPACE takes
@@ -82,6 +81,17 @@ class LabelSession:
         self.disputed_key, self.disputed = None, 0   # disputed_count's cache
         self.marks = 0                # bumped by every change to a clip's landings, hits, rallies or
                                       # rejected candidates (not row fields): what render_state keys on
+
+    # ---------------------------------------------------------------- unsaved edits
+    @property
+    def dirty(self) -> bool:
+        """Some clip has an edit not saved yet."""
+        return any(source.changed for source in self.sources)
+
+    def touch(self, *kinds: str, source: Optional[Source] = None) -> None:
+        """An edit changed these kinds of label (label_saving.KINDS) of `source`, the clip under the
+        cursor by default: they are written at the next save, and only they."""
+        (source or self.source).changed.update(kinds)
 
     # ---------------------------------------------------------------- the clip we are in
     @property

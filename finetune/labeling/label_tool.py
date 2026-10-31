@@ -46,11 +46,10 @@ from finetune.labeling.label_players import PlayerView
 from finetune.labeling.label_session import LabelSession
 from finetune.labeling.label_sheet import SheetView
 from finetune.labeling.label_source import Prefetcher, Source
-from finetune.labeling.label_store import (Row, rescue_unsaved, save_court, save_event_review, save_flags, save_hits,
-                                           save_landings, save_players, save_rallies, save_review, save_rows,
-                                           save_settings)
+from finetune.labeling.label_saving import rescue_source, save_source
+from finetune.labeling.label_store import Row, save_settings
 from finetune.labeling.label_window import WINDOW
-from finetune.data.labels import LabelFormatError, is_visible
+from finetune.data.labels import is_visible
 
 AUTOSAVE_SECONDS = 5.0    # write labels + review progress this often while there are unsaved changes
 
@@ -370,7 +369,7 @@ class Tool:
             row.source = "click"      # placed by hand now, not taken from a suggestion
         row.visible = True
         row.reviewed = row.edited = True
-        session.dirty = session.source.dirty = True
+        session.touch("ball", "review")
         session.source.cursor = session.cursor - session.source.start
         return True
 
@@ -389,7 +388,7 @@ class Tool:
         row.suspect = False
         row.visible = False
         row.reviewed = row.edited = True
-        session.dirty = session.source.dirty = True
+        session.touch("ball", "review")
 
     def toggle_landing(self) -> None:
         """/: the ball is on the ground on this frame - or, pressed again, it is not. Pressed on the
@@ -417,7 +416,7 @@ class Tool:
         placed = session.toggle_mark(session.cursor, session.source.landings)   # LabelSession.toggle_mark
         if placed is not None and not self.overview and self.wants_point(placed):
             session.awaiting_landing = placed   # no ball label under it: ask where it touched the ground
-        session.dirty = session.source.dirty = True
+        session.touch("landings")
 
     def wants_point(self, placed: float) -> bool:
         """Whether a mark at `placed` has no ball label to take its point from: it lies between two
@@ -436,7 +435,7 @@ class Tool:
         session.source.landings[landing] = (float(min(max(x, 0.0), session.width - 1.0)),
                                             float(min(max(y, 0.0), session.height - 1.0)))
         session.marks += 1
-        session.dirty = session.source.dirty = True
+        session.touch("landings")
 
     def toggle_hit(self) -> None:
         """.: a racket hit the ball on this frame - or, pressed again, it did not. Exactly a
@@ -462,7 +461,7 @@ class Tool:
                 session.source.hitters[placed] = offered[0]
             if not self.overview and self.wants_point(placed):
                 session.awaiting_hit = placed   # no ball label under it: ask where the racket met it
-        session.dirty = session.source.dirty = True
+        session.touch("hits")
 
     def place_hit(self, x: float, y: float) -> None:
         """The click a hit with no ball label under it waits for (toggle_hit): the racket met the
@@ -474,7 +473,7 @@ class Tool:
         session.source.hits[hit] = (float(min(max(x, 0.0), session.width - 1.0)),
                                     float(min(max(y, 0.0), session.height - 1.0)))
         session.marks += 1
-        session.dirty = session.source.dirty = True
+        session.touch("hits")
 
     def place_candidate(self, x: float, y: float) -> None:
         """The click a landing or hit candidate between two label frames waits for once ; has come
@@ -494,7 +493,7 @@ class Tool:
         if kind == "hit" and event.hitter is not None:
             session.source.hitters[between] = event.hitter
         session.marks += 1
-        session.dirty = session.source.dirty = True
+        session.touch("landings" if kind == "landing" else "hits")
 
     def cycle_hitter(self) -> None:
         """,: who hit the ball on this frame's hit: near, far, not said, round again. A frame
@@ -511,7 +510,7 @@ class Tool:
         else:
             session.source.hitters[hit] = hitter
         session.marks += 1
-        session.dirty = session.source.dirty = True
+        session.touch("hits")
 
     def toggle_rally(self, kind: str) -> None:
         """[ / ]: a rally starts / ends on this frame - or, pressed again, it does not. A frame is
@@ -529,7 +528,7 @@ class Tool:
             marks.add(frame)
             other.discard(frame)
         session.marks += 1
-        session.dirty = source.dirty = True
+        session.touch("rallies")
 
     def reject_candidates(self) -> None:
         """Backslash: the tracker's candidates on this frame are not events: they are rejected (kept in the
@@ -540,7 +539,7 @@ class Tool:
         if changed == 0:
             print("[cand] no candidate on this frame (; goes to the next one)")
             return
-        session.dirty = session.source.dirty = True
+        session.touch("rejected")
         if changed < 0:
             print(f"[cand] {-changed} candidate(s) on frame {session.rows[session.cursor].frame} open again")
             return
@@ -595,13 +594,13 @@ class Tool:
             row.snapshot()
         row.suspect = False           # "it is right where it is" answers an audit flag
         row.reviewed = True
-        session.dirty = session.source.dirty = True
+        session.touch("review")
 
     def undo(self) -> None:
         """u: the last change on this frame comes back off its history."""
         session = self.session
         session.rows[session.cursor].undo()
-        session.dirty = session.source.dirty = True
+        session.touch("ball", "review")
         self.follow_ball()
 
     # ---------------------------------------------------------------- navigation
@@ -656,50 +655,27 @@ class Tool:
 
     # ---------------------------------------------------------------- saving
     def save(self, quiet: bool = False) -> None:
-        """Write back every clip that has changed - and only those, so an untouched clip is left alone:
-        its labels, its review and flag sidecars, its landings, hits and rallies, the candidates
-        rejected, and the player and court labels when their views have loaded them (label_store).
+        """Write back what has changed, kind by kind (label_saving): the ball labels, the review
+        state, the landings, hits and rallies, the candidates rejected, the player and court labels;
+        an untouched kind or clip is left alone, and a file another session changed since it was
+        read is never written over.
 
-        The clip you are in gets its review file refreshed even with no edits, so quitting after
-        only stepping through frames still resumes where you stopped rather than where you last
-        clicked."""
+        In the ball views (the frame, the grid and the sheet) the clip you are in gets its review
+        file refreshed when the cursor moved, even with no edits, so quitting after only stepping
+        through frames still resumes where you stopped. The player and court views move the cursor
+        too, but never the ball session's resume point or zoom."""
         session = self.session
-        written, failed = [], []
+        written = []
+        ball_view = not (self.player_view.active or self.court_view.active)
         for source in session.sources:
-            here = source.start <= session.cursor < source.start + len(source.rows)
-            if here:
-                source.cursor = session.cursor - source.start
-            try:
-                if not source.dirty:
-                    if here and source.cursor != source.saved_cursor:
-                        save_review(source.review, source.rows, source.cursor, session.zoom)
-                        source.saved_cursor = source.cursor
-                    continue
-                save_rows(source.out_csv, source.rows, source.width, source.height)
-                save_review(source.review, source.rows, source.cursor, session.zoom)
-                save_flags(source.suspects, source.rows)
-                save_landings(source.bounces, source.landings)
-                save_hits(source.hits_path, source.hits, source.hitters)
-                save_rallies(source.rallies_path, source.rally_starts, source.rally_ends)
-                save_event_review(source.events_review, source.rejected)
-                if source.players is not None:          # only what a view loaded is written back
-                    save_players(source.players_path, source.players)
-                if source.court is not None:
-                    save_court(source.court_path, source.court)
-            except (OSError, LabelFormatError) as error:
-                # Another program has the file open, most likely (or a sidecar was damaged under
-                # us). Keep the edits in memory and keep going: the next autosave tries again, and
-                # one stuck clip must not stop the others.
-                print(f"[warn] could not save {source.clip}: {error} - close the file wherever it is open; "
-                      f"the edits are kept and saving is retried")
-                failed.append(source)
-                continue
-            source.saved_cursor = source.cursor
-            source.dirty = False
-            written.append(source)
-        session.dirty = bool(failed)
+            if ball_view and source.start <= session.cursor < source.start + len(source.rows):
+                source.cursor, source.zoom = session.cursor - source.start, session.zoom
+                if source.cursor != source.saved_cursor:
+                    session.touch("review", source=source)
+            if source.changed and "ball" in save_source(source)[0]:
+                written.append(source)
         self.last_save = time.monotonic()
-        if not quiet and written:
+        if not quiet:
             for source in written:
                 extras = [f"{len(marks)} {name}(s)" for name, marks in
                           (("landing", source.landings), ("hit", source.hits), ("rally start", source.rally_starts),
@@ -709,9 +685,10 @@ class Tool:
                       f"{''.join(', ' + extra for extra in extras)})")
 
     def rescue_unsaved(self) -> None:
-        """At exit, the labels of every clip that still could not be written go beside the real
-        file (label_store.rescue_unsaved)."""
-        rescue_unsaved(self.session.sources)
+        """At exit, whatever still could not be written goes to a rescue copy beside its file
+        (label_saving.rescue_source)."""
+        for source in self.session.sources:
+            rescue_source(source)
 
     # ---------------------------------------------------------------- loop
     def run(self) -> None:

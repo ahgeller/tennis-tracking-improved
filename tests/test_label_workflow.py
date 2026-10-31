@@ -212,7 +212,7 @@ def test_accept_run_marks_each_clip_dirty_including_last_row():
     for row in tool.session.rows:
         row.conf = .9
     assert tool.accept_run() == 4
-    assert a.dirty and b.dirty
+    assert a.changed and b.changed
     assert all(row.reviewed for row in tool.session.rows)
 
 
@@ -260,7 +260,7 @@ def test_idle_render_is_cached_and_every_change_redraws():
         "trail": lambda t: setattr(t.session, "trail", not t.session.trail),
         "follow": lambda t: setattr(t.session, "follow", not t.session.follow),
         "step": lambda t: setattr(t.session, "step", 4),
-        "unsaved": lambda t: setattr(t.session, "dirty", not t.session.dirty),
+        "unsaved": lambda t: t.session.source.changed.symmetric_difference_update({"ball"}),
         "zoom": lambda t: setattr(t.session, "zoom", t.session.zoom * 1.5),
         "pan": lambda t: setattr(t.session, "center", (t.session.center[0] + 7, t.session.center[1])),
         "walk": lambda t: t.session.only_uncertain(),
@@ -435,7 +435,7 @@ def test_slash_marks_the_frame_as_a_landing_and_pressing_it_again_unmarks_it():
     row = session.rows[3]
     assert not landing_badge_drawn(tool.render())
     press_slash(tool)
-    assert session.source.landings == {3: None} and session.dirty and session.source.dirty
+    assert session.source.landings == {3: None} and session.dirty and session.source.changed == {"landings"}
     assert session.awaiting_landing is None                          # the ball label is its point: no click asked
     assert "/=landing" in tool.frame_view.hud_lines(row, None, None)[1]
     tool.undo()                                                      # u: the label's history, not a landing
@@ -567,6 +567,7 @@ def test_landings_are_saved_with_the_labels_and_read_back_when_the_clip_is_opene
     from finetune.labeling.label_source import build_source
     clip = clip_files(source("clip", 6), tmp_path)
     tool = make_tool(clip)
+    tool.session.touch("ball")                                       # the label file the clip is opened from
     for index in (4, 1):
         tool.session.cursor = index
         tool.toggle_landing()
@@ -591,6 +592,7 @@ def test_a_between_landing_is_saved_as_a_half_frame_with_its_point_and_read_back
     from finetune.labeling.label_source import build_source
     clip = clip_files(source("clip", 6), tmp_path)
     tool = make_tool(clip)
+    tool.session.touch("ball")                                       # the label file the clip is opened from
     tool.session.cursor = 3
     tool.toggle_landing()
     tool.session.cursor = 4
@@ -611,7 +613,7 @@ def test_a_between_landing_is_saved_as_a_half_frame_with_its_point_and_read_back
 def test_a_damaged_landing_file_keeps_the_clip_out_and_is_never_written_over(tmp_path, capsys):
     from finetune.labeling.label_source import build_source
     clip = clip_files(source("clip", 6), tmp_path)
-    clip.dirty = True
+    clip.changed.add("ball")
     make_tool(clip).save(quiet=True)                                   # the label file the clip is opened from
     write_clip(tmp_path / "clip.avi", 6, size=(1280, 720))
     damaged = "frame,ball_x,ball_y\nframe_002,5,\n"                    # one coordinate without the other
@@ -623,23 +625,24 @@ def test_a_damaged_landing_file_keeps_the_clip_out_and_is_never_written_over(tmp
 
 
 def test_save_survives_a_locked_file_and_keeps_the_edits(tmp_path):
-    import finetune.labeling.label_tool as label_tool
+    import finetune.labeling.label_saving as label_saving
     a, b = source("a", 2), source("b", 2)
     for clip in (a, b):
         clip_files(clip, tmp_path)
     tool = make_tool(a, b)
-    a.dirty = b.dirty = tool.session.dirty = True
-    real = label_tool.save_rows
+    a.changed.add("ball")
+    b.changed.add("ball")
+    real = label_saving.save_rows
 
     def locked(path, *rest):
         if path == a.out_csv:
             raise PermissionError(13, "in use by another program")
         real(path, *rest)
-    with patch.object(label_tool, "save_rows", side_effect=locked):
+    with patch.object(label_saving, "save_rows", side_effect=locked):
         tool.save(quiet=True)
     assert b.out_csv.is_file()     # one stuck clip does not stop the others
-    assert a.dirty and tool.session.dirty  # ... and its edits are kept for the next try
-    assert not b.dirty
+    assert a.changed == {"ball"} and tool.session.dirty  # ... and its edits are kept for the next try
+    assert not b.changed
     tool.rescue_unsaved()
     assert (tmp_path / "a_ball.unsaved.csv").is_file()
 
@@ -1356,7 +1359,7 @@ def test_q_quits_unless_unsaved_labels_have_not_been_warned_about():
         assert press(mode, ord("q"))[1]
         assert not press(mode, ord("w"))[1]
     tool = Tool([source("test")])
-    tool.session.dirty = True
+    tool.session.touch("ball")
     with every_handler_mocked(), \
             patch.object(win, "non_character_key", return_value=False), patch("builtins.print"):
         assert not tool.keys.handle(ord("q"))            # once: the warning
@@ -1382,7 +1385,7 @@ def test_keys_that_change_state_rather_than_call_a_handler():
         assert press("plain", ord(digit))[2].session.step == int(digit)
     assert not press("plain", ord("t"))[2].session.trail
     tool = press("plain", ord("u"))[2]
-    assert tool.session.dirty and tool.session.source.dirty
+    assert tool.session.dirty and tool.session.source.changed
     for key, factor in ((ord("+"), ZOOM_STEP), (ord("="), ZOOM_STEP), (ord("-"), 1 / ZOOM_STEP), (ord("_"), 1 / ZOOM_STEP)):
         assert press("grid", key)[2].grid_view.zoom == pytest.approx(factor, abs=5e-8)
 

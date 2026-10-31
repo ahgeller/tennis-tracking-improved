@@ -244,7 +244,14 @@ def suspect_json(clip: str, labels: Optional[Path] = None) -> Path:
 
 
 def unsaved_csv(clip: str, labels: Optional[Path] = None) -> Path:
-    return _labels_dir(labels) / f"{clip}{UNSAVED_SUFFIX}"
+    return unsaved_copy(label_csv(clip, labels))
+
+
+def unsaved_copy(path: Path) -> Path:
+    """Where the label tool rescues what it could not write to `path`: beside it, ``.unsaved``
+    before the extension (``video6_hits.unsaved.csv``, ``video6_ball.review.unsaved.json``). Nothing
+    reads these; they are git-ignored, and copied over the real file by hand."""
+    return path.with_name(f"{path.stem}.unsaved{path.suffix}")
 
 
 def bounce_csv(clip: str, labels: Optional[Path] = None) -> Path:

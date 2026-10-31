@@ -2,6 +2,7 @@
 rally starts and ends ([ and ]), the tracker's candidates (; to the next, a backslash to reject,
 the click that confirms one between two frames), the timeline, and the files they are saved to.
 Every file is under tmp_path."""
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -161,7 +162,7 @@ def test_rallies_are_saved_paired_and_read_back(tmp_path):
     tool = fake_tool(source)
     source.rally_starts.update({1, 6})
     source.rally_ends.update({4})
-    source.dirty = tool.session.dirty = True
+    tool.session.touch("rallies", source=source)
     tool.save(quiet=True)
     assert read_rally_labels(source.rallies_path) == [RallyLabel(1, 4), RallyLabel(6, None)]
     assert load_rallies(source.rallies_path) == ({1, 6}, {4})
@@ -241,7 +242,7 @@ def test_candidates_are_drawn_as_outlined_badges_and_dashed_rings_and_never_save
     assert (picture == LANDING).all(axis=2).any()                       # the LANDING? outline and the ring
     press_key(tool, "\\")
     assert not (tool.render()[:session.view_h] == LANDING).all(axis=2).any()   # rejected: gone from the picture
-    source.dirty = session.dirty = True
+    session.touch("landings", "hits", "rallies", source=source)
     tool.save(quiet=True)
     assert not source.bounces.exists() and not source.hits_path.exists() and not source.rallies_path.exists()
 
@@ -285,7 +286,10 @@ def test_the_sidecars_roundtrip_through_the_store(tmp_path):
     assert load_rallies(rallies) == ({3}, set())
     save_event_review(review, {"hit": {5, 2}, "landing": set()})
     assert load_event_review(review) == {"hit": {2, 5}}
-    save_hits(hits, {}, {})
-    save_rallies(rallies, set(), set())
+    review.write_text(json.dumps({"rejected": {"hit": [5]}, "note": "kept"}), encoding="utf-8")
+    save_hits(hits, {}, {})                          # nothing: the header alone (label_saving removes a file
+    save_rallies(rallies, set(), set())              # the tool emptied, not the store)
     save_event_review(review, {})
-    assert not hits.exists() and not rallies.exists() and not review.exists()
+    assert hits.read_text(encoding="utf-8").splitlines() == ["frame,ball_x,ball_y,hitter"]
+    assert rallies.read_text(encoding="utf-8").splitlines() == ["start,end"]
+    assert json.loads(review.read_text(encoding="utf-8")) == {"rejected": {}, "note": "kept"}

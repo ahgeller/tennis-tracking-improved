@@ -34,7 +34,7 @@ def test_the_single_frame_view_claims_its_keys_and_leaves_the_shared_ones():
 
 def test_q_warns_once_about_labels_that_could_not_be_saved(capsys):
     tool = tool_over()
-    with patch.object(Tool, "save", lambda self: setattr(self.session, "dirty", True)):
+    with patch.object(Tool, "save", lambda self: self.session.touch("ball")):
         assert not tool.keys.quit_key() and tool.quit_warned
         assert "could not be saved" in capsys.readouterr().out
         assert tool.keys.quit_key()                                          # the second q quits anyway

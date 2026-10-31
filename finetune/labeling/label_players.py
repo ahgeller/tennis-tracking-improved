@@ -241,6 +241,7 @@ class PlayerView:
             return
         try:
             if source.players is None:
+                source.remember(source.players_path)
                 source.players = load_players(source.players_path)
             payload = read_run(source.run)
         except (OSError, ValueError, LabelFormatError) as error:
@@ -290,7 +291,7 @@ class PlayerView:
             else:
                 self.labels[(frame, segment.track)] = PlayerBoxLabel(frame, identity, segment.boxes[frame], segment.track)
         self.source.players = list(self.labels.values())
-        self.session.dirty = self.source.dirty = True
+        self.session.touch("players", source=self.source)
         self.revision += 1
         if identity is not None:
             self.select(self.selected + 1)

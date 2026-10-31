@@ -74,7 +74,7 @@ class KeyHandler:
         if self.session.dirty and not tool.quit_warned:
             tool.quit_warned = True
             print("[warn] some labels could not be saved (see above). Close the file in the other "
-                  "program and press q again; quitting anyway keeps them in <clip>_ball.unsaved.csv")
+                  "program and press q again; quitting anyway keeps them in the .unsaved copies beside them")
             return False
         return True
 

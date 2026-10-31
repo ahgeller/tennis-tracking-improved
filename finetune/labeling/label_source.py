@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from finetune.labeling.label_candidates import ClipCandidates, load_candidates
+from finetune.labeling.label_saving import fingerprint
 from finetune.labeling.label_store import (CourtFrames, Hitters, Hits, Landings, Rejected, Row, apply_flags, apply_review,
                                            load_event_review, load_hits, load_landings, load_rallies, load_rows)
 from finetune.data.labels import LabelFormatError
@@ -123,7 +124,9 @@ class Source:
         self.position = 0             # next frame the capture will decode, so stepping can avoid seeks
         self.sig_of: Dict[int, bytes] = {}     # ... and back again, to check a frame is the one wanted
         self.warned_seek = False
-        self.dirty = False
+        self.changed: Set[str] = set()        # the kinds of label edited and not yet saved (label_saving.KINDS)
+        self.conflicted: Set[str] = set()     # ... of which those whose file another session changed meanwhile
+        self.disk: Dict[Path, Optional[str]] = {}   # each label file's fingerprint as last read or written
         self.cursor = 0               # where you were in this clip, for the review file
         self.saved_cursor = 0         # ... and what the review file last said, so a plain move is kept
         self.start = 0                # where its rows begin in the run's flat row list
@@ -132,6 +135,16 @@ class Source:
         self.missing: Set[int] = set()    # frames that could not be decoded; drawn black, never labelled
         self.label_frames = {row.frame for row in rows}   # the frames worth keeping when passed
         self.flagged = 0              # how many rows the last audit flagged, from apply_flags
+
+    @property
+    def dirty(self) -> bool:
+        """Some edit to this clip is not saved yet."""
+        return bool(self.changed)
+
+    def remember(self, path: Path) -> None:
+        """Note what `path` holds now, just before it is read: a save refuses to write over it once
+        somebody else has changed it (label_saving.save_kind)."""
+        self.disk[path] = fingerprint(path)
 
     def release(self) -> None:
         """Let go of the decoder and the cache: each open capture holds 75-140 MB once it has
@@ -351,6 +364,7 @@ def build_source(clip: str, videos: Path, labels: Path, candidates: Optional[Pat
     if not from_file.is_file():
         print(f"[skip] {clip}: no labels; run  python finetune/training/pretrack.py --clips {clip}")
         return None
+    read_as = fingerprint(final)      # before it is read: a change after this is somebody else's
     try:
         rows = load_rows(from_file, width, height, "det" if draft.is_file() else "csv")
     except (OSError, LabelFormatError) as error:
@@ -361,6 +375,9 @@ def build_source(clip: str, videos: Path, labels: Path, candidates: Optional[Pat
         return None
     review = review_json(clip, labels)
     source = Source(clip, video, rows, width, height, final, review, suspect_json(clip, labels), bounce_csv(clip, labels))
+    source.disk[final] = read_as
+    for path in (review, source.bounces, source.hits_path, source.rallies_path, source.events_review):
+        source.remember(path)
     try:
         source.flagged = apply_flags(source.suspects, rows)
         state = apply_review(review, rows)

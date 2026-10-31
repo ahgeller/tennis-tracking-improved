@@ -104,7 +104,7 @@ def test_the_player_view_shows_the_runs_segments_and_the_keys_say_who_they_are(t
     assert tool.overview and [(s.track, s.first, s.last) for s in view.segments] == [("1", 0, 39), ("2", 0, 9), ("2", 30, 39)]
     press(tool, "1")
     assert view.identity(view.segments[0]) == "P1" and view.selected == 1        # and on to the next
-    assert len(source.players) == 40 and source.dirty
+    assert len(source.players) == 40 and source.changed == {"players"}
     assert view.suggestion(1) == "P2"                                            # P1 is on court with it
     press(tool, " ")
     assert view.identity(view.segments[1]) == "P2"
@@ -169,7 +169,7 @@ def test_the_court_view_starts_from_the_runs_points_and_space_confirms_them(tmp_
     assert view.points()["far_left"] == (300.0, 200.0) and len(view.points()) == 14
     assert source.court == {}                                                    # shown, not labelled
     press(tool, " ")
-    assert set(source.court[0]) == set(GROUND_POINTS) and view.frame == 10 and source.dirty
+    assert set(source.court[0]) == set(GROUND_POINTS) and view.frame == 10 and source.changed == {"court"}
     tool.save(quiet=True)
     (label,) = read_court_labels(source.court_path)
     assert label.frame == 0 and label.points["near_centre"] == (640.0, 560.0)

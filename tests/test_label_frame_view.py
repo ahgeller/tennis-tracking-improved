@@ -51,7 +51,7 @@ def test_hud_lines_and_counts_follow_the_rows():
     assert line2.startswith("reviewed 1/6  uncertain left 1  flagged left 1   SPACE=good  y=take hint")   # a suspect row is uncertain
     tool.session.source.landings[0] = None
     assert "  ok  LANDING  landings 1  zoom x1.0" in view.hud_lines(tool.session.rows[0], None, None)[0]
-    tool.session.dirty = True
+    tool.session.touch("ball")
     assert "*unsaved*" in view.hud_lines(tool.session.rows[0], None, None)[0]
     assert "SPACE=take hint  x=keep draft" in view.hud_lines(tool.session.rows[0], None, {"x": 1.0, "y": 1.0, "trusted": True})[1]
 
