@@ -2,6 +2,7 @@
 fixtures every suite shares. Tests are plain pytest functions with fixtures and ``parametrize``;
 ``unittest.TestCase`` is not used."""
 import contextlib
+import faulthandler
 import sys
 from pathlib import Path
 
@@ -100,3 +101,15 @@ def fake_cuda(monkeypatch):
     from tennis_tracker import video_decode
     monkeypatch.setattr(video_decode, "nvc", None)
     return real_device
+
+
+@pytest.fixture
+def quiet_spawn():
+    """Windows' CreateProcess raises and handles an access violation inside the call, which
+    pytest's fault handler would print as a crash; it is off while the child starts."""
+    enabled = faulthandler.is_enabled()
+    if enabled and sys.platform == "win32":
+        faulthandler.disable()
+    yield
+    if enabled and sys.platform == "win32":
+        faulthandler.enable()

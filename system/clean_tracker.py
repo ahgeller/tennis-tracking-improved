@@ -10,6 +10,7 @@ from typing import Iterable, Optional, Tuple
 
 from tennis_tracker.config import Config
 from tennis_tracker.paths import BOUNCE_MODEL, COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE, ROOT
+from tennis_tracker.live.fixed_lag import WHOLE_CLIP, parse_delay
 from tennis_tracker.live.pipeline import LiveOptions, run_live
 from tennis_tracker.live.source import PACINGS, DropPolicy
 from tennis_tracker.pipeline import run
@@ -54,19 +55,25 @@ def _parser() -> argparse.ArgumentParser:
     live = parser.add_argument_group("live", "Track frame by frame as they arrive (tennis_tracker/live); "
                                              "writes the tracking JSON and <json stem>.live.json, no video")
     live.add_argument("--live", action="store_true", help="Run the live tracker on --input or --camera")
-    live.add_argument("--camera", type=int, help="Capture from this camera index (implies --live)")
+    live.add_argument("--camera", type=int, help="Capture from this camera index (implies --live; the JSON "
+                                                 f"defaults to {OUTPUT / 'camera<N>_live_tracking.json'})")
+    live.add_argument("--camera-fps", type=float, metavar="FPS",
+                      help="The camera's frame rate (default: measured over its first frames)")
     live.add_argument("--pace", choices=PACINGS, default="realtime",
-                      help="realtime: a file's frames arrive at its frame rate; fast: as fast as the tracker takes them")
-    live.add_argument("--live-delay", type=_live_delay, default=LiveOptions.delay_s, metavar="SECONDS",
+                      help="realtime: a file's frames arrive at its frame rate; fast: as fast as the tracker takes "
+                           "them (files only: a camera is realtime)")
+    live.add_argument("--live-delay", type=parse_delay, default=LiveOptions.delay_s, metavar="SECONDS",
                       help="Commit each frame's output this long after the prepass has it (beyond the ball "
-                           "model's own lookahead, 4 phase frames); 'clip': only at the end, the offline answer")
+                           f"model's own lookahead, 4 phase frames); '{WHOLE_CLIP}': only at the end, the offline answer")
     live.add_argument("--live-history", type=float, default=LiveOptions.history_s, metavar="SECONDS",
                       help="Committed context each selector run keeps")
     live.add_argument("--live-every", type=float, default=LiveOptions.every_s, metavar="SECONDS",
                       help="Time between selector runs")
     live.add_argument("--live-drop", choices=[policy.value for policy in DropPolicy], default=LiveOptions.drop.value,
                       help="backlog: drop the oldest frames once more than --live-backlog wait; never: report the lag")
-    live.add_argument("--live-backlog", type=float, default=LiveOptions.max_backlog_s, metavar="SECONDS")
+    live.add_argument("--live-backlog", type=float, default=LiveOptions.max_backlog_s, metavar="SECONDS",
+                      help="With --live-drop backlog: how many seconds of frames may wait before the oldest are "
+                           "dropped (a phase group at a time)")
     live.add_argument("--record-evidence", action="store_true",
                       help="Also write <json stem>.evidence.pkl, the selector's input, for tools/live_lag_sweep.py")
     live.add_argument("--live-selector-inline", action="store_true",
@@ -74,15 +81,11 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _live_delay(value: str) -> Optional[float]:
-    return None if value == "clip" else float(value)
-
-
 def live_options(args: argparse.Namespace) -> LiveOptions:
     """The ``LiveOptions`` the command line asks for."""
     return LiveOptions(delay_s=args.live_delay, history_s=args.live_history, every_s=args.live_every,
                        pacing=args.pace, drop=DropPolicy(args.live_drop), max_backlog_s=args.live_backlog,
-                       camera=args.camera, record_evidence=bool(args.record_evidence),
+                       camera=args.camera, camera_fps=args.camera_fps, record_evidence=bool(args.record_evidence),
                        selector_process=not args.live_selector_inline)
 
 
@@ -130,7 +133,10 @@ def resolve_output_paths(input_path: str, output: str, tracking_json: Optional[s
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.camera is not None and args.pace == "fast":
+        parser.error("--pace fast is for files: a camera is realtime")
     if args.self_test:
         status = _self_test()
         if status == 0:
@@ -138,8 +144,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return status
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    output_video, tracking_json = resolve_output_paths(args.input, args.output, args.tracking_json)
     live = bool(args.live or args.camera is not None)
+    tracking_json_arg = args.tracking_json
+    if args.camera is not None and not tracking_json_arg:    # not over a file run's default JSON
+        tracking_json_arg = str(OUTPUT / f"camera{args.camera}_live{TRACKING_JSON_SUFFIX}")
+    output_video, tracking_json = resolve_output_paths(args.input, args.output, tracking_json_arg)
+    options = live_options(args) if live else None
     if not args.no_video and not live:
         print(f"[init] Tracking video: {output_video}")
     print(f"[init] Tracking JSON: {tracking_json}")
@@ -161,8 +171,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         motion_diagnostics=bool(args.motion_diagnostics),
         show_all_tracks=bool(args.showtracks),
     )
-    if live:
-        run_live(cfg, live_options(args))
+    if options is not None:
+        run_live(cfg, options)
     else:
         run(cfg)
     if not args.annotations:

@@ -7,8 +7,10 @@ cleared from the masks once pass 1 is over (``pass1.erase_ghost_rois``). Live, `
 clears the ghosts known so far from the frames a selector run is about to read, so a frame
 committed before its ghost was found keeps that motion, as it must: the ghost was not known yet.
 
-``save_evidence`` writes the masks as pass 1 made them (before any ghost was cleared) with the
-ghost log, ``(commit frame, ghost frame, box)`` in the order pass 1 found them; ``replay`` feeds
+Frames are source frames: a frame the live source dropped is fed as ``EMPTY_EVIDENCE`` (no
+detections, no masks), so the selector's frame ``i`` is source frame ``i`` and its time between
+frames is the clip's. ``save_evidence`` writes the masks as pass 1 made them (before any ghost was
+cleared) with the ghost log, ``(commit frame, ghost frame, box)`` in the order pass 1 found them; ``replay`` feeds
 them to a ``FixedLagSelector`` in arrival order, adding each ghost when pass 1 found it. Every
 input of the selector is causal and independent of the lag, so ``replay`` commits exactly what a
 live run at that lag commits (``tests/test_live_fixed_lag.py``).
@@ -18,7 +20,7 @@ from __future__ import annotations
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from ball_in_play_selector import PackedMask
 
@@ -29,7 +31,7 @@ Box = Tuple[int, int, int, int]
 # A ghost ROI as pass 1 found it: the frame being committed, the earlier frame it covers, its box.
 GhostEntry = Tuple[int, int, Box]
 EVIDENCE_SUFFIX = ".evidence.pkl"
-_FORMAT = 1
+_FORMAT = 2              # 2: indexed by source frame, with source_index
 
 
 class GhostEraser:
@@ -51,10 +53,32 @@ class GhostEraser:
             del self.erased[frame]
 
 
+# One frame of selector input as pass 1 committed it: detections, boost and raw masks (before any
+# ghost was cleared), player boxes, court keypoints.
+FrameEvidence = Tuple[Any, Optional[PackedMask], Optional[PackedMask], Any, Optional[List[float]]]
+# A source frame the live source dropped: nothing seen.
+EMPTY_EVIDENCE: FrameEvidence = ([], None, None, {}, None)
+
+
+class _EvidenceLists(Protocol):
+    detections: List[Any]
+    boost_masks: List[Optional[PackedMask]]
+    raw_motions: List[Optional[PackedMask]]
+    player_boxes: List[Any]
+    court_keypoints: List[Optional[List[float]]]
+
+
+def frame_evidence_of(evidence: _EvidenceLists, frame: int) -> FrameEvidence:
+    """Frame `frame`'s selector input from per-frame lists (``Pass1Result`` or ``RecordedEvidence``)."""
+    return (evidence.detections[frame], evidence.boost_masks[frame], evidence.raw_motions[frame],
+            evidence.player_boxes[frame], evidence.court_keypoints[frame])
+
+
 @dataclass
 class RecordedEvidence:
-    """One live run's selector input: per frame the detections, the masks as pass 1 made them,
-    the player boxes and court keypoints, and the ghost log."""
+    """One live run's selector input, per source frame: the detections, the masks as pass 1 made
+    them, the player boxes and court keypoints (``EMPTY_EVIDENCE`` for a dropped frame), and the
+    ghost log. ``source_index`` lists the source frames pass 1 saw; the others were dropped."""
 
     fps: float
     width: int
@@ -65,14 +89,16 @@ class RecordedEvidence:
     player_boxes: List[Any] = field(default_factory=list)
     court_keypoints: List[Optional[List[float]]] = field(default_factory=list)
     ghosts: List[GhostEntry] = field(default_factory=list)
+    source_index: List[int] = field(default_factory=list)
 
-    def add_frame(self, result: Pass1Result, frame: int) -> None:
-        """Record frame `frame` as pass 1 just committed it (before any ghost is cleared from it)."""
-        self.detections.append(result.detections[frame])
-        self.boost_masks.append(result.boost_masks[frame])
-        self.raw_motions.append(result.raw_motions[frame])
-        self.player_boxes.append(result.player_boxes[frame])
-        self.court_keypoints.append(result.court_keypoints[frame])
+    def add(self, evidence: FrameEvidence) -> None:
+        """Record the next source frame's input as the selector was fed it."""
+        detections, boost, raw, players, court = evidence
+        self.detections.append(detections)
+        self.boost_masks.append(boost)
+        self.raw_motions.append(raw)
+        self.player_boxes.append(players)
+        self.court_keypoints.append(court)
 
 
 def save_evidence(path: Path, evidence: RecordedEvidence) -> None:
@@ -84,19 +110,12 @@ def save_evidence(path: Path, evidence: RecordedEvidence) -> None:
 def load_evidence(path: Path) -> RecordedEvidence:
     with path.open("rb") as handle:
         stored = pickle.load(handle)
-    if stored.get("format") != _FORMAT:
+    if stored.get("format") not in (1, _FORMAT):
         raise ValueError(f"{path} is not live evidence of format {_FORMAT}")
-    return stored["evidence"]
-
-
-# One frame of selector input as pass 1 committed it: detections, boost and raw masks (before any
-# ghost was cleared), player boxes, court keypoints.
-FrameEvidence = Tuple[Any, Optional[PackedMask], Optional[PackedMask], Any, Optional[List[float]]]
-
-
-def frame_evidence(evidence: RecordedEvidence, frame: int) -> FrameEvidence:
-    return (evidence.detections[frame], evidence.boost_masks[frame], evidence.raw_motions[frame],
-            evidence.player_boxes[frame], evidence.court_keypoints[frame])
+    evidence: RecordedEvidence = stored["evidence"]
+    if stored["format"] == 1:           # recorded with nothing dropped: every frame was seen
+        evidence.source_index = list(range(len(evidence.detections)))
+    return evidence
 
 
 class EvidenceFeed:
@@ -147,6 +166,6 @@ def replay(evidence: RecordedEvidence, settings: LagSettings) -> FixedLagSelecto
     for entry in evidence.ghosts:
         by_commit.setdefault(entry[0], []).append(entry)
     for frame in range(len(evidence.detections)):
-        feed.add(frame_evidence(evidence, frame), by_commit.get(frame, ()))
+        feed.add(frame_evidence_of(evidence, frame), by_commit.get(frame, ()))
     feed.finish()
     return feed.selector

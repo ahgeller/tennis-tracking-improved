@@ -5,7 +5,7 @@
 
 A live run (``clean_tracker.py --live``, or ``evaluate_archive.py --mode pipeline --live``) records
 each clip's per-frame evidence, the input the selector reads, beside its tracking JSON
-(``<json stem>.evidence.pkl``, ``tennis_tracker.live.pipeline.save_evidence``). Everything upstream
+(``<json stem>.evidence.pkl``, ``tennis_tracker.live.evidence.save_evidence``). Everything upstream
 of the selector is causal and does not depend on the delay, so replaying
 ``tennis_tracker.live.fixed_lag.FixedLagSelector`` over that evidence on the CPU gives exactly the
 rows a live run at another delay would commit. ``clip`` is the whole clip as the delay: the offline
@@ -24,7 +24,7 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import NamedTuple, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -39,7 +39,8 @@ from finetune.scoring.pipeline_score import ClipScore, score_pipeline_clip  # no
 from tennis_tracker.court.court_geometry import last_valid_court_keypoints  # noqa: E402
 from tennis_tracker.export import frame_result_to_json, json_safe  # noqa: E402
 from tennis_tracker.live.evidence import EVIDENCE_SUFFIX, load_evidence, replay  # noqa: E402
-from tennis_tracker.live.fixed_lag import LagSettings  # noqa: E402
+from tennis_tracker.live.fixed_lag import (DEFAULT_EVERY_S, DEFAULT_HISTORY_S, LagSettings,  # noqa: E402
+                                           parse_delay)
 from tennis_tracker.tracking_schema import TrackingFrames  # noqa: E402
 
 MOVED_PX = 0.5      # a frame whose output moved more than this from the whole-clip answer differs
@@ -65,10 +66,6 @@ class Replay(NamedTuple):
     seconds: float          # the replay's selector time (one process, so only roughly a live run's)
 
 
-def _delay(value: str) -> Optional[float]:
-    return None if value == "clip" else float(value)
-
-
 def replay_rows(evidence_path: Path, setting: Setting) -> Tuple[TrackingFrames, int, float]:
     """The tracking frames the fixed-lag selector commits over one recorded clip, its run count and
     the seconds the replay took."""
@@ -83,8 +80,9 @@ def replay_rows(evidence_path: Path, setting: Setting) -> Tuple[TrackingFrames, 
         row["court_keypoints"] = json_safe(recorded.court_keypoints[index])
         row["player_boxes"] = json_safe(recorded.player_boxes[index])
         frames.append(row)
+    last_court = last_valid_court_keypoints(recorded.court_keypoints)
     payload: TrackingFrames = {"frames": frames,
-                               "last_valid_court_keypoints": last_valid_court_keypoints(recorded.court_keypoints)}
+                               "last_valid_court_keypoints": None if last_court is None else list(last_court)}
     return payload, selector.runs, seconds
 
 
@@ -111,10 +109,12 @@ def differing_frames(rows: TrackingFrames, reference: TrackingFrames) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--evidence", type=Path, required=True, help="Folder of <clip>*.evidence.pkl files")
-    parser.add_argument("--delays", nargs="+", type=_delay, default=[0.1, 0.2, 0.33, 0.5, 1.0, 2.0, 3.0, None],
+    parser.add_argument("--delays", nargs="+", type=parse_delay, default=[0.1, 0.2, 0.33, 0.5, 1.0, 2.0, 3.0, None],
                         help="Commit delays in seconds; 'clip' is the whole clip")
-    parser.add_argument("--history", nargs="+", type=float, default=[4.0], help="Seconds of committed context")
-    parser.add_argument("--every", nargs="+", type=float, default=[0.1], help="Seconds between selector runs")
+    parser.add_argument("--history", nargs="+", type=float, default=[DEFAULT_HISTORY_S],
+                        help="Seconds of committed context (default: the live tracker's)")
+    parser.add_argument("--every", nargs="+", type=float, default=[DEFAULT_EVERY_S],
+                        help="Seconds between selector runs (default: the live tracker's)")
     parser.add_argument("--archive", type=Path, default=ROOT / "finetune")
     parser.add_argument("--holdout", default="mixed_v1")
     parser.add_argument("--jobs", type=int, default=8)

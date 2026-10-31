@@ -24,11 +24,20 @@ cv2 decode  -> queue -> prepass push (TRT encoder/decoder, rings) -> pass 1 -> e
   arrives at max(due, decoded)). `FrameQueue` holds the drop policy.
 - `live/pipeline.py`: `_Pump` pushes each frame into the prepass and keeps it for pass 1. Pass 1
   is the offline `_Pass1Collector`, unchanged; its frame reader and ball backend pull the pump on
-  demand, so it trails the prepass by exactly the lookahead it needs.
-- `engines/ball_detectors.py`: the prepass loop is now `PrepassStream` (`push(frame)`,
-  `finish()`), a mechanical extraction. `_prepass` keeps its signature and contract and is a loop
-  of `push` then `finish`. `open_stream(..., eager=True)` runs each unit as soon as it is cut. The
-  TRT engines, `TransitionRing`, `HeatRing` and the motion kernels are the same objects, not forks.
+  demand, so it trails the prepass by exactly the lookahead it needs. It hands each committed
+  frame on through its `committed(frame, ghosts)` hook, a no-op offline.
+- The device, the video's geometry and the `RunResult` come from the offline pipeline's own
+  helpers (`open_cuda_device`, `video_info`, `assemble_result`).
+- `engines/ball_detectors.py`: the prepass loop is now `PrepassStream`. It is a mechanical
+  extraction:
+  - `push(frame)` takes one frame.
+  - `finish()` ends the prepass: it makes every frame final, syncs the CUDA stream and marks the
+    prepass done.
+  - `report()` prints the prepass's line.
+- `_prepass` keeps its signature and contract: it is a loop of `push`, then `finish`.
+- `open_stream` runs each unit as soon as it is cut.
+- The TRT engines, `TransitionRing`, `HeatRing` and the motion kernels are the same objects, not
+  forks.
 - `live/fixed_lag.py`: `FixedLagSelector` re-runs the unchanged `select_ball_in_play` over a
   sliding window and commits frames at least L old.
 - `live/evidence.py`: the selector's input, recorded per frame with a ghost log, so any lag can be
@@ -107,11 +116,39 @@ At 60 FPS a frame has 16.7 ms; at 30 FPS, 33.3 ms.
 ## Frame drops
 
 - `DropPolicy.BACKLOG` (default for realtime files and cameras): once more than `max_backlog_s`
-  (0.5 s) of frames wait, the oldest are dropped in groups of `stride` consecutive frames (one per phase,
-  so each phase keeps its order and its frame spacing). Every dropped index is recorded and
-  reported; a dropped frame is a row with no ball in the JSON.
+  (0.5 s) of frames wait, the oldest are dropped in groups of `stride` consecutive frames
+  (`detector.source_stride_for(fps)`, one per phase). Each phase keeps its order, but across a
+  drop the two frames of a phase either side of it are further apart in time than the model's
+  1/30 s, and so are the two frames the motion gate compares. Every dropped index is recorded
+  and reported.
+- Indices after a drop: the prepass, pass 1's motion and its ROI tracker run on the frames that
+  were processed, numbered in order. The selector, the evidence record and the output run on
+  source frames: a dropped frame is fed to the selector as empty evidence (no detections, no
+  masks), so its time between frames stays the clip's. A dropped frame is a row with no ball in
+  the JSON. Ghost ROIs, track observations and the latency report are all given by source frame
+  (`tests/test_live_pipeline.py` forces drops and checks each one).
 - `DropPolicy.NEVER`: nothing is dropped; the queue's maximum wait is reported.
-- `fast` pacing (files as fast as possible) blocks the source instead of dropping.
+- `fast` pacing (files as fast as possible) blocks the source instead of dropping. A camera
+  cannot be paced fast: it would wait for the tracker and lose frames unseen.
+
+## Stopping and cameras
+
+- Ctrl-C stops the source: the frames already queued are tracked, every frame is committed, and
+  the tracking JSON, `.live.json` (`"stopped": true`) and the evidence are written. A second
+  Ctrl-C aborts. The selector's child process ignores Ctrl-C (the console sends it to every
+  process), so it is still there for the final flush.
+- A selector child that dies or fails is reported at the next frame. Its queues are then
+  abandoned, so the tracker exits instead of waiting on a full pipe. The request queue is
+  bounded (240 frames), so a selector that falls behind holds the tracker back.
+- A camera's frame rate is measured over its first 30 frames, or given with `--camera-fps`. A
+  failed read is retried for 1 s before the stream ends. The JSON names it `camera:<N>`, and by
+  default it is written to `output/camera<N>_live_tracking.json`.
+
+## The tracks in the JSON
+
+The JSON's `tracks` are the stream tracks that own a committed row. Each is the version from the
+last selector run that committed one of its rows, so its observations are the ones in that run's
+window. Offline keeps every track, including those never chosen; live keeps none of those.
 - The console prints frames in, frames out, latency and how far behind the queue is every 5 s;
   the `.live.json` report holds every measurement.
 
@@ -132,6 +169,13 @@ At 60 FPS a frame has 16.7 ms; at 30 FPS, 33.3 ms.
 ## Phase C seam
 
 `_Pump._push_ball(frame)` in `live/pipeline.py` is the one place a frame reaches the ball model,
-before anything runs on it, with the frame index and the committed and pending ball state at
-hand. A region gate (Phase C) chooses where the model looks there and passes the region with the
-frame. v1 always looks at the whole frame. `opt_live.md` ("Phase C hook") has the contract.
+before anything runs on it. The extension point is `run_live(..., region_for=gate)`.
+
+- **Type.** `gate` is a `RegionGate`: called with the `ArrivedFrame` (source index, picture,
+  arrival time), it returns a region `(x1, y1, x2, y2)` or None for the whole frame.
+- **Other inputs.** The gate gets nothing else at the call. Anything else it decides from, such as
+  the committed rows or pass 1's ROI tracker, it must hold itself.
+- **v1.** It passes no gate. A gate that returns a region is refused (NotImplementedError) until
+  the prepass has a region-aware push.
+
+`opt_live.md` ("Phase C hook") has the constraint such a push must meet.

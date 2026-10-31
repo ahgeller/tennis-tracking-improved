@@ -1,6 +1,7 @@
 """clean_tracker.main: the command line becomes a Config; run() and the self-test are patched out."""
 import os
 from unittest.mock import Mock, patch
+from pathlib import Path
 
 import pytest
 
@@ -147,3 +148,16 @@ def test_the_live_flags_reach_the_live_tracker(tmp_path):
     assert (options.pacing, options.delay_s, options.history_s, options.every_s) == ("fast", 1.5, 3.0, 0.2)
     assert options.drop is DropPolicy.NEVER and options.record_evidence and not options.selector_process
     assert camera.camera == 1 and camera.delay_s is None and camera.selector_process
+
+
+def test_a_camera_run_writes_its_own_json_and_is_never_paced_fast(tmp_path, capsys):
+    """A camera's JSON does not go over a file run's default one; --pace fast with a camera is refused."""
+    run_live = Mock()
+    with patch.object(clean_tracker, "run_live", run_live), patch.object(clean_tracker, "OUTPUT", tmp_path / "out"):
+        assert clean_tracker.main(["--camera", "2", "--camera-fps", "59.94"]) == 0
+        cfg, options = run_live.call_args.args
+        assert Path(cfg.tracking_json) == tmp_path / "out" / f"camera2_live{clean_tracker.TRACKING_JSON_SUFFIX}"
+        assert options.camera_fps == 59.94
+        with pytest.raises(SystemExit):
+            clean_tracker.main(["--camera", "0", "--pace", "fast"])
+    assert "a camera is realtime" in capsys.readouterr().err

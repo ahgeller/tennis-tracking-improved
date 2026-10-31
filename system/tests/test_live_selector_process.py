@@ -1,7 +1,6 @@
 """The fixed-lag selector in its child process (``tennis_tracker.live.selector_process``) commits
 what the one in line commits."""
 import dataclasses
-import faulthandler
 import subprocess
 import sys
 import textwrap
@@ -9,22 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from tennis_tracker.live.evidence import RecordedEvidence, frame_evidence, replay
+from tennis_tracker.live.evidence import RecordedEvidence, frame_evidence_of, replay
 from tennis_tracker.live.fixed_lag import LagSettings
 from tennis_tracker.live.selector_process import run_in_process
-from tests.test_live_fixed_lag import FPS, HEIGHT, WIDTH, _rally
-
-
-@pytest.fixture
-def quiet_spawn():
-    """Windows' CreateProcess raises and handles an access violation inside the call, which
-    pytest's fault handler would print as a crash; it is off while the child starts."""
-    enabled = faulthandler.is_enabled()
-    if enabled and sys.platform == "win32":
-        faulthandler.disable()
-    yield
-    if enabled and sys.platform == "win32":
-        faulthandler.enable()
+from tests._helpers import RALLY_FPS as FPS, RALLY_HEIGHT as HEIGHT, RALLY_WIDTH as WIDTH, rally as _rally
 
 
 def test_the_selector_process_commits_what_the_selector_in_line_commits(quiet_spawn):
@@ -35,7 +22,7 @@ def test_the_selector_process_commits_what_the_selector_in_line_commits(quiet_sp
                                 court_keypoints=[None for _ in detections], ghosts=ghosts)
     settings = LagSettings(delay=8, history=30, every=4)
     inline = replay(recorded, settings)
-    frames = [(frame_evidence(recorded, frame), [g for g in ghosts if g[0] == frame]) for frame in range(len(detections))]
+    frames = [(frame_evidence_of(recorded, frame), [g for g in ghosts if g[0] == frame]) for frame in range(len(detections))]
     rows, output = run_in_process(frames, FPS, WIDTH, HEIGHT, settings)
     assert len(rows) == len(detections)
     assert [None if row is None else dataclasses.astuple(row) for row in rows] == \

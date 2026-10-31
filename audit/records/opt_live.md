@@ -254,22 +254,26 @@ recall 0.946, FA 96), then the final point at L_f = 1 s (exact). Assessment:
 
 ## Phase C hook
 
-`_Pump._push_ball(frame)` (`system/tennis_tracker/live/pipeline.py`) is the one place a frame
-reaches the ball model. It runs on the tracking thread as the frame is taken from the source,
-before anything else runs on it.
+The extension point is `run_live(cfg, options, region_for=gate)` (`system/tennis_tracker/live/pipeline.py`).
+`_Pump._push_ball` calls the gate there: it is the one place a frame reaches the ball model, on
+the tracking thread, as the frame is taken from the source and before anything else runs on it.
 
-Contract for a region gate:
-
-- **In:** the `ArrivedFrame` (index, pinned host image, arrival time). Two more inputs are each
-  one attribute on the pump: the committed rows (`_LiveRun.committed`, L behind) and pass 1's ROI
-  tracker (its newest detections, about 8 frames behind). v1 does not wire them.
-- **Out:** today, what `PrepassStream.push` takes, a whole frame uploaded from its pinned buffer.
-  A gate would pass a region with the frame, and `PrepassStream` would need a region-aware `push`.
-- **Constraint:** stream_s4 encodes each frame transition once (`TransitionRing`), and a unit
-  decodes four cached transitions. So a unit's region must be the same for all four transitions,
-  or its cached features stop matching. The ring would have to key its features by region, or
-  the gate would hold a region for at least a unit (four phase frames).
-- **Not built:** the gate and the region-aware push.
+- **Type.** `RegionGate`, a callable `(ArrivedFrame) -> Optional[Region]`. `Region` is
+  `(x1, y1, x2, y2)` in source pixels; None means the whole frame.
+- **What is at hand at the call.** Only the `ArrivedFrame`: its source index, its BGR picture (in
+  a page-locked buffer when the capture allows) and its arrival time. Anything else the gate
+  decides from it must hold itself. The live run has two candidates, neither passed in v1:
+  - `_LiveRun.committed`: the committed rows, L + K behind the newest frame.
+  - pass 1's ROI tracker: its newest detections, the prepass's lookahead (4 phase frames)
+    behind.
+- **Out.** Today `PrepassStream.push` takes a whole frame, so a gate that returns a region is
+  refused with NotImplementedError. A region-aware `push` is the missing half.
+- **Constraint.** stream_s4 encodes each frame transition once (`TransitionRing`), and a unit
+  decodes four cached transitions. A unit's region must therefore be the same for all four of its
+  transitions, or its cached features stop matching. Either the ring keys its features by region,
+  or the gate holds a region for at least a unit (four phase frames).
+- **Not built.** The gate and the region-aware push. `tests/test_live_pipeline.py` checks that a
+  gate sees every frame before the model does and that a region is refused.
 
 ## What is not live yet
 

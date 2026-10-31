@@ -2,7 +2,8 @@
 
 ## Purpose and entry points
 
-This is an offline GPU tennis-video tracker. `clean_tracker.py` runs detection,
+This is a GPU tennis-video tracker, offline by default and live with `--live` or
+`--camera` (`tennis_tracker/live/`, below). `clean_tracker.py` runs detection,
 selection and optional rendering (`--weights` points it at other ball-detector
 weights, `.npz` or `.pt`; the default, `models/ball_detector.pt`, is the heat-map
 network's control run of 2026-10-26, and `models/legacy/` keeps the GridTrackNet
@@ -93,8 +94,8 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   `motion.py` are the reference and the fallback).
 - `tennis_tracker/live/`: the live tracker (`clean_tracker.py --live`, `--camera`): frames in one at
   a time, each frame's ball out a fixed delay later, the offline stages unchanged. `pipeline.py`
-  drives them (`run_live`; `_Pump._push_ball` is the one place a frame reaches the ball model, the
-  Phase C seam); `source.py` is the frame source and its drop policy; `fixed_lag.py` re-runs the
+  drives them (`run_live`; its `region_for` gate, called in `_Pump._push_ball` where a frame
+  reaches the ball model, is the Phase C seam); `source.py` is the frame source and its drop policy; `fixed_lag.py` re-runs the
   unchanged selector over a sliding window and commits frames `delay` old (`delay` None: the
   offline answer, exactly); `evidence.py` records the selector's input so
   `tools/live_lag_sweep.py` (on `train`) replays another lag on the CPU; `selector_process.py`

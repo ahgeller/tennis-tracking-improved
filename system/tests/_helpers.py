@@ -1,10 +1,12 @@
 """Synthetic fixtures shared by the regression tests. No match media or labels."""
+import dataclasses
 import threading
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 from unittest.mock import patch
 
 import cv2
+from ball_in_play_selector import PackedMask
 import numpy as np
 import pytest
 import torch
@@ -175,3 +177,34 @@ class FailingWriter(VideoWriter):
             super()._drain()
         finally:
             self.drained.set()
+
+
+# A synthetic rally for the live selector's tests.
+RALLY_WIDTH, RALLY_HEIGHT, RALLY_FPS = 640, 360, 30.0
+
+
+def rally(frames=150, gap=(60, 64)):
+    """Two balls' worth of rally: a ball crossing left to right, absent for a few frames, then back
+    the other way lower down, each with a matching motion mask; ``gap`` frames have nothing."""
+    detections, masks = [], []
+    for frame in range(frames):
+        if gap[0] <= frame < gap[1]:
+            detections.append([])
+            masks.append(None)
+            continue
+        if frame < gap[0]:
+            x, y = 20 + 8 * frame, 80 + 0.5 * frame
+        else:
+            x, y = 600 - 6 * (frame - gap[1]), 200 - 0.4 * (frame - gap[1])
+        detections.append([([x - 2, y - 2, x + 2, y + 2], 0.9)])
+        mask = np.zeros((RALLY_HEIGHT, RALLY_WIDTH), np.uint8)
+        mask[int(y) - 2:int(y) + 3, int(x) - 2:int(x) + 3] = 255
+        masks.append(PackedMask.pack(mask))
+    return detections, masks
+
+
+def same_row(a, b):
+    """Rows equal in what the tracking JSON keeps (track ids included)."""
+    if a is None or b is None:
+        return a is b
+    return dataclasses.astuple(a) == dataclasses.astuple(b)

@@ -352,15 +352,14 @@ def _live_options(args: argparse.Namespace) -> Optional[Any]:
     """The live tracker's options the command line asks for (fast pacing, evidence recorded), or None."""
     if not args.live:
         return None
+    from tennis_tracker.live.fixed_lag import parse_delay
     from tennis_tracker.live.pipeline import LiveOptions
-    defaults = LiveOptions()
-    return LiveOptions(delay_s=None if args.live_delay == "clip" else float(args.live_delay),
-                       history_s=defaults.history_s if args.live_history is None else args.live_history,
-                       every_s=defaults.every_s if args.live_every is None else args.live_every,
+    return LiveOptions(delay_s=parse_delay(args.live_delay), history_s=args.live_history, every_s=args.live_every,
                        pacing="fast", record_evidence=True, report_every_s=0.0)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    from tennis_tracker.live.fixed_lag import DEFAULT_DELAY_S, DEFAULT_EVERY_S, DEFAULT_HISTORY_S   # the live defaults
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", choices=("raw", "pipeline"), default="raw")
     parser.add_argument("--models", nargs="+", default=["gridtracknet"], choices=sorted(MODELS))
@@ -395,10 +394,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="Pipeline mode: track each clip with the live tracker (tennis_tracker/live), frame by "
                              "frame as fast as it goes, committing on --live-delay; also records each clip's "
                              "selector evidence for tools/live_lag_sweep.py")
-    parser.add_argument("--live-delay", default="0.5", metavar="SECONDS",
+    parser.add_argument("--live-delay", default=str(DEFAULT_DELAY_S), metavar="SECONDS",
                         help="The live selector's commit delay in seconds ('clip': the whole clip)")
-    parser.add_argument("--live-history", type=float, default=None, metavar="SECONDS")
-    parser.add_argument("--live-every", type=float, default=None, metavar="SECONDS")
+    parser.add_argument("--live-history", type=float, default=DEFAULT_HISTORY_S, metavar="SECONDS",
+                        help="Committed context each live selector run keeps")
+    parser.add_argument("--live-every", type=float, default=DEFAULT_EVERY_S, metavar="SECONDS",
+                        help="Time between live selector runs")
     parser.add_argument("--window-step", type=int, default=None,
                         help="Frames of a phase between the prepass's unit starts, in both modes (default: the "
                              "tracker's Config.gridtracknet_window_step); below 5 a frame's overlapping units are "

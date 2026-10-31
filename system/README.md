@@ -96,6 +96,22 @@ python clean_tracker.py --input path	o\match.mp4 --showtracks
 `--showtracks` draws every selector track on the tracking video in its own colour, chosen
 or not, under the chosen track's green trail and marker.
 
+Track live, frame by frame as the frames arrive, each frame's ball committed half a second
+after the ball model has it (`tennis_tracker/live/`; no video is written):
+
+```powershell
+python clean_tracker.py --live --input path	o\match.mp4                  # frames arrive at the clip's rate
+python clean_tracker.py --live --pace fast --input path	o\match.mp4      # as fast as the tracker goes
+python clean_tracker.py --camera 0                                         # a camera; Ctrl-C stops it
+```
+
+Beside the tracking JSON, `<json stem>.live.json` reports the latency, the dropped frames and
+the realtime factor. `--live-delay 1` (seconds) gives exactly the offline answer, a second
+later; `--live-delay clip` commits only at the end. A camera's JSON defaults to
+`output/camera<N>_live_tracking.json` and its frame rate is measured (`--camera-fps` gives it).
+Ctrl-C stops the source, tracks the frames already in and writes every output; a second
+Ctrl-C aborts. `--help` lists the other `live` options.
+
 ## Ball detector weights: two networks
 
 The tracker runs either of two ball-detector networks and picks by the weights

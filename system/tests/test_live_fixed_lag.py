@@ -9,29 +9,8 @@ from ball_in_play_selector import PackedMask, select_ball_in_play
 from tennis_tracker.live.evidence import GhostEraser, RecordedEvidence, replay
 from tennis_tracker.live.fixed_lag import FixedLagSelector, LagSettings, TrackIds
 from tennis_tracker.pass1 import Pass1Result
-
-WIDTH, HEIGHT, FPS = 640, 360, 30.0
-
-
-def _rally(frames=150, gap=(60, 64)):
-    """Two balls' worth of rally: a ball crossing left to right, absent for a few frames, then back
-    the other way lower down, each with a matching motion mask; ``gap`` frames have nothing."""
-    detections, masks = [], []
-    for frame in range(frames):
-        if gap[0] <= frame < gap[1]:
-            detections.append([])
-            masks.append(None)
-            continue
-        if frame < gap[0]:
-            x, y = 20 + 8 * frame, 80 + 0.5 * frame
-        else:
-            x, y = 600 - 6 * (frame - gap[1]), 200 - 0.4 * (frame - gap[1])
-        detections.append([([x - 2, y - 2, x + 2, y + 2], 0.9)])
-        mask = np.zeros((HEIGHT, WIDTH), np.uint8)
-        mask[int(y) - 2:int(y) + 3, int(x) - 2:int(x) + 3] = 255
-        masks.append(PackedMask.pack(mask))
-    return detections, masks
-
+from tests._helpers import RALLY_FPS as FPS, RALLY_HEIGHT as HEIGHT, RALLY_WIDTH as WIDTH
+from tests._helpers import rally as _rally, same_row as _same
 
 def _evidence(detections, masks):
     return Pass1Result(detections=[], boost_masks=list(masks), raw_motions=list(masks),
@@ -49,13 +28,6 @@ def _feed(selector, evidence, detections, on_commit=None):
         if on_commit is not None:
             on_commit(len(evidence.detections), done)
     return commits
-
-
-def _same(a, b):
-    """Rows equal in what the tracking JSON keeps (track ids included)."""
-    if a is None or b is None:
-        return a is b
-    return dataclasses.astuple(a) == dataclasses.astuple(b)
 
 
 def test_a_whole_clip_delay_is_the_offline_selector_exactly():

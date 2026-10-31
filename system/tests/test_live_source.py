@@ -4,7 +4,7 @@ import threading
 import numpy as np
 import pytest
 
-from tennis_tracker.live.source import ArrivedFrame, DropPolicy, FrameQueue, LiveSource, make_queue
+from tennis_tracker.live.source import ArrivedFrame, DropPolicy, FrameQueue, LiveSource, make_queue, measure_fps
 
 
 def _frame(index, arrived=0.0):
@@ -143,11 +143,77 @@ def _drain_frames(queue):
 def test_a_camera_is_never_paced():
     clock = _Clock(step=0.001)
     queue = FrameQueue(DropPolicy.NEVER)
-    source = LiveSource(_Capture(6), queue, fps=30.0, pacing="realtime", camera=True, clock=clock, sleep=clock.sleep)
+    source = LiveSource(_Capture(6), queue, fps=30.0, pacing="realtime", camera=True, clock=clock, sleep=clock.sleep,
+                        camera_retry_s=0.0)
     source.start()
     assert len(_drain_frames(queue)) == 6
     source.stop()
     assert not clock.slept
+
+
+class _FlakyCamera(_Capture):
+    """A camera whose reads fail for a while at `gaps` (frame index -> failed reads)."""
+
+    def __init__(self, count, gaps):
+        super().__init__(count)
+        self.gaps = dict(gaps)
+
+    def read(self, image=None):
+        if self.gaps.get(self.index, 0) > 0:
+            self.gaps[self.index] -= 1
+            return False, None
+        return super().read(image)
+
+
+def test_a_camera_retries_a_failed_read_before_ending_its_stream():
+    """A few failed reads (a driver hiccup) lose no frame; failing for longer than the retry time
+    ends the stream."""
+    clock = _Clock()
+    queue = FrameQueue(DropPolicy.NEVER)
+    source = LiveSource(_FlakyCamera(6, {2: 5, 4: 10 ** 6}), queue, fps=30.0, camera=True, clock=clock,
+                        sleep=clock.sleep, camera_retry_s=0.5)
+    source.start()
+    assert [frame.index for frame in _drain_frames(queue)] == [0, 1, 2, 3]
+    source.stop()
+    assert 0.5 <= sum(clock.slept) < 0.6
+
+
+def test_a_file_ends_at_its_first_failed_read():
+    clock = _Clock()
+    queue = FrameQueue(DropPolicy.NEVER)
+    source = LiveSource(_FlakyCamera(6, {2: 1}), queue, fps=30.0, pacing="fast", clock=clock, sleep=clock.sleep)
+    source.start()
+    assert [frame.index for frame in _drain_frames(queue)] == [0, 1]
+    source.stop()
+
+
+def test_a_stop_request_ends_the_stream_and_keeps_the_frames_queued():
+    """Ctrl-C's path: ``request_stop`` (from the signal handler) ends the stream after the frames
+    already queued, which the tracker still takes, and the source can then be stopped."""
+    queue = make_queue("fast", DropPolicy.NEVER, 0, 1)            # a few frames ahead of the tracker
+    capture = _Capture(10 ** 6)
+    source = LiveSource(capture, queue, fps=30.0, pacing="fast")
+    source.start()
+    first = [queue.get() for _ in range(3)]
+    source.request_stop()
+    rest = _drain_frames(queue)
+    source.stop()
+    indices = [frame.index for frame in first + rest]
+    assert indices == list(range(len(indices))) and len(indices) < 10
+    assert source.interrupted and capture.released
+
+
+def test_a_camera_frame_rate_is_measured_from_its_arrivals():
+    clock = _Clock()
+
+    class _Timed(_Capture):
+        def read(self, image=None):
+            clock.now += 1 / 29.97
+            return super().read(image)
+
+    assert measure_fps(_Timed(100), frames=30, clock=clock) == pytest.approx(29.97)
+    with pytest.raises(RuntimeError, match="cannot be measured"):
+        measure_fps(_Capture(3), frames=30, clock=clock)
 
 
 def test_a_failing_decoder_reaches_the_tracker():
