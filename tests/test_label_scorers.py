@@ -140,6 +140,26 @@ def test_a_perfect_court_scores_zero_and_a_point_off_by_a_metre_scores_a_metre()
     assert "frames=  1 no_court=  0 points=  14 found=0.929" in line and "m_med= 0.00m" in line and "posts=  1" in line
 
 
+
+def test_a_frame_whose_labelled_points_cannot_pin_the_court_plane_gives_pixels_only():
+    """Four points along one baseline fit some homography exactly, and it puts the rest of the court
+    anywhere: metres from it would be noise. Nor is a fit that misses its own points trusted."""
+    truth = court_image_points()
+    baseline = {name: truth[name] for name in ("far_left", "far_left_singles", "far_right_singles", "far_right")}
+    matrix, reason = court_score.fit_plane(baseline)
+    assert matrix is None and "span" in reason
+    bad = dict(truth)
+    bad["near_centre"] = (truth["near_centre"][0] + 200.0, truth["near_centre"][1])   # five metres off: mislabelled
+    matrix, reason = court_score.fit_plane(bad)
+    assert matrix is None and "miss" in reason
+    assert court_score.fit_plane(truth) == (pytest.approx(court_score.fit_plane(truth)[0]), None)
+    labels = [CourtLabel(5, baseline), CourtLabel(6, dict(truth))]
+    score = court_score.score_clip("clip", labels, {5: flat(truth), 6: flat(truth)}, 1.0)
+    assert score.frames_off_plane == 1 and len(score.m_errors) == 14 and len(score.px_errors) == 18
+    assert "no_plane=  1" in court_score.format_line(score)
+    assert any("frame 5" in note and "span" in note for note in score.notes)
+
+
 # --------------------------------------------------------------------------- shared
 
 def test_metric_lines_read_back_and_compare():
