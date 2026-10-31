@@ -10,7 +10,7 @@ import torch
 
 from tennis_tracker.config import Config
 from tennis_tracker.engines.player_detector import (
-    PlayerDetector, PlayerPending, _load_bytetrack, interpolate_player_boxes,
+    PlayerDetector, PlayerPending, _load_bytetrack, interpolate_player_boxes, player_detect_interval,
 )
 
 
@@ -92,6 +92,20 @@ def test_decode_thresholds_and_suppresses_a_raw_head_in_either_layout(channel_ma
 def test_pending_defaults_to_a_coasting_frame():
     pending = PlayerPending(np.zeros((2, 2, 3), np.uint8), 3, 2, 2, None)
     assert pending.outputs is None and pending.input_tensor is None
+
+
+@pytest.mark.parametrize("fps, configured, expected", [
+    (30.0, 1, 1), (50.0, 1, 1), (54.9, 1, 1),     # every frame below nominal 60 FPS
+    (59.5, 1, 2), (60.0, 1, 2), (120.0, 1, 2),    # every other frame from 60 FPS up
+    (60.0, 3, 3), (30.0, 3, 3),                   # a longer configured interval is kept
+    (None, 1, 1),                                 # a rate the container did not report
+])
+def test_the_player_interval_is_every_other_frame_from_60_fps(fps, configured, expected):
+    assert player_detect_interval(Config(player_detect_interval=configured), fps) == expected
+
+
+def test_the_every_other_frame_rule_can_be_turned_off():
+    assert player_detect_interval(Config(player_every_other_frame_fps=0.0), 60.0) == 1
 
 
 def test_a_disabled_detector_tracks_every_frame_so_nothing_is_interpolated():

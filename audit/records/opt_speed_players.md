@@ -7,12 +7,24 @@ detector's cost, each judged alone and then together:
 2. player detection every other frame on 60 FPS clips only;
 3. boxmot's import deferred or threaded so init or pass 1 starts sooner.
 
-**Result: none is kept.** Idea 1 has no exact schedule (evidence below). Idea 2 saves 1.4-1.7 s
-on Pomona and 3.7 s on VolyAvw, and passes the ball gate exactly. But on stream_s4 it adds one unmatched
-confirmed landing (labelled precision 0.272 to 0.269), so it fails the strict rule's "landing
-scores unchanged". Idea 3 keeps every output identical but saves nothing measurable. The branch
-carries this record only. The two rejected implementations, with their tests, are kept as patches
-against f43218a under `output/patches/` of the `speed_players` worktree (gitignored, not committed).
+**Result: none was kept by this round's rule; idea 2 ships by a later decision.** Idea 1 has no
+exact schedule (evidence below). Idea 2 saves 1.4-1.7 s on Pomona and 3.7 s on VolyAvw, and passes
+the ball gate exactly. But on stream_s4 it adds one unmatched confirmed landing (labelled precision
+0.272 to 0.269), so it fails the strict rule's "landing scores unchanged". Idea 3 keeps every
+output identical but saves nothing measurable. The branch `speed-players` carries this record
+only. The two implementations, with their tests, were kept as patches against f43218a under
+`output/patches/` of the `speed_players` worktree (gitignored, not committed).
+
+**Later decision (2026-10-31): idea 2 ships.** The owner had explicitly allowed this change, and
+it was decided to keep it, knowing its cost (section 2): the ball gate is identical for both
+models (all clips, every source, the 60 FPS subset), video6, the only held-out clip with landing
+labels, is unchanged, and the saving is 1.4-1.7 s on Pomona and 3.7 s on VolyAvw. The cost, on
+stream_s4 only: one extra confirmed landing on the training clip grid_match36 (frame 1142, from a
+0.65 px move of a padded player box's edge) and two extra placed landings on PomonaPitzer, no hit
+lost or gained. The shipped heat-map model's landing scores are unchanged. The patch was applied
+on `phase-ABplus-heatmap` as its own commit, unchanged except for documentation and a command-line
+switch: `Config.player_every_other_frame_fps = 55.0` (0 turns it off) and
+`clean_tracker.py --players-every-frame`. Idea 3 stays out.
 
 ## How it was measured
 
@@ -80,7 +92,7 @@ boxes of every frame after it.
 So no schedule skips player detection without changing an output, and no result can be reused
 exactly. Nothing was built.
 
-## 2. Every other frame at 60 FPS: rejected (fails the landing rule on stream_s4)
+## 2. Every other frame at 60 FPS: rejected by the round's rule, shipped by a later decision
 
 The implementation (`output/patches/idea2_every_other_frame_60fps.patch`):
 
@@ -167,6 +179,10 @@ real (11% of a Pomona `--no-video` run, 16% of VolyAvw's). The prior record (`op
 "Players") found the same kind of cost at N=3 (a labelled landing lost). If the landing rule
 were relaxed to "hits and recall not lower, median px not worse", this patch would pass as is.
 
+**Later decision: shipped** (see the top of this record). The cost above is accepted as measured:
+stream_s4 confirmed precision .272 to .269 and placed .248 to .244 on the labelled clips (none of
+it on the held-out video6), the shipped model unchanged.
+
 ## 3. Deferred or threaded boxmot import: rejected (no saving)
 
 On f43218a `prefetch_bytetrack()` already starts the import on a thread at the top of the run, so
@@ -224,7 +240,9 @@ second tracker-creation path.
 
 ## All together
 
-Nothing was kept, so there is no combination to measure.
+Nothing was kept by the round's rule, so there is no combination to measure here. Idea 2 with the
+`speed-motion` round's changes is measured where they were merged: the "Speed round merged"
+section of each tracker branch's record.
 
 ## Suites
 

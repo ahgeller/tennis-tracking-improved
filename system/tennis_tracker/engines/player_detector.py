@@ -61,6 +61,17 @@ def _load_bytetrack() -> ByteTrackImport:
     return _bytetrack
 
 
+def player_detect_interval(cfg: Config, fps: Optional[float]) -> int:
+    """Every how many frames the player engine and ByteTrack run on a clip of ``fps``:
+    ``cfg.player_detect_interval``, and at least every other frame from
+    ``cfg.player_every_other_frame_fps`` up (0 turns that off; an unknown rate keeps the interval)."""
+    interval = max(1, cfg.player_detect_interval)
+    threshold = cfg.player_every_other_frame_fps
+    if fps is not None and threshold > 0 and fps >= threshold:
+        interval = max(interval, 2)
+    return interval
+
+
 @dataclass
 class PlayerPending:
     """A player detection launched for one frame."""
@@ -84,17 +95,19 @@ class PlayerDetector:
     then returns no boxes.
     """
 
-    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None):
+    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None, *,
+                 fps: Optional[float] = None):
         self.cfg = cfg
         self.court_kps = court_keypoints
         self.cached_boxes: List[List[float]] = []
         self._frame_diag = 1.0
         self.session: Optional[TensorRTRuntimeSession] = None
         self.tracker: Optional[Any] = None
-        # The engine and ByteTrack run on every Nth frame only; the frames between get their boxes
-        # from ``interpolate_player_boxes`` once pass 1 has them all.  (ByteTrack cannot fill
-        # them: an update with no detections marks every track lost and returns no boxes.)
-        self._current_interval = max(1, cfg.player_detect_interval)
+        # The engine and ByteTrack run on every Nth frame only (``player_detect_interval``); the
+        # frames between get their boxes from ``interpolate_player_boxes`` once pass 1 has them
+        # all.  (ByteTrack cannot fill them: an update with no detections marks every track lost
+        # and returns no boxes.)
+        self._current_interval = player_detect_interval(cfg, fps)
         # ByteTrack's live boxes keyed by track id.
         self.slots: Dict[int, List[float]] = {}
 
@@ -117,7 +130,8 @@ class PlayerDetector:
             track_buffer=max(1, round(60 / self._current_interval)),
             match_thresh=0.8,
         )
-        print("[player] ByteTrack tracking initialized")
+        every = "every frame" if self._current_interval == 1 else f"every {self._current_interval} frames"
+        print(f"[player] ByteTrack tracking initialized, {every}")
 
     @property
     def enabled(self) -> bool:

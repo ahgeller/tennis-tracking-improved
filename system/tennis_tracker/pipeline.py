@@ -192,7 +192,7 @@ def _open_inputs(cfg: Config) -> RunContext:
     if foreground_prepass:
         detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
     court_detector = CourtDetector(cfg)
-    player_detector = PlayerDetector(cfg, court_keypoints=None)
+    player_detector = PlayerDetector(cfg, court_keypoints=None, fps=video.fps)
     if not foreground_prepass:
         detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
     encoder = encoder_probe.result() if encoder_probe is not None else None

@@ -96,6 +96,17 @@ python clean_tracker.py --input path	o\match.mp4 --showtracks
 `--showtracks` draws every selector track on the tracking video in its own colour, chosen
 or not, under the chosen track's green trail and marker.
 
+On a 60 FPS clip the player detector runs on every other frame and the boxes between are
+interpolated (`Config.player_every_other_frame_fps`, 55 FPS and up; 30 and 50 FPS clips run
+it on every frame). It saves 1.4-3.7 s a sample clip and leaves the ball track unchanged on
+the held-out clips; the player boxes move by a fraction of a pixel, which can move a landing
+that falls on a player box's edge (`audit/records/opt_speed_players.md` on the `optimization`
+branch). To run it on every frame:
+
+```powershell
+python clean_tracker.py --input path\to\match.mp4 --players-every-frame
+```
+
 ## Ball detector weights: two networks
 
 The tracker runs either of two ball-detector networks and picks by the weights
