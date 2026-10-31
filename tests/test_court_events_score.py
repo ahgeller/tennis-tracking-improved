@@ -168,7 +168,7 @@ def test_main_scores_the_clips_with_landing_labels(tmp_path, capsys):
     _write_json(out, _payload([], block={"bounces": [_row(101, x=103.0, y=204.0)], "bounce_candidates": [], "kinematic_bounces": []}))
     assert scorer.main(["--archive", str(archive), "--out-dir", str(out)]) == 0
     text = capsys.readouterr().out
-    assert "(1 clips with landing labels: video1)" in text                # video2 has none, and is not an error
+    assert "(1 clip with landing labels: video1)" in text                # video2 has none, and is not an error
     assert "=== landings [gridtracknet] tier=confirmed tolerance=0.10s ===" in text
     assert "video1         labels=   2 found=   1 hits=   1 precision=1.000 recall=0.500 | dt med=  33ms p90=  33ms | px med=  5.0px" in text
     assert "    unmatched labels:   300.5 (10.02s)" in text               # a landing between frames 300 and 301

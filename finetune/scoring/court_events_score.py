@@ -303,11 +303,13 @@ def recompute_block(payload: TrackingJson, bounce_model: Path) -> CourtEventsJso
 
 # --------------------------------------------------------------------------- the command
 
-def _labelled_clips(names: Optional[List[str]], archive: Path, include_excluded: bool) -> List[Tuple[str, Path, Path]]:
-    """(clip, ball label csv, landing label csv) for every scorable clip that has landing labels."""
+def _labelled_clips(names: Optional[List[str]], archive: Path, include_excluded: bool,
+                    holdout: Optional[str] = None) -> List[Tuple[str, Path, Path]]:
+    """(clip, ball label csv, landing label csv) for every scorable clip that has landing labels,
+    among the held-out set `holdout`'s when one is named."""
     label_dir, _ = archive_folders(archive)
     found = []
-    for video, csv_path in list_clips(names, archive, include_excluded):
+    for video, csv_path in list_clips(names, archive, include_excluded, holdout):
         bounce_path = ws.bounce_csv(video.stem, label_dir)
         if bounce_path.is_file():
             found.append((video.stem, csv_path, bounce_path))
@@ -353,6 +355,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="Label set: a finetune-style folder with videos/ and labels/ (default: $TENNIS_ARCHIVE, else finetune/)")
     parser.add_argument("--include-excluded", action="store_true",
                         help="Score every clip with landing labels, including those the review policy holds back")
+    parser.add_argument("--holdout", default=None, help="Only the clips of this held-out set (holdouts.json), e.g. mixed_v1")
     parser.add_argument("--tier", choices=TIERS, default="confirmed")
     parser.add_argument("--tolerance-s", type=float, default=TOLERANCE_S,
                         help=f"a landing within this many seconds of a label matches it (default {TOLERANCE_S})")
@@ -364,11 +367,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     archive = Path(args.archive) if args.archive else default_archive()
-    clips = _labelled_clips(args.clips, archive, args.include_excluded)
+    clips = _labelled_clips(args.clips, archive, args.include_excluded, args.holdout)
     if not clips:
         print(f"No clip in {archive} has a landing label file (labels/<clip>_bounces.csv)")
         return 1
-    print(f"[archive] {archive}  ({len(clips)} clips with landing labels: {', '.join(clip for clip, _, _ in clips)})")
+    print(f"[archive] {archive}  ({len(clips)} clip{'' if len(clips) == 1 else 's'} with landing labels: {', '.join(clip for clip, _, _ in clips)})")
     lines: List[str] = []
     try:
         for model in args.models:
