@@ -1,6 +1,6 @@
 """The prepass engine's cache (engines/ball_trt.py) and the detector's choice of runtime, with
 TensorRT and the GPU stood in for: no CUDA or TensorRT needed, except by the one test that builds a
-small streaming network's two engines and runs them (skipped without either)."""
+small streaming network's two engines and runs them (skipped without CUDA, TensorRT or onnx)."""
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -190,7 +190,7 @@ def test_a_small_streaming_networks_engines_stream_what_its_forward_pass_answers
     if not torch.cuda.is_available():
         pytest.skip("the engines run on a CUDA device")
     pytest.importorskip("tensorrt")
-    pytest.importorskip("onnx", reason="the engines are built from an ONNX export")
+    pytest.importorskip("onnx")                 # torch.onnx.export needs it to write the halves
     from tennis_tracker.engines.ball_gpu import TransitionRing
     monkeypatch.setattr(ball_trt, "HEIGHT", 64)
     monkeypatch.setattr(ball_trt, "WIDTH", 96)
