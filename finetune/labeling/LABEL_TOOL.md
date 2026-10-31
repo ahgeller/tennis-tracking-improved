@@ -191,9 +191,12 @@ becomes one between two frames keeps the hitter it had.
 `[` marks the frame a rally starts on: the server's toss leaving the hand (for a
 serve with no toss in view, the serve's hit). `]` marks the frame it is over: the
 ball is dead (its second bounce, the net, the fence, or the frame it leaves play for
-good). Each start pairs with the next end; the bar says which rally a frame is in
-(`rally 2/5`) and the timeline draws each rally as a bar, dimmer while one end is
-still missing.
+good). A fault is a rally of its own: it ends where the faulted serve is dead, and
+the second serve starts the next one, as the tracker counts them (every serve
+starts a rally). Each start pairs with the next end; the bar says which rally a
+frame is in (`rally 2/5`) and the timeline draws each rally as a bar, dimmer while
+one end is still missing. The scorer leaves a rally missing an end out, and does
+not count what the tracker found over it against it.
 
 ## Candidates
 

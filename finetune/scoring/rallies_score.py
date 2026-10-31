@@ -3,13 +3,18 @@
     python -m finetune.scoring.rallies_score --out-dir output/label_candidates [--holdout mixed_v1]
         [--compare before.log]
 
-The run's rallies are its rally legs grouped into points (``tracker_events.rallies_from_legs``).
+The run's rallies are its rally legs grouped into points (``tracker_events.rallies_from_legs``):
+every serve starts a new one. A fault is a rally of its own on both sides: the label ends it where
+the ball is dead (``event_labels``), and the second serve starts the next.
+
 Only labelled rallies with both ends marked are scored. Each labelled rally is paired with at most
 one of the run's, greedily by overlap (intersection over union of the two frame spans, the largest
 first, overlapping ones only). Per clip and pooled: rallies labelled, rallies found, the mean
 overlap over the labelled rallies (an unpaired one counts 0: the per-rally overlap), recall and
 precision at an overlap of ``MATCH_IOU`` or more, and the median and p90 start and end errors in
-seconds over the paired rallies. The tracker starts a rally at the serve's hit and the label at the
+seconds over the paired rallies. A run's rally left unpaired over a labelled rally still missing an
+end (or a start) is not counted as found, so not against precision: nobody has said yet where that
+rally stops (``open_spans``). The tracker starts a rally at the serve's hit and the label at the
 toss, so a start error of a second or so is the two definitions, not a miss.
 """
 from __future__ import annotations
@@ -20,7 +25,7 @@ from pathlib import Path
 from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 from finetune.data import workspace as ws
-from finetune.data.event_labels import read_rally_labels
+from finetune.data.event_labels import RallyLabel, read_rally_labels
 from finetune.scoring.label_scoring import (ALL, LabelledClip, add_run_arguments, finish, label_archive, labelled_clips,
                                             median, metric, metric_line, no_labels, percentile, share)
 from finetune.scoring.tracker_events import court_block, read_run, run_fps, run_json, tracker_rallies
@@ -29,6 +34,41 @@ MATCH_IOU = 0.5
 KEYS = ("iou_mean", "recall@.5", "precision@.5", "start_med", "end_med")
 
 Span = Tuple[int, int]
+OpenSpan = Tuple[int, Optional[int]]     # a stretch a labelled rally without an end may reach; None: the clip's end
+
+
+def complete_spans(rallies: Sequence[RallyLabel]) -> List[Span]:
+    """The labelled rallies with both ends marked, the ones scored."""
+    return [(rally.start, rally.end) for rally in rallies if rally.start is not None and rally.end is not None]
+
+
+def first_frame(rally: RallyLabel) -> int:
+    """A labelled rally's first marked frame (check_rallies: it has at least one)."""
+    return rally.start if rally.start is not None else int(rally.end or 0)
+
+
+def last_frame(rally: RallyLabel) -> int:
+    return rally.end if rally.end is not None else int(rally.start or 0)
+
+
+def open_spans(rallies: Sequence[RallyLabel]) -> List[OpenSpan]:
+    """Where each labelled rally with a blank cell may lie (the rallies are in order and never
+    overlap, ``event_labels.check_rallies``): one without an end from its start up to the frame
+    before the next rally (to the clip's end, None, after the last); one without a start from the
+    frame after the previous rally (the clip's first) to its end."""
+    spans: List[OpenSpan] = []
+    for k, rally in enumerate(rallies):
+        if rally.start is not None and rally.end is not None:
+            continue
+        if rally.start is not None:
+            spans.append((rally.start, first_frame(rallies[k + 1]) - 1 if k + 1 < len(rallies) else None))
+        else:
+            spans.append((last_frame(rallies[k - 1]) + 1 if k > 0 else 0, last_frame(rally)))
+    return spans
+
+
+def overlaps_open(span: Span, open_ones: Sequence[OpenSpan]) -> bool:
+    return any(span[1] >= first and (last is None or span[0] <= last) for first, last in open_ones)
 
 
 def iou(a: Span, b: Span) -> float:
@@ -58,22 +98,27 @@ def pair_rallies(labels: Sequence[Span], found: Sequence[Span]) -> List[Tuple[in
 class ClipRallyScore(NamedTuple):
     clip: str
     labels: int
-    found: int
+    found: int                          # the run's rallies judged: not those unpaired over an open label
     overlaps: List[float]               # per labelled rally; 0 for one left unpaired
     start_errors_s: List[float]         # |found - label| per pair
     end_errors_s: List[float]
     good: int                           # pairs with an overlap of MATCH_IOU or more
 
 
-def score_clip(clip: str, labels: Sequence[Span], found: Sequence[Span], fps: float) -> ClipRallyScore:
+def score_clip(clip: str, labels: Sequence[Span], found: Sequence[Span], fps: float,
+               open_ones: Sequence[OpenSpan] = ()) -> ClipRallyScore:
+    """`labels` the complete labelled rallies, `found` the run's, `open_ones` where labelled rallies
+    still missing a cell lie (``open_spans``): a found rally unpaired there is not judged."""
     pairs = pair_rallies(labels, found)
+    paired = {fi for _, fi, _ in pairs}
+    unjudged = sum(1 for fi, span in enumerate(found) if fi not in paired and overlaps_open(span, open_ones))
     overlaps = [0.0] * len(labels)
     starts, ends = [], []
     for li, fi, overlap in pairs:
         overlaps[li] = overlap
         starts.append(abs(found[fi][0] - labels[li][0]) / fps)
         ends.append(abs(found[fi][1] - labels[li][1]) / fps)
-    return ClipRallyScore(clip, len(labels), len(found), overlaps, starts, ends,
+    return ClipRallyScore(clip, len(labels), len(found) - unjudged, overlaps, starts, ends,
                           sum(1 for _, _, overlap in pairs if overlap >= MATCH_IOU))
 
 
@@ -103,8 +148,8 @@ def score_run(clips: Sequence[LabelledClip], out_dir: Path, model: str) -> List[
         payload = read_run(path)
         block = court_block(payload, path)
         fps = run_fps(payload)
-        labels = [(rally.start, rally.end) for rally in read_rally_labels(rallies_path) if rally.complete]
-        score = score_clip(clip, labels, tracker_rallies(block, fps), fps)   # type: ignore[arg-type]
+        rallies = read_rally_labels(rallies_path)
+        score = score_clip(clip, complete_spans(rallies), tracker_rallies(block, fps), fps, open_spans(rallies))
         scores.append(score)
         lines.append(format_line(score))
     lines.append(format_line(pooled(scores)))

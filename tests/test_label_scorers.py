@@ -52,6 +52,20 @@ def test_rallies_score_their_overlap_and_their_start_and_end_errors():
     assert "start_med= 0.50s" in line and "end_med= 1.00s" in line
 
 
+
+def test_a_found_rally_over_a_labelled_rally_still_without_an_end_is_not_counted_against_precision():
+    """A labelled rally with a blank cell is left out of the scoring, but what the tracker found over
+    it is not a false rally: nobody has said yet where that rally ends."""
+    from finetune.data.event_labels import RallyLabel
+    labels = [RallyLabel(10, 50), RallyLabel(100, None), RallyLabel(200, 250)]
+    assert rallies_score.open_spans(labels) == [(100, 199)]
+    found = [(12, 48), (105, 140), (202, 248), (300, 340)]
+    score = rallies_score.score_clip("clip", rallies_score.complete_spans(labels), found, 30.0,
+                                     rallies_score.open_spans(labels))
+    assert (score.labels, score.found, score.good) == (2, 3, 2)          # (300, 340) is a false one; (105, 140) unjudged
+    assert rallies_score.open_spans([RallyLabel(None, 80), RallyLabel(100, None)]) == [(0, 80), (100, None)]
+
+
 # --------------------------------------------------------------------------- players
 
 def box(x):

@@ -14,7 +14,9 @@ camera) or ``far``, and is blank when it was not said. The hit scorer
 A rally file lists the rallies, one row each, with the columns ``start,end``: ``start`` is the
 frame the point begins on (the server's toss leaves the hand; for a serve with no toss in
 view, the serve's hit), ``end`` the frame it is over (the ball is dead: its second bounce, the
-net, the fence, or the frame it leaves play for good), both ``frame_###`` cells. Either cell may
+net, the fence, or the frame it leaves play for good), both ``frame_###`` cells. A fault is a
+rally of its own, ending where the faulted serve is dead; the second serve starts the next (the
+tracker starts a rally at every serve, ``tracker_events.rallies_from_legs``). Either cell may
 be blank while a rally is still being marked; a rally with a blank cell is kept in the file and
 left out by the scorer (``finetune.scoring.rallies_score``). Rallies are listed in start order
 and never overlap.
