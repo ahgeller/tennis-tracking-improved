@@ -110,3 +110,26 @@ def test_marks_pair_into_rallies_each_start_with_the_next_end():
     assert pair_rally_marks([700], []) == [RallyLabel(700, None)]
     assert pair_rally_marks((frame for frame in [5]), (frame for frame in [5, 9])) == [RallyLabel(None, 5), RallyLabel(None, 9)]
     check_rallies(pair_rally_marks([10, 50, 300], [200, 100, 600]))   # whatever the marks, the pairs are valid
+
+
+def test_a_rewrite_keeps_the_columns_it_does_not_know_row_by_row(tmp_path):
+    """A note column somebody added in a spreadsheet survives the label tool's save: each row keeps
+    its own cell, a new row gets a blank one, and a removed row's cell goes with it."""
+    from finetune.data.bounce_labels import BounceLabel, read_bounce_labels, write_bounce_labels
+
+    hits = tmp_path / "video6_hits.csv"
+    hits.write_text("frame,ball_x,ball_y,hitter,note\nframe_010,,,near,serve\nframe_020,,,far,lob\n", encoding="utf-8")
+    write_hit_labels(hits, [HitLabel(20, None, "near"), HitLabel(30)])
+    assert hits.read_text(encoding="utf-8").splitlines() == [
+        "frame,ball_x,ball_y,hitter,note", "frame_020,,,near,lob", "frame_030,,,,"]
+    assert read_hit_labels(hits) == [HitLabel(20, None, "near"), HitLabel(30)]
+    landings = tmp_path / "video6_bounces.csv"
+    landings.write_text("frame,ball_x,ball_y,in_out\nframe_005,,,in\n", encoding="utf-8")
+    write_bounce_labels(landings, [BounceLabel(5), BounceLabel(7)])
+    assert landings.read_text(encoding="utf-8").splitlines() == ["frame,ball_x,ball_y,in_out", "frame_005,,,in", "frame_007,,,"]
+    assert read_bounce_labels(landings) == [BounceLabel(5), BounceLabel(7)]
+    rallies = tmp_path / "video6_rallies.csv"
+    rallies.write_text("start,end,winner\nframe_010,frame_090,near\n", encoding="utf-8")
+    write_rally_labels(rallies, [RallyLabel(10, 90), RallyLabel(100, None)])
+    assert rallies.read_text(encoding="utf-8").splitlines() == [
+        "start,end,winner", "frame_010,frame_090,near", "frame_100,,"]

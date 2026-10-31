@@ -25,13 +25,12 @@ marked has no file: the scorers read any file, empty included, as the whole trut
 """
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Iterable, List, Literal, Mapping, NamedTuple, Optional, Sequence, Tuple, get_args
 
-from finetune.data.bounce_labels import landing_frame, landing_name, landing_text, point_cells, point_from_ball_labels
-from finetune.data.fileio import atomic_csv
-from finetune.data.labels import COLUMNS, COORDINATE_DECIMALS, LabelFormatError, LabelPoint, frame_index, frame_name
+from finetune.data.bounce_labels import point_from_ball_labels
+from finetune.data.event_rows import read_event_rows, read_records, write_event_rows, write_rows
+from finetune.data.labels import COLUMNS, LabelFormatError, LabelPoint, frame_index, frame_name
 
 Hitter = Literal["near", "far"]
 HITTERS: Tuple[Hitter, ...] = get_args(Hitter)
@@ -60,15 +59,6 @@ class RallyLabel(NamedTuple):
         return self.start is not None and self.end is not None
 
 
-def _records(path: Path, columns: Sequence[str]) -> List[dict]:
-    """The file's non-blank rows; a file without `columns` is a LabelFormatError naming it."""
-    with path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        if not set(columns).issubset(reader.fieldnames or ()):
-            raise LabelFormatError(f"{path}: columns are {reader.fieldnames}, expected {','.join(columns)}")
-        return [record for record in reader if any((value or "").strip() for value in record.values())]
-
-
 # --------------------------------------------------------------------------- hits
 
 def hitter_of(cell: str) -> Optional[Hitter]:
@@ -88,32 +78,20 @@ def read_hit_labels(path: Path) -> List[HitLabel]:
     ``frame_<index>.5``, a hitter that is not ``near`` / ``far`` / blank, or a frame listed twice
     is a LabelFormatError naming the file."""
     labels = []
-    for record in _records(path, HIT_COLUMNS):
+    for row in read_event_rows(path, ("hitter",)):
         try:
-            frame = landing_frame(record.get("frame") or "")
-            labels.append(HitLabel(frame, point_cells(record, path), hitter_of(record.get("hitter") or "")))
+            labels.append(HitLabel(row.frame, row.point, hitter_of(row.cells["hitter"])))
         except LabelFormatError as error:
-            raise LabelFormatError(str(error) if str(error).startswith(str(path)) else f"{path}: {error}") from error
-    labels.sort(key=lambda label: label.frame)
-    for earlier, later in zip(labels, labels[1:]):
-        if earlier.frame == later.frame:
-            raise LabelFormatError(f"{path}: frame {landing_text(later.frame)} is listed twice")
+            raise LabelFormatError(f"{path}: {error}") from error
     return labels
 
 
 def write_hit_labels(path: Path, labels: Iterable[HitLabel]) -> int:
-    """Write the hits, sorted by frame, atomically. Returns the row count. A frame given twice is
+    """Write the hits, sorted by frame, atomically, keeping any column of the file it replaces that
+    is not a hit's (``event_rows.write_event_rows``). Returns the row count. A frame given twice is
     a ValueError before anything is written: ``read_hit_labels`` would refuse the file."""
-    ordered = sorted(labels, key=lambda label: label.frame)
-    for earlier, later in zip(ordered, ordered[1:]):
-        if earlier.frame == later.frame:
-            raise ValueError(f"frame {landing_text(later.frame)} is given twice; a file holds one hit per frame")
-    with atomic_csv(path) as writer:
-        writer.writerow(list(HIT_COLUMNS))
-        for frame, point, hitter in ordered:
-            cells = ("", "") if point is None else (f"{point[0]:.{COORDINATE_DECIMALS}f}", f"{point[1]:.{COORDINATE_DECIMALS}f}")
-            writer.writerow([landing_name(frame), *cells, hitter or ""])
-    return len(ordered)
+    return write_event_rows(path, [(label.frame, label.point, (label.hitter or "",)) for label in labels], ("hitter",),
+                            what="hit")
 
 
 def resolve_hit_points(labels: Iterable[HitLabel], ball_labels: Mapping[int, LabelPoint]) -> List[HitLabel]:
@@ -153,7 +131,7 @@ def read_rally_labels(path: Path) -> List[RallyLabel]:
     neither cell, a rally that does not start before it ends and rallies out of order or
     overlapping are a LabelFormatError naming the file."""
     rallies = []
-    for record in _records(path, RALLY_COLUMNS):
+    for record in read_records(path, RALLY_COLUMNS)[1]:
         try:
             rallies.append(RallyLabel(_rally_cell(record.get("start") or ""), _rally_cell(record.get("end") or "")))
         except LabelFormatError as error:
@@ -166,14 +144,19 @@ def read_rally_labels(path: Path) -> List[RallyLabel]:
 
 
 def write_rally_labels(path: Path, rallies: Sequence[RallyLabel]) -> int:
-    """Write the rallies, atomically, as given. Returns the row count. Rallies that
-    ``read_rally_labels`` would refuse are a ValueError before anything is written."""
+    """Write the rallies, atomically, as given, keeping any column of the file it replaces that is
+    not a rally's, row by row by the rally's first marked frame (``event_rows.write_rows``). Returns
+    the row count. Rallies that ``read_rally_labels`` would refuse are a ValueError before anything
+    is written."""
     check_rallies(rallies)
-    with atomic_csv(path) as writer:
-        writer.writerow(list(RALLY_COLUMNS))
-        for start, end in rallies:
-            writer.writerow([frame_name(start) if start is not None else "", frame_name(end) if end is not None else ""])
-    return len(rallies)
+    cells = [(frame_name(start) if start is not None else "", frame_name(end) if end is not None else "")
+             for start, end in rallies]
+    return write_rows(path, RALLY_COLUMNS, cells, rally_key)
+
+
+def rally_key(record: Mapping[str, str]) -> str:
+    """Which rally a row is, for carrying a column over a rewrite: its start cell, else its end cell."""
+    return (record.get("start") or "").strip() or (record.get("end") or "").strip()
 
 
 def pair_rally_marks(starts: Iterable[int], ends: Iterable[int]) -> List[RallyLabel]:

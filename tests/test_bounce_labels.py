@@ -3,8 +3,8 @@ blank points filled from the ball labels. No workspace file is read."""
 import pytest
 
 from finetune.data import workspace
-from finetune.data.bounce_labels import (BounceLabel, between_frames, landing_frame, landing_name, landing_text,
-                                         read_bounce_labels, resolve_points, write_bounce_labels)
+from finetune.data.bounce_labels import BounceLabel, between_frames, read_bounce_labels, resolve_points, write_bounce_labels
+from finetune.data.event_rows import event_frame, event_name, event_text
 from finetune.data.labels import LabelFormatError
 
 
@@ -43,15 +43,15 @@ def test_a_landing_between_two_frames_is_written_and_read_as_a_half_frame(tmp_pa
 
 
 def test_the_landing_cell_parser_takes_exactly_a_frame_or_a_half_frame():
-    assert landing_frame("frame_0412") == 412 and isinstance(landing_frame("frame_0412"), int)
-    assert landing_frame(" frame_0412.5 ") == 412.5
+    assert event_frame("frame_0412") == 412 and isinstance(event_frame("frame_0412"), int)
+    assert event_frame(" frame_0412.5 ") == 412.5
     for cell in ("frame_12.4", "frame_12.50", "frame_.5", "frame_12.", "412.5", "frame_12.5.5", ""):
         with pytest.raises(LabelFormatError, match="expected frame_<index> or frame_<index>.5"):
-            landing_frame(cell)
-    assert landing_name(412) == "frame_412" and landing_name(412.0) == "frame_412" and landing_name(3.5) == "frame_003.5"
+            event_frame(cell)
+    assert event_name(412) == "frame_412" and event_name(412.0) == "frame_412" and event_name(3.5) == "frame_003.5"
     with pytest.raises(ValueError):
-        landing_name(12.25)
-    assert landing_text(412) == "412" and landing_text(412.0) == "412" and landing_text(412.5) == "412.5"
+        event_name(12.25)
+    assert event_text(412) == "412" and event_text(412.0) == "412" and event_text(412.5) == "412.5"
     assert between_frames(3, 4) == 3.5 and between_frames(4, 3) == 3.5
     assert between_frames(412, 414) == 413 and isinstance(between_frames(412, 414), int)
 

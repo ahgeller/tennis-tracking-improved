@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import List, NamedTuple, Optional, Sequence
 
 from finetune.data import workspace as ws
-from finetune.data.bounce_labels import landing_text
 from finetune.data.detector_metrics import scale_for_width
 from finetune.data.event_labels import HitLabel, read_hit_labels, resolve_hit_points
+from finetune.data.event_rows import event_text
 from finetune.data.labels import read_labels
 from finetune.scoring.court_events_score import TOLERANCE_S, match_landings
 from finetune.scoring.label_scoring import (ALL, LabelledClip, add_run_arguments, finish, label_archive, labelled_clips,
@@ -91,7 +91,7 @@ def unmatched_lines(score: ClipHitScore, fps: float) -> List[str]:
     lines = []
     if score.unmatched_labels:
         lines.append("    unmatched labels: " + ", ".join(
-            f"{landing_text(label.frame)} ({label.frame / fps:.2f}s)" for label in score.unmatched_labels))
+            f"{event_text(label.frame)} ({label.frame / fps:.2f}s)" for label in score.unmatched_labels))
     if score.unmatched_hits:
         lines.append("    unmatched hits:   " + ", ".join(
             f"{hit.frame} ({hit.frame / fps:.2f}s, {hit.source})" for hit in score.unmatched_hits))

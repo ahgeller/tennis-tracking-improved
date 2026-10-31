@@ -38,8 +38,9 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from finetune.data import workspace as ws
-from finetune.data.bounce_labels import BounceLabel, landing_text, read_bounce_labels, resolve_points
+from finetune.data.bounce_labels import BounceLabel, read_bounce_labels, resolve_points
 from finetune.data.detector_metrics import scale_for_width
+from finetune.data.event_rows import event_text
 from finetune.data.labels import read_labels
 from finetune.scoring.archive import archive_folders, default_archive, list_clips
 from tennis_tracker.court.bounce_events import infer_kinematic_bounces, predict_bounce_events
@@ -195,7 +196,7 @@ def unmatched_lines(score: ClipLandingScore, fps: float) -> List[str]:
     lines = []
     if score.unmatched_labels:
         lines.append("    unmatched labels:   " + ", ".join(
-            f"{landing_text(label.frame)} ({label.frame / fps:.2f}s)" for label in score.unmatched_labels))
+            f"{event_text(label.frame)} ({label.frame / fps:.2f}s)" for label in score.unmatched_labels))
     if score.unmatched_events:
         lines.append("    unmatched landings: " + ", ".join(
             f"{event.frame} ({event.frame / fps:.2f}s, {event.origin}, score {event.score:.2f})"
