@@ -25,6 +25,8 @@ VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN = 37, 38, 39, 40      # what waitKeyEx gives f
 KEYS_NEXT = {VK_RIGHT, 2555904, 83, 0x01000014}         # Win32 / Qt (this build) / GTK / Qt raw
 KEYS_PREV = {VK_LEFT, 2424832, 81, 0x01000012}
 KEY_TAB = 9
+KEY_NEXT_CLIP = ord("N")                  # SHIFT+n: the next clip of a run (--players, --court); c confirms
+KEY_SAVE = ord("s")
 KEYS_QUIT = (ord("q"), 27)                 # q / ESC
 KEYS_CONFIRM = (ord(" "), 13, ord("c"))    # SPACE / ENTER / c
 KEYS_ZOOM_IN, KEYS_ZOOM_OUT = (ord("+"), ord("=")), (ord("-"), ord("_"))

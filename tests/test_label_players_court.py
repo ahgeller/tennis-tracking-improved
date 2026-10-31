@@ -256,3 +256,32 @@ def test_space_suggests_the_identity_that_looks_most_alike_among_those_not_on_co
     press(tool, " ")
     assert view.identity(view.segments[2]) == "P2"
     assert view.suggestion(3) == "P1"                                             # P2 is on court with it now
+
+
+@pytest.mark.parametrize("view_name", ["player_view", "court_view"])
+def test_c_confirms_like_space_and_shift_n_goes_to_the_next_clip_and_s_saves(tmp_path, view_name):
+    tool, _ = open_players(tmp_path) if view_name == "player_view" else open_court(tmp_path)
+    view = getattr(tool, view_name)
+    with patch.object(type(view), "next_clip") as next_clip, patch.object(Tool, "save") as save:
+        press(tool, "N")
+        press(tool, "s")
+    assert next_clip.call_count == 1 and save.call_count == 1
+    press(tool, "c")                                                              # c is SPACE here too
+    if view_name == "player_view":
+        assert view.identity(view.segments[0]) == "P1"
+    else:
+        assert 0 in tool.court_view.source.court
+
+
+def test_the_loupe_of_a_point_not_placed_follows_the_mouse(tmp_path):
+    tool, _ = open_court(tmp_path)
+    view = tool.court_view
+    view.selected = 14                                                            # the left net post: not placed
+    tool.render()
+    x, y = view.to_screen(200.0, 400.0)
+    mouse(tool, cv2.EVENT_MOUSEMOVE, x, y)
+    assert view.hover is not None and abs(view.hover[0] - 200.0) < 2 and abs(view.hover[1] - 400.0) < 2
+    revision = view.revision
+    view.selected = 0                                                             # a placed point: the mouse is not followed
+    mouse(tool, cv2.EVENT_MOUSEMOVE, x + 5, y)
+    assert view.revision == revision

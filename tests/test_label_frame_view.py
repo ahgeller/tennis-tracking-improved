@@ -47,10 +47,10 @@ def test_hud_lines_and_counts_follow_the_rows():
     tool.session.rows[0].reviewed = True
     tool.session.rows[1].suspect = True
     line1, line2 = view.hud_lines(tool.session.rows[0], None, None)
-    assert line1.startswith("a [1/6]  frame 0  (100.0, 80.0)  from csv 0.80  ok  zoom x1.0  landings 0")
+    assert line1.startswith("a [1/6]  frame 0  (100.0, 80.0)  from csv 0.80  ok  landings 0  zoom x1.0")
     assert line2.startswith("reviewed 1/6  uncertain left 1  flagged left 1   SPACE=good  y=take hint")   # a suspect row is uncertain
     tool.session.source.landings[0] = None
-    assert "  ok  LANDING  zoom x1.0  landings 1" in view.hud_lines(tool.session.rows[0], None, None)[0]
+    assert "  ok  LANDING  landings 1  zoom x1.0" in view.hud_lines(tool.session.rows[0], None, None)[0]
     tool.session.dirty = True
     assert "*unsaved*" in view.hud_lines(tool.session.rows[0], None, None)[0]
     assert "SPACE=take hint  x=keep draft" in view.hud_lines(tool.session.rows[0], None, {"x": 1.0, "y": 1.0, "trusted": True})[1]
@@ -104,3 +104,10 @@ def test_thumbnails_are_cached_by_frame_and_width_and_bounded():
     for frame in range(1, THUMBNAILS_KEPT + 1):
         view.thumbnail(frame, image, 64, 36)
     assert len(view.thumbs) == THUMBNAILS_KEPT and ("a", 0, 64) not in view.thumbs   # the oldest went first
+
+
+def test_an_ask_comes_first_on_the_second_line_so_a_narrow_bar_cuts_the_counts_not_the_ask():
+    tool = tool_over()
+    tool.session.awaiting_hit = 0.0
+    line2 = tool.frame_view.hud_lines(tool.session.rows[0], None, None)[1]
+    assert line2.startswith("CLICK WHERE THE RACKET MET THE BALL") and "reviewed 0/6" in line2

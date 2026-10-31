@@ -245,8 +245,9 @@ class FrameView:
         if source.hits or source.rally_starts or source.rally_ends:
             marks += f"  hits {len(source.hits)}  rallies {len(source.rally_starts)}"
         line1 = (f"{self.hud_place()}  frame {row.frame}  {self.hud_state(row, hint, offer)}  "
-                 f"from {row.source} {row.conf:.2f}  {tag}  zoom x{session.zoom:.1f}  {marks}"
-                 f"{'  *unsaved*' if session.dirty else ''}")
+                 f"from {row.source} {row.conf:.2f}  {tag}{'  *unsaved*' if session.dirty else ''}  {marks}  "
+                 f"zoom x{session.zoom:.1f}")
+        # What the frame is waiting for comes first, so a narrow bar cuts the counts, not the ask.
         open_here = session.open_candidates(session.cursor)
         if session.awaiting_landing is not None:
             keys = "CLICK WHERE THE BALL BOUNCED  /=unmark  other key=no point"
@@ -255,14 +256,15 @@ class FrameView:
         elif session.awaiting_candidate is not None:
             event = session.awaiting_candidate
             keys = (f"{CANDIDATE_TEXT[event.kind]} BETWEEN FRAMES: CLICK WHERE THE "
-                    f"{'BALL BOUNCED' if event.kind == 'landing' else 'RACKET MET IT'} TO MARK IT  \\=no  ;=next")
+                    f"{'BALL BOUNCED' if event.kind == 'landing' else 'RACKET MET IT'}  \\=no  ;=next")
         elif open_here:
             asks = "  ".join(f"{CANDIDATE_TEXT[event.kind]} {CANDIDATE_KEYS[event.kind]}=yes" for event in open_here)
             keys = asks + "  \\=no  ;=next"
         else:
             keys = ("SPACE=take hint  x=keep draft  v=invisible" if offer is not None else
                     "SPACE=good  y=take hint  v=invisible") + "  /=landing  .=hit  r=accept run  f=uncertain  q=quit"
-        return line1, f"{self.hud_counts()}{keys}"
+            return line1, f"{self.hud_counts()}{keys}"
+        return line1, f"{keys}     {self.hud_counts()}".rstrip()
 
     def hud_counts(self) -> str:
         """How much of the run is reviewed, uncertain, flagged and disputed, and how many of the

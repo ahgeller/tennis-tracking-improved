@@ -25,7 +25,7 @@ from finetune.labeling import label_window as win
 from finetune.labeling.label_draw import fit_picture, fit_text, hud_text
 from finetune.labeling.label_store import load_court
 from finetune.labeling.label_timeline import Timeline
-from finetune.labeling.label_window import KEYS_CONFIRM
+from finetune.labeling.label_window import KEY_NEXT_CLIP, KEY_SAVE, KEYS_CONFIRM
 from finetune.scoring.tracker_events import court_keypoints_by_frame, read_run
 from tennis_tracker.court.court_geometry import LINE_PAIRS_14
 
@@ -63,6 +63,7 @@ class CourtView:
         self.history: Dict[int, List[CourtPoints]] = {}   # frame -> its earlier drafts, for u
         self.selected = 0                             # index into COURT_POINTS
         self.dragging = False
+        self.hover: Optional[Tuple[float, float]] = None   # the mouse on the picture, for the loupe of a point not placed
         self.revision = 0
         self.message: Optional[str] = None
         self.mapping = (1.0, 0, 0)                    # scale, x and y offset of the picture on screen
@@ -216,9 +217,13 @@ class CourtView:
 
     # ---------------------------------------------------------------- input
     def handle_key(self, code: int, direction: int) -> None:
+        if code == KEY_NEXT_CLIP:
+            self.next_clip()
+            return
+        if code == KEY_SAVE:
+            self.tool.save()
+            return
         if not self.frames:
-            if code == ord("c"):
-                self.next_clip()
             return
         nudges = {ord("i"): (0, -1), ord("k"): (0, 1), ord("j"): (-1, 0), ord("l"): (1, 0)}
         if code in nudges:
@@ -238,8 +243,6 @@ class CourtView:
             self.unlabel()
         elif code == ord("u"):
             self.undo()
-        elif code == ord("c"):
-            self.next_clip()
         elif direction:
             self.go(self.position + direction)
 
@@ -275,6 +278,9 @@ class CourtView:
                                                    float(min(max(fy, 0.0), session.height - 1.0)))
             self.drafts[self.frame] = points        # one undo step for the whole drag, taken on the press
             self.revision += 1
+        elif event == cv2.EVENT_MOUSEMOVE and COURT_POINTS[self.selected] not in self.points():
+            self.hover = self.to_frame(x, y)        # the loupe shows where a click would put the point
+            self.revision += 1
         elif event == cv2.EVENT_LBUTTONUP:
             self.dragging = False
 
@@ -289,7 +295,7 @@ class CourtView:
         if not self.frames or self.source is None:
             cv2.putText(canvas, fit_text(self.message or "no frames to label", session.view_w - int(40 * ui), 0.6 * ui, 1),
                         (int(20 * ui), int(40 * ui)), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * ui, (255, 255, 255), 1, cv2.LINE_AA)
-            hud_text(canvas[session.view_h + session.timeline_h:], "COURT", "c: next clip   q: save/quit", ui)
+            hud_text(canvas[session.view_h + session.timeline_h:], "COURT", "N (SHIFT+n): next clip   q: save/quit", ui)
         else:
             image = self.source.frame(self.frame)
             picture, scale, off_x, off_y = fit_picture(image, session.view_w, session.view_h)
@@ -324,18 +330,19 @@ class CourtView:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45 * ui, colour, thin, cv2.LINE_AA)
 
     def draw_loupe(self, display: np.ndarray, image: np.ndarray) -> None:
-        """The selected point's neighbourhood at LOUPE times, in the top-right corner, with a
-        crosshair on the point (or on the picture's middle while it is not placed)."""
+        """The selected point's neighbourhood at LOUPE times, in a top corner away from it, with a
+        crosshair on the point; while it is not placed, on the mouse (where a click would put it),
+        or the picture's middle before the mouse has moved."""
         ui = self.session.ui
         size = int(LOUPE_PX * ui)
         name = COURT_POINTS[self.selected]
         point = self.points().get(name)
         h, w = image.shape[:2]
-        cx, cy = point if point is not None else (w / 2.0, h / 2.0)
+        cx, cy = point if point is not None else self.hover if self.hover is not None else (w / 2.0, h / 2.0)
         # The region is resampled about the point itself, so the crosshair sits on its sub-pixel spot.
         matrix = np.float32([[LOUPE, 0, size / 2.0 - LOUPE * cx], [0, LOUPE, size / 2.0 - LOUPE * cy]])
         loupe = cv2.warpAffine(image, matrix, (size, size), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
-        on_right = point is not None and self.to_screen(*point)[0] > display.shape[1] // 2
+        on_right = self.to_screen(cx, cy)[0] > display.shape[1] // 2
         x0 = int(10 * ui) if on_right else display.shape[1] - size - int(10 * ui)   # away from the point
         y0 = int(10 * ui)
         if x0 < 0 or y0 + size > display.shape[0]:
@@ -363,6 +370,6 @@ class CourtView:
         line1 = (f"{source.clip if source else ''}  COURT  frame {self.frame} ({self.position + 1}/{len(self.frames)})  "
                  f"{self.state()}  point {COURT_POINTS.index(name)} {name}  labelled frames {labelled}"
                  f"{'  not placed: ' + ','.join(missing) if missing else ''}{'  *unsaved*' if self.session.dirty else ''}")
-        line2 = ("drag, or click=place  ,/.=point  ijkl=nudge (SHIFT fine)  v=hidden  SPACE=confirm  y=copy prev  "
-                 "r=model  x=unlabel  u=undo  n/p=frame  c=clip  q=quit")
+        line2 = ("drag, or click=place  ,/.=point  ijkl=nudge (SHIFT fine)  v=hidden  SPACE=confirm  y=copy labelled  "
+                 "r=model  x=unlabel  u=undo  n/p=frame  N=clip  q=quit")
         return line1, line2
