@@ -90,7 +90,7 @@ python clean_tracker.py --device 1 --conf 0.55
 See what the selector chose from:
 
 ```powershell
-python clean_tracker.py --input path	o\match.mp4 --showtracks
+python clean_tracker.py --input path\to\match.mp4 --showtracks
 ```
 
 `--showtracks` draws every selector track on the tracking video in its own colour, chosen
