@@ -13,6 +13,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Typ
 import numpy as np
 
 from finetune.data.bounce_labels import between_frames
+from finetune.data.event_labels import pair_rally_marks
 from finetune.labeling.label_candidates import Candidate, CandidateKind, is_answered
 from finetune.labeling.label_draw import FILTERS, ZOOM_STEP
 from finetune.labeling.label_hints import Suggestions
@@ -412,19 +413,25 @@ class LabelSession:
         return "start" if row.frame in source.rally_starts else "end" if row.frame in source.rally_ends else None
 
     def rally_at(self, index: int) -> Optional[Tuple[int, int]]:
-        """(which rally of the clip, how many starts it has) when row `index` lies within a rally:
-        from a start up to the next mark after it, that mark included when it is an end. None
+        """(which rally of the clip, how many starts it has) when row `index` lies within a rally,
+        the rallies paired as the file pairs them (``event_labels.pair_rally_marks``): from its
+        start to its end, both included; one whose end is not marked yet up to the next rally. None
         outside every rally."""
-        row = self.rows[index]
-        source = self.by_clip[row.clip]
-        starts = sorted(source.rally_starts)
-        marks = sorted([(frame, 1) for frame in source.rally_starts] + [(frame, 0) for frame in source.rally_ends])
-        for position, (frame, is_start) in enumerate(marks):
-            if not is_start or frame > row.frame:
-                continue
-            following = marks[position + 1] if position + 1 < len(marks) else None
-            if following is None or row.frame < following[0] or (not following[1] and row.frame == following[0]):
-                return starts.index(frame) + 1, len(starts)
+        frame = self.rows[index].frame
+        source = self.by_clip[self.rows[index].clip]
+        rallies = pair_rally_marks(source.rally_starts, source.rally_ends)
+        started = [k for k, rally in enumerate(rallies) if rally.start is not None]
+        for number, k in enumerate(started, 1):
+            start, end = rallies[k].start, rallies[k].end
+            assert start is not None
+            if end is None:
+                after = rallies[k + 1] if k + 1 < len(rallies) else None
+                reach = None if after is None else after.start if after.start is not None else after.end
+                inside = start <= frame and (reach is None or frame < reach)
+            else:
+                inside = start <= frame <= end
+            if inside:
+                return number, len(started)
         return None
 
     # ---------------------------------------------------------------- candidates
@@ -436,28 +443,31 @@ class LabelSession:
         return source.candidates.on_row(index - source.start)
 
     @staticmethod
-    def label_frames(source) -> Dict[CandidateKind, Sequence[float]]:
+    def label_frames(source: "Source") -> Dict[CandidateKind, Sequence[float]]:
         """A clip's labelled frames by candidate kind: what answers a candidate."""
         return {"landing": list(source.landings), "hit": list(source.hits),
                 "rally_start": list(source.rally_starts), "rally_end": list(source.rally_ends)}
 
-    def open_candidates(self, index: int) -> List[Candidate]:
-        """The candidates row `index` wears that nobody has answered yet (label_candidates.is_answered)."""
-        source = self.by_clip[self.rows[index].clip]
-        if source.candidates is None:
+    def open_events(self, source: "Source") -> List[Tuple[Candidate, int]]:
+        """(candidate, the clip-local row it is on) for each of a clip's candidates nobody has
+        answered yet (label_candidates.is_answered): what every candidate count, walk, badge and
+        tick is taken from."""
+        candidates = source.candidates
+        if candidates is None:
             return []
         labels = self.label_frames(source)
-        return [event for event in self.candidates_on(index)
-                if not is_answered(event, source.candidates.fps, labels, source.rejected)]
+        return [(event, row) for event, row in zip(candidates.events, candidates.row_of)
+                if not is_answered(event, candidates.fps, labels, source.rejected)]
 
-    def open_candidate_rows(self, source) -> List[int]:
+    def open_candidates(self, index: int) -> List[Candidate]:
+        """The candidates row `index` wears that nobody has answered yet."""
+        source = self.by_clip[self.rows[index].clip]
+        local = index - source.start
+        return [event for event, row in self.open_events(source) if row == local]
+
+    def open_candidate_rows(self, source: "Source") -> List[int]:
         """The run's row indices of a clip's rows wearing a candidate nobody has answered yet."""
-        if source.candidates is None:
-            return []
-        labels = self.label_frames(source)
-        fps = source.candidates.fps
-        return sorted({source.start + row for event, row in zip(source.candidates.events, source.candidates.row_of)
-                       if not is_answered(event, fps, labels, source.rejected)})
+        return sorted({source.start + row for _, row in self.open_events(source)})
 
     def next_candidate(self, direction: int) -> Optional[int]:
         """The next row that way, across the run's clips, wearing a candidate nobody has answered
@@ -471,13 +481,7 @@ class LabelSession:
 
     def open_candidate_count(self) -> int:
         """How many of the run's candidates nobody has answered yet."""
-        total = 0
-        for source in self.sources:
-            if source.candidates is not None:
-                labels = self.label_frames(source)
-                total += sum(1 for event in source.candidates.events
-                             if not is_answered(event, source.candidates.fps, labels, source.rejected))
-        return total
+        return sum(len(self.open_events(source)) for source in self.sources)
 
     def reject_candidates(self, index: int) -> int:
         """Backslash: the candidates row `index` wears that nobody has answered are not events. Pressed on a

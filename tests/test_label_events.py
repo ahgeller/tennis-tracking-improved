@@ -155,6 +155,19 @@ def test_hits_are_saved_beside_the_landings_and_read_back(tmp_path):
 
 # --------------------------------------------------------------------------- rallies
 
+
+def test_which_rally_a_frame_is_in_follows_the_pairing_the_file_is_written_with():
+    """An end with no start before it is a rally without a start (event_labels.pair_rally_marks):
+    the frames before it are in no rally, the same as the file and the timeline say."""
+    tool = fake_tool(clip())
+    session = tool.session
+    session.source.rally_starts, session.source.rally_ends = {3, 6}, {2, 8}
+    assert [session.rally_at(k) for k in range(10)] == [None, None, None, (1, 2), (1, 2), (1, 2), (2, 2), (2, 2),
+                                                        (2, 2), None]
+    session.source.rally_ends = {2}                                      # 6 open: it reaches the clip's end
+    assert session.rally_at(5) == (1, 2) and session.rally_at(9) == (2, 2)
+
+
 def test_brackets_mark_a_rallys_start_and_end_and_a_frame_is_never_both():
     tool = fake_tool(clip())
     session = tool.session

@@ -14,10 +14,10 @@ import numpy as np
 
 from finetune.data.event_labels import pair_rally_marks
 from finetune.labeling.label_draw import HIT, LANDING, RALLY, Colour
-from finetune.labeling.label_candidates import is_answered
 
 if TYPE_CHECKING:
     from finetune.labeling.label_session import LabelSession
+    from finetune.labeling.label_source import Source
 
 BASE = (48, 48, 48)               # the strip where nothing is marked
 RALLY_OPEN = (110, 120, 60)       # a rally with only its start or only its end marked, dimmer than RALLY
@@ -65,17 +65,13 @@ class Timeline:
         x = to_x(session.rows[index].frame)
         cv2.rectangle(strip, (x - tick, 0), (x + tick, height - 1), (255, 255, 255), -1)
 
-    def open_candidates(self, source) -> List[Tuple[int, Colour]]:
+    def open_candidates(self, source: "Source") -> List[Tuple[int, Colour]]:
         """(strip x, colour) of each candidate of the clip nobody has answered yet."""
-        if source.candidates is None:
-            return []
-        labels = self.session.label_frames(source)
         out = []
-        for event in source.candidates.events:
-            if not is_answered(event, source.candidates.fps, labels, source.rejected):
-                colour = KIND_COLOURS[event.kind]
-                out.append((self.to_x(event.frame), (int(colour[0] * CANDIDATE_DIM), int(colour[1] * CANDIDATE_DIM),
-                                                     int(colour[2] * CANDIDATE_DIM))))
+        for event, _ in self.session.open_events(source):
+            colour = KIND_COLOURS[event.kind]
+            out.append((self.to_x(event.frame), (int(colour[0] * CANDIDATE_DIM), int(colour[1] * CANDIDATE_DIM),
+                                                 int(colour[2] * CANDIDATE_DIM))))
         return out
 
     def to_x(self, frame: float) -> int:
