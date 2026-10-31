@@ -89,7 +89,8 @@ over a grid of L, H and K (the replay reproduces a live run exactly: 0/13137 fra
 `opt_live.md` has the curve and why it bends where it does:
 
 - the smallest L within the gate is 0.33 s;
-- the smallest L that matches offline exactly is 1 s (at H of at least 1 s);
+- the smallest L that matches offline is 1 s (at H of at least 1 s). The match is in presence and
+  in position within 0.5 px; it is not bit-exact, and track ids can differ (`opt_live.md`);
 - the choice is L = 0.5 s, H = 1 s, K = 0.2 s: recall 0.951, FA 95 (79/16), .967/.913/.952,
   against offline 0.953, 95 (79/16), .971/.913/.952.
 

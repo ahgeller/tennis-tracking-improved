@@ -107,8 +107,8 @@ python clean_tracker.py --camera 0                                         # a c
 ```
 
 Beside the tracking JSON, `<json stem>.live.json` reports the latency, the dropped frames and
-the realtime factor. `--live-delay 1` (seconds) gives exactly the offline answer, a second
-later; `--live-delay clip` commits only at the end. A camera's JSON defaults to
+the realtime factor. `--live-delay 1` (seconds) gives the offline answer a second later (the
+same frames present, within half a pixel); `--live-delay clip` commits only at the end. A camera's JSON defaults to
 `output/camera<N>_live_tracking.json` and its frame rate is measured (`--camera-fps` gives it).
 Ctrl-C stops the source, tracks the frames already in and writes every output; a second
 Ctrl-C aborts. `--help` lists the other `live` options.

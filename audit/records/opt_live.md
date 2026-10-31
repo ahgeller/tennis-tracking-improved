@@ -72,8 +72,11 @@ everywhere.
   offline's 95, and no source more than 0.01 below its offline recall.
 - **Smallest L within the gate: 0.33 s** (H = 1 s): recall 0.951, FA 95 (79/16), sources
   .966/.911/.953.
-- **Smallest L that matches offline exactly: 1 s**, for every H from 1 s to 8 s: 0 of 13137 frames
-  differ. At H = 0.5 s it is not exact (70 frames): one second of committed history is needed too.
+- **Smallest L that matches offline: 1 s**, for every H from 1 s to 8 s: 0 of 13137 frames
+  differ by the measure above (presence, or more than 0.5 px). At H = 0.5 s, 70 frames differ:
+  one second of committed history is needed too. It is not bit-exact: in the real live run at
+  L = 1 s (see the merge section), 2 frames moved by 0.47 and 0.21 px, and 357 frames have a
+  different track id.
 - **H: shorter is no worse.** At every L, H = 1 s scores as well as or better than 2, 4 and 8 s,
   and it costs least (the window is H + L + K frames, and a selector run grows faster than
   linearly with its window). A long history gives the window's normalisations more frames
@@ -98,7 +101,7 @@ quarter to a third of a second of it, and none needs more than a second:
 - A track dies after 0.67 s without a detection (`max_gap_frames`), and a finished track can be
   stitched back within 1 s (`trail_stitch_gap_frames`). Past one second of lag, every decision the
   selector makes about a frame already has all the evidence the whole clip would give it, which
-  is why L = 1 s is exact.
+  is why L = 1 s matches.
 
 ## Choosing K
 
@@ -124,10 +127,11 @@ because the average lag grows.
 
 - It is within the gate with margin: recall 0.951 (0.002 below offline), FA 95 (79/16) equal to
   offline, sources .967/.913/.952, and 51 of 13137 frames differ.
-- Each frame is committed 0.5 to 0.7 s after pass 1 has it. That is 0.5 s less than the exact
-  setting.
+- Each frame is committed 0.5 to 0.7 s after pass 1 has it. That is 0.5 s less than the
+  matching setting.
 - It costs half the selector time of K = 0.1 s.
-- `--live-delay 1` gives the offline answer exactly where a second of delay can be afforded.
+- `--live-delay 1` gives the offline answer (the same gate, the same frames present, positions
+  within 0.5 px) where a second of delay can be afforded.
 
 ## The held-out gate in live mode
 
@@ -237,7 +241,7 @@ pacing gives. Off our court: 0 frames on VolyAvw, pomona and PomonaPitzer (see t
 ## Two outputs (provisional plus final)
 
 A two-output design would send a provisional point per frame at a small lag (L_p = 0.2 s:
-recall 0.946, FA 96), then the final point at L_f = 1 s (exact). Assessment:
+recall 0.946, FA 96), then the final point at L_f = 1 s (offline's answer). Assessment:
 
 - **When it helps.** It is worth having only for a display that must react within about 0.3 s, and
   only if the consumer can revise what it has already shown.
@@ -248,7 +252,7 @@ recall 0.946, FA 96), then the final point at L_f = 1 s (exact). Assessment:
   largest CPU item. It also adds a second stream of rows to the JSON and the console, and needs a
   consumer contract for corrections. None of the existing consumers can use a row that may be
   revised: not the scorers, the court events or the review tool.
-- **Verdict.** Not built in v1. One output at L = 0.5 s is within the gate and 0.5 s behind exact.
+- **Verdict.** Not built in v1. One output at L = 0.5 s is within the gate and 0.5 s behind the matching L.
   A follow-up can add the provisional stream as a second `FixedLagSelector` fed by the same
   `EvidenceFeed`, with no other code, if a consumer asks for it.
 
@@ -303,24 +307,98 @@ the tracking thread, as the frame is taken from the source and before anything e
   ratio of the window to K. It is a selector change, measured on `train`.
 - Phase C region gate (above).
 
+## Review fixes and the AB+s4 merge
+
+**Fixes** (a07fdba, 8750f9c, 5129f30):
+
+- **Selector child dies.** The tracker hung at exit: the request queue's feeder thread blocked on
+  the full pipe. Now:
+  - `close` abandons both queues unless the child finished cleanly;
+  - the request queue is bounded at 240 frames, so a slow selector holds the tracker back;
+  - the child ignores Ctrl-C.
+
+  A subprocess regression test reproduces the hang: the test fails before the fix and passes
+  after it.
+- **Ctrl-C.** Ctrl-C stops the source, and the run then tracks the frames already in and writes
+  the JSON, `.live.json` (`"stopped": true`) and the evidence. A second Ctrl-C aborts.
+  - End to end, on realtime pomona stopped after 736 frames: all three outputs were written, and
+    the evidence's replay equals the JSON on 736/736 frames.
+- **Indices after a drop.** The selector, the evidence (format 2, with `source_index`), the
+  ghosts, the tracks and the latency report are all by source frame; a dropped frame is fed as
+  empty evidence.
+  - End to end: on pomona with a two-frame backlog, 2 frames were dropped and the JSON still has
+    2022 rows. No ball is present on a dropped frame, no track observation lies on one, and the
+    replay equals the JSON.
+- **Cameras.**
+  - A camera cannot be paced fast.
+  - Its rate is measured over its first 30 frames, or given with `--camera-fps`.
+  - A failed read is retried for 1 s.
+  - The JSON names it `camera:<N>` and is written to `output/camera<N>_live_tracking.json`.
+- **Phase C.** `run_live(region_for=RegionGate)` is the typed seam.
+- **Cleanup.**
+  - The prepass lifecycle: `PrepassStream.finish` ends the prepass, and the unused `eager`
+    parameter is gone.
+  - Pass 1's `committed` hook replaces the monkeypatched ROI tracker.
+  - The offline pipeline's opening and result helpers are shared, and the live run now uses
+    offline's default FPS (24, for a file that reports none).
+  - One set of lag defaults for every entry point. The sweep's defaults were H 4 s and K 0.1 s;
+    they are now H 1 s and K 0.2 s.
+  - The masks are released as soon as they are handed on, which replaces `_PASS1_LOOKBACK`.
+  - The selector's plan/apply split and the duplicate row copies are removed.
+
+**Merge** (49b772e, `phase-ABplus-s4` at 18e10d3):
+
+- Live takes s4's threshold resolution (`operating_conf`: 0.42 for stream_s4), and
+  `live_config(cfg)` sets `ball_prepass_mode` to `foreground`.
+- The cross-module private names are now public.
+
+Re-verified on the merged branch. `output/gate_merged_*` holds the gate runs:
+
+| run | recall | FA (bridged/false) | custom | grid | prof | frames vs reference |
+|---|---|---|---|---|---|---|
+| offline, defaults | 0.953 | 95 (79/16) | .971 | .913 | .952 | equal to AB+s4 (`gate_s4_review`): frames, tracks, chosen track and court events, all 24 clips |
+| live, defaults (L 0.5 s, H 1 s, K 0.2 s) | 0.951 | 95 (79/16) | .967 | .913 | .952 | 0/13137 differ from the pre-review live gate |
+| live, `--live-delay 1` | 0.953 | 95 (79/16) | .971 | .913 | .952 | see below |
+
+How `--live-delay 1` compares with offline, frame for frame:
+
+- **Presence.** The same frames are present on all 13137 frames.
+- **Position.** Positions are equal to 1e-6 px except on 2 frames, which moved by 0.47 and 0.21 px
+  (grid_match8 frame 780 and video46 frame 444, both detections).
+- **Track ids.** They differ on 357 frames. Where offline split a track in two, the windowed runs
+  saw one track sharing observations with both halves, and `TrackIds` gives it one stream id.
+  The ids are labels: the scores do not read them.
+
+Realtime pomona at 60 FPS, merged branch, defaults:
+
+- latency median 760 ms, p99 869 ms, max 1236 ms (the max is frames 0 and 1);
+- 0 frames dropped;
+- the selector takes 17.4 ms a run (p99 40 ms, max 49 ms);
+- realtime factor 0.99.
+
+Before the review it was 781 / 1176 / 1478 ms with the selector at 29.7 ms a run. Since the
+review, pass 1's masks are released as soon as they are handed on, and the parent keeps no second
+copy of the rows; which of these brought the selector time down was not isolated.
+
 ## Tests and checks
 
-New tests, 46 in all:
+The live tests, 60 in all (`system/tests/`):
 
 | file | tests | what they check |
 |---|---|---|
-| `system/tests/test_live_prepass.py` | 17 | the push-by-push prepass equals the batched one; `_prepass`'s contract; readiness |
-| `system/tests/test_live_fixed_lag.py` | 12 | the causal selector: whole-clip equals offline, commits never change, stable track ids, out-of-order runs refused, the replay equals the live feed |
-| `system/tests/test_live_source.py` | 14 | the drop policy (BACKLOG drops whole phase groups, NEVER and fast pacing block, every drop reported); realtime pacing; the start-up hold |
-| `system/tests/test_live_selector_process.py` | 2 | the selector process equals the selector in line, and it reports a failure |
-| `system/tests/test_clean_tracker_cli.py` | 1 | `--live` and `--camera` reach the live tracker |
+| `test_live_prepass.py` | 18 | the push-by-push prepass equals the batched one on every network, each frame final within its lookahead; a remote prepass refuses frames; `push` hands the very frame on; `finish` ends the prepass |
+| `test_live_fixed_lag.py` | 12 | the causal selector: whole clip equals offline, each frame committed once, in order and only after its delay, commits never change, stable track ids, the ghost eraser, the replay equals the live feed |
+| `test_live_source.py` | 18 | the drop policy (BACKLOG drops whole phase groups, NEVER and fast pacing block, every drop reported); realtime pacing; the start-up hold; camera read retries; a file ends at its first failed read; the stop request; the camera rate measurement |
+| `test_live_selector_process.py` | 3 | the selector process equals the selector in line; a failure is reported; a tracker whose child died still exits (the hang's regression, as a subprocess) |
+| `test_live_pipeline.py` | 7 | forced drops: everything by source frame, the replay equals the run, in process as in line; the Phase C gate sees every frame and a region is refused; Ctrl-C stops and a second aborts; camera options; `live_config` keeps the prepass in the foreground |
+| `test_clean_tracker_cli.py` | 2 | the live flags reach the live tracker; a camera's own JSON path, `--camera-fps`, and `--pace fast` refused for a camera |
 
-Suites, all under `tools/gpu_lock.py` at 0a3fcac:
+Suites on the merged branch (49b772e), all under `tools/gpu_lock.py`:
 
-- `system` (tennis-opt): 655 passed.
-- Root (tennis-analysis): 1377 passed, 11 skipped. `test_ball_trt` now skips when `onnx` is not
-  installed, as it is not in tennis-analysis; it used to fail there.
-- mypy is clean: `system/mypy.ini` (23 files, the live modules added) and the root config (5 files).
+- `system` (tennis-opt): 703 passed.
+- Root (tennis-analysis): 1426 passed, 11 skipped.
+- mypy is clean: `system/mypy.ini` (25 files) and the root config (6 files, `tools/live_lag_sweep.py`
+  added).
 
 Realtime and fast-paced live outputs are identical on the five latency clips (0/11638 frames
-differ), so pacing changes timing only.
+differ, before the review), so pacing changes timing only.
