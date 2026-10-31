@@ -30,37 +30,12 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from finetune.data import workspace as ws
-from finetune.data.player_labels import NOT_PLAYER, PLAYERS, PlayerBoxLabel, read_player_labels
+from finetune.data.player_labels import MATCH_IOU, NOT_PLAYER, PLAYERS, PlayerBoxLabel, match_frame, read_player_labels
 from finetune.scoring.label_scoring import (ALL, LabelledClip, add_run_arguments, finish, label_archive, labelled_clips,
                                             metric, metric_line, no_labels, share)
 from finetune.scoring.tracker_events import player_boxes_by_frame, read_run, run_json
 
-MATCH_IOU = 0.5
 KEYS = ("coverage", "identity", "switches", "non_players")
-
-
-def box_iou(a: Sequence[float], b: Sequence[float]) -> float:
-    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
-    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
-    inter = ix * iy
-    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-    return inter / union if union > 0 else 0.0
-
-
-def match_frame(labels: Sequence[PlayerBoxLabel], boxes: Dict[str, List[float]]) -> List[Tuple[int, str]]:
-    """(label index, track) pairs on one frame, one to one, the largest overlaps first, at MATCH_IOU or more."""
-    candidates = sorted(((box_iou(label.box, box), li, track) for li, label in enumerate(labels)
-                         for track, box in boxes.items()), key=lambda c: (-c[0], c[1], c[2]))
-    pairs, used_labels, used_tracks = [], set(), set()
-    for overlap, li, track in candidates:
-        if overlap < MATCH_IOU:
-            break
-        if li in used_labels or track in used_tracks:
-            continue
-        pairs.append((li, track))
-        used_labels.add(li)
-        used_tracks.add(track)
-    return pairs
 
 
 def assign_tracks(counts: Dict[Tuple[str, str], int]) -> Dict[str, str]:

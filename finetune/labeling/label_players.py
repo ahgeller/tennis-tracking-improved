@@ -9,27 +9,33 @@ evenly through it, under a picture of the whole frame with every box on it; a ke
 another, a right click on the first crop of the second person splits the segment there.
 
 What is said is written per frame, one row per box (``player_labels``), into
-``labels/<clip>_players.csv`` with the rest of the clip's work. Reopened, the segments are cut
-again from the run and split wherever the labels change identity within one, so splits survive;
-labels of boxes the run no longer has are kept as they are.
+``labels/<clip>_players.csv`` with the rest of the clip's work. Reopened, each stored label is
+matched to the run's box it overlaps on its frame (``player_labels.match_frame``, as the scorer
+matches them): a rerun of the tracker numbers its tracks afresh, so a label belongs to its box,
+not to the track id it was saved with. The segments are cut again from the run and split wherever
+the labels change identity within one, so splits survive. A label no box of this run overlaps is
+kept as it is and written back untouched (``PlayerView.orphans``).
 
 The crops come from a decoder of the view's own, reading the clip straight through on a
 background thread (a straight read is the one frame order a pipeline run itself trusts), so the
-view is up at once and fills in as it goes. SPACE takes the suggestion: the identity whose
+view is up at once and fills in as it goes. The view owns them, by (track, frame), and the reader
+fills them under a lock: a split while they load just shows each part the crops of its frames. SPACE takes the suggestion: the identity whose
 labelled segments look most like this one (``appearance``: colour histograms of the crops),
 among those not on court at the same time as it, with a small preference for the half of the
 court the segment stands on.
 """
 from __future__ import annotations
 
+import math
 import threading
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
-from finetune.data.player_labels import NOT_PLAYER, PLAYERS, Box, PlayerBoxLabel
+from finetune.data.player_labels import NOT_PLAYER, PLAYERS, Box, PlayerBoxLabel, match_frame
 from finetune.labeling.label_draw import Colour, fit_picture, fit_text, hud_text
 from finetune.labeling.label_store import load_players
 from finetune.labeling.label_timeline import Timeline
@@ -64,8 +70,6 @@ class Segment:
     frames: List[int]
     boxes: Dict[int, Box]
     side: Optional[str] = None                     # near / far: the half of the court its feet are on most
-    crops: Dict[int, np.ndarray] = field(default_factory=dict)   # sample frame -> crop, as they are decoded
-    histogram: Optional[np.ndarray] = None
 
     @property
     def first(self) -> int:
@@ -104,15 +108,46 @@ def cut_segments(boxes_by_frame: Dict[int, Dict[str, List[float]]], fps: float) 
     return sorted(segments, key=lambda s: (s.first, s.track))
 
 
-def split_at_labels(segments: Sequence[Segment], labels: Dict[Tuple[int, str], PlayerBoxLabel]) -> List[Segment]:
+Labels = Dict[Tuple[int, str], PlayerBoxLabel]   # (frame, the run's track) -> the label of that box
+
+
+def match_labels(stored: Sequence[PlayerBoxLabel], boxes_by_frame: Dict[int, Dict[str, List[float]]]
+                 ) -> Tuple[Labels, List[PlayerBoxLabel]]:
+    """The stored labels on the run's boxes, frame by frame by overlap (``player_labels.match_frame``):
+    (the labels by (frame, the run's track), each now naming that track; the labels no box of the
+    run overlaps, as they were, but for a track id this run uses on their frame, which is dropped:
+    it named a box of a run that is gone, and a file has one box per track and frame)."""
+    by_frame: Dict[int, List[PlayerBoxLabel]] = defaultdict(list)
+    for label in stored:
+        by_frame[label.frame].append(label)
+    matched: Labels = {}
+    orphans: List[PlayerBoxLabel] = []
+    for frame, labels in sorted(by_frame.items()):
+        boxes = boxes_by_frame.get(frame, {})
+        pairs = dict(match_frame(labels, boxes))
+        for index, label in enumerate(labels):
+            if index in pairs:
+                matched[(frame, pairs[index])] = label._replace(track=pairs[index])
+            else:
+                orphans.append(label._replace(track="") if label.track in boxes else label)
+    return matched, orphans
+
+
+def said_at(labels: Labels, track: str, frame: int) -> Optional[str]:
+    """Who the box of `track` on `frame` is labelled as; None while it is not."""
+    label = labels.get((frame, track))
+    return label.player if label is not None else None
+
+
+def split_at_labels(segments: Sequence[Segment], labels: Labels) -> List[Segment]:
     """Each segment split wherever the labels of its boxes change identity, so a split made in an
     earlier session comes back as it was made."""
     out = []
     for segment in segments:
         start = 0
-        said = lambda frame: labels[(frame, segment.track)].player if (frame, segment.track) in labels else None
         for k in range(1, len(segment.frames) + 1):
-            if k == len(segment.frames) or said(segment.frames[k]) != said(segment.frames[k - 1]):
+            if k == len(segment.frames) or (said_at(labels, segment.track, segment.frames[k])
+                                            != said_at(labels, segment.track, segment.frames[k - 1])):
                 part = segment.frames[start:k]
                 out.append(Segment(segment.track, part, {f: segment.boxes[f] for f in part}, segment.side))
                 start = k
@@ -137,29 +172,33 @@ def appearance(crops: Sequence[np.ndarray]) -> Optional[np.ndarray]:
 
 
 def crop_box(image: np.ndarray, box: Box) -> Optional[np.ndarray]:
-    """The box with CROP_PAD around it, at CROP_H pixels high; None for a box off the picture."""
+    """The box with CROP_PAD around it, at CROP_H pixels high, the part of it off the picture black
+    (so a player at the edge keeps the shape and place of their box); None for a box wholly off
+    the picture."""
     x1, y1, x2, y2 = box
     pad_x, pad_y = (x2 - x1) * CROP_PAD, (y2 - y1) * CROP_PAD
     h, w = image.shape[:2]
-    left, top = max(0, int(x1 - pad_x)), max(0, int(y1 - pad_y))
-    right, bottom = min(w, int(x2 + pad_x)), min(h, int(y2 + pad_y))
-    if right - left < 2 or bottom - top < 2:
+    left, top, right, bottom = (math.floor(value) for value in (x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y))
+    in_left, in_top, in_right, in_bottom = max(0, left), max(0, top), min(w, right), min(h, bottom)
+    if right - left < 2 or bottom - top < 2 or in_right <= in_left or in_bottom <= in_top:
         return None
-    crop = image[top:bottom, left:right]
+    crop = np.zeros((bottom - top, right - left, 3), np.uint8)
+    seen = image[in_top:in_bottom, in_left:in_right]
+    crop[in_top - top:in_bottom - top, in_left - left:in_right - left] = seen
     scale = CROP_H / crop.shape[0]
     return cv2.resize(crop, (max(1, int(round(crop.shape[1] * scale))), CROP_H), interpolation=cv2.INTER_AREA)
 
 
-class CropReader:
-    """Reads the clip straight through on a thread of its own, cutting each segment's crops as their
-    frames go by. The view reads ``done`` and the segments' ``crops`` as they fill."""
+Wanted = Dict[int, List[Tuple[str, Box]]]        # frame -> the (track, box) to cut a crop of on it
 
-    def __init__(self, video: str, segments: Sequence[Segment]) -> None:
-        self.video, self.segments = video, list(segments)
-        self.wanted: Dict[int, List[Segment]] = {}
-        for segment in self.segments:
-            for frame in segment.samples():
-                self.wanted.setdefault(frame, []).append(segment)
+
+class CropReader:
+    """Reads the clip straight through on a thread of its own, cutting the crops `wanted` asks for
+    as their frames go by and handing each to `store` (track, frame, crop). The view reads
+    ``done`` as it goes."""
+
+    def __init__(self, video: str, wanted: Wanted, store: Callable[[str, int, np.ndarray], None]) -> None:
+        self.video, self.wanted, self.store = video, wanted, store
         self.total = len(self.wanted)
         self.done = 0
         self.closing = False
@@ -180,17 +219,15 @@ class CropReader:
                     if not ok:
                         self.error = f"the video ended at frame {frame}"
                         return
-                    for segment in self.wanted[frame]:
-                        crop = crop_box(image, segment.boxes[frame])
+                    for track, box in self.wanted[frame]:
+                        crop = crop_box(image, box)
                         if crop is not None:
-                            segment.crops[frame] = crop
+                            self.store(track, frame, crop)
                     self.done += 1
                 elif not capture.grab():
                     self.error = f"the video ended at frame {frame}"
                     return
                 frame += 1
-            for segment in self.segments:
-                segment.histogram = appearance(list(segment.crops.values()))
         finally:
             capture.release()
 
@@ -209,7 +246,11 @@ class PlayerView:
         self.active = False
         self.source: Optional["Source"] = None
         self.segments: List[Segment] = []
-        self.labels: Dict[Tuple[int, str], PlayerBoxLabel] = {}   # (frame, track) -> the label of that box
+        self.labels: Labels = {}                 # (frame, the run's track) -> the label of that box
+        self.orphans: List[PlayerBoxLabel] = []  # stored labels no box of the run overlaps: written back as they are
+        self.crops: Dict[Tuple[str, int], np.ndarray] = {}   # (track, frame) -> its crop, filled by the reader
+        self.crop_lock = threading.Lock()
+        self.looks: Dict[tuple, Optional[np.ndarray]] = {}  # appearance() by segment and crops cut, cached
         self.boxes_by_frame: Dict[int, Dict[str, List[float]]] = {}
         self.reader: Optional[CropReader] = None
         self.selected = 0
@@ -231,7 +272,10 @@ class PlayerView:
         self.tool.grid_view.active = self.tool.sheet_view.active = self.tool.court_view.active = False
         self.tool.follow_ball()       # a new clip: the session takes its size
         source = self.source = self.session.source
-        self.segments, self.labels, self.boxes_by_frame, self.message = [], {}, {}, None
+        self.segments, self.labels, self.orphans, self.boxes_by_frame, self.message = [], {}, [], {}, None
+        with self.crop_lock:
+            self.crops = {}
+        self.looks = {}
         self.selected = self.first_row = 0
         self.revision += 1
         if source.run is None or not source.run.is_file():
@@ -248,8 +292,8 @@ class PlayerView:
             self.message = f"{source.clip}: {error}"
             print(f"[play] {self.message}")
             return
-        self.labels = {(label.frame, label.track): label for label in source.players}
         self.boxes_by_frame = player_boxes_by_frame(payload)
+        self.labels, self.orphans = match_labels(source.players, self.boxes_by_frame)
         keypoints = court_keypoints_by_frame(payload)
         self.fps = run_fps(payload)
         segments = cut_segments(self.boxes_by_frame, self.fps)
@@ -263,10 +307,41 @@ class PlayerView:
             self.message = f"the run tracked nobody in {source.clip}"
             return
         self.selected = self.next_unassigned(-1, 1) or 0
-        self.reader = CropReader(str(source.video), self.segments)
+        wanted: Wanted = defaultdict(list)
+        for segment in self.segments:
+            for frame in segment.samples():
+                wanted[frame].append((segment.track, segment.boxes[frame]))
+        self.reader = CropReader(str(source.video), dict(wanted), self.store_crop)
         self.reader.start()
         print(f"[play] {source.clip}: {len(self.segments)} segments of {len({s.track for s in self.segments})} "
               f"tracks; {sum(self.identity(s) is not None for s in self.segments)} assigned")
+
+    def store_crop(self, track: str, frame: int, crop: np.ndarray) -> None:
+        """The reader's hand-off: one crop, from its thread."""
+        with self.crop_lock:
+            self.crops[(track, frame)] = crop
+
+    def crop(self, segment: Segment, frame: int) -> Optional[np.ndarray]:
+        with self.crop_lock:
+            return self.crops.get((segment.track, frame))
+
+    def crop_frames(self, segment: Segment) -> List[int]:
+        """The frames of `segment` its row shows a crop of: its own samples before a split, and after
+        one, those of the frames the reader cuts (or has cut) that fall in the part."""
+        wanted = self.reader.wanted if self.reader is not None else {}
+        frames = [frame for frame in segment.frames if any(track == segment.track for track, _ in wanted.get(frame, ()))]
+        if len(frames) <= CROPS:
+            return frames
+        step = (len(frames) - 1) / (CROPS - 1)
+        return sorted({frames[int(round(k * step))] for k in range(CROPS)})
+
+    def look(self, segment: Segment) -> Optional[np.ndarray]:
+        """The segment's appearance from the crops cut so far, worked out when asked."""
+        crops = [crop for crop in (self.crop(segment, frame) for frame in self.crop_frames(segment)) if crop is not None]
+        key = (segment.track, segment.first, segment.last, len(crops))
+        if key not in self.looks:
+            self.looks[key] = appearance(crops)
+        return self.looks[key]
 
     def close_reader(self) -> None:
         if self.reader is not None:
@@ -290,7 +365,7 @@ class PlayerView:
                 self.labels.pop((frame, segment.track), None)
             else:
                 self.labels[(frame, segment.track)] = PlayerBoxLabel(frame, identity, segment.boxes[frame], segment.track)
-        self.source.players = list(self.labels.values())
+        self.source.players = list(self.labels.values()) + self.orphans
         self.session.touch("players", source=self.source)
         self.revision += 1
         if identity is not None:
@@ -304,15 +379,16 @@ class PlayerView:
         if not free:
             return None
         best, best_like = None, -1.0
-        if segment.histogram is not None:
+        mine = self.look(segment)
+        if mine is not None:
             for identity in free:
-                theirs = [other for other in self.segments if self.identity(other) == identity
-                          and other.histogram is not None]
+                theirs = [(other, look) for other, look in ((other, self.look(other)) for other in self.segments
+                                                            if self.identity(other) == identity) if look is not None]
                 if not theirs:
                     continue
-                like = max(float(cv2.compareHist(segment.histogram, other.histogram, cv2.HISTCMP_CORREL))
-                           for other in theirs)
-                nearest = min(theirs, key=lambda other: min(abs(other.first - segment.last), abs(segment.first - other.last)))
+                like = max(float(cv2.compareHist(mine, look, cv2.HISTCMP_CORREL)) for _, look in theirs)
+                nearest = min((other for other, _ in theirs),
+                              key=lambda other: min(abs(other.first - segment.last), abs(segment.first - other.last)))
                 if segment.side is not None and nearest.side == segment.side:
                     like += SIDE_BONUS
                 if like > best_like:
@@ -328,13 +404,8 @@ class PlayerView:
         if frame <= segment.first or frame > segment.last:
             return
         cut = segment.frames.index(frame)
-        parts = []
-        for frames in (segment.frames[:cut], segment.frames[cut:]):
-            part = Segment(segment.track, frames, {f: segment.boxes[f] for f in frames}, segment.side)
-            part.crops = {f: crop for f, crop in segment.crops.items() if f in part.boxes}
-            part.histogram = appearance(list(part.crops.values()))
-            parts.append(part)
-        self.segments[index:index + 1] = parts
+        self.segments[index:index + 1] = [Segment(segment.track, frames, {f: segment.boxes[f] for f in frames}, segment.side)
+                                          for frames in (segment.frames[:cut], segment.frames[cut:])]
         self.revision += 1
         print(f"[play] track {segment.track} split at frame {frame}")
 
@@ -384,8 +455,12 @@ class PlayerView:
         elif code in (ord("0"), ord("v")):
             self.assign(NOT_PLAYER)
         elif code in KEYS_CONFIRM:
-            if self.segments:
-                self.assign(self.suggestion(self.selected))
+            suggested = self.suggestion(self.selected) if self.segments else None
+            if suggested is not None:
+                self.assign(suggested)
+            elif self.segments:       # SPACE takes a suggestion; it never takes a label off (u does)
+                print("[play] no identity is free for this segment (all four are on court with it): "
+                      "say who it is with 1-4, or 0 for not a player")
         elif code == ord("u"):
             self.assign(None)
         elif code == ord("f"):
@@ -496,8 +571,8 @@ class PlayerView:
                 y += int(20 * ui)
             x = caption_w
             crop_h = row_h - 2 * pad
-            for frame in segment.samples():
-                crop = segment.crops.get(frame)
+            for frame in self.crop_frames(segment):
+                crop = self.crop(segment, frame)
                 width = int(round(crop_h * 0.6)) if crop is None else int(round(crop.shape[1] * crop_h / crop.shape[0]))
                 width = min(width, int(crop_h * 1.2))
                 if x + width > session.view_w - pad:

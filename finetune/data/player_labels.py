@@ -15,13 +15,14 @@ it). A frame holds one row per labelled box; boxes the person has not assigned y
 file at all, so a frame without rows is unknown, not empty.
 
 The identity scorer (``finetune.scoring.players_score``) matches another run's boxes to these by
-overlap, frame by frame.
+overlap, frame by frame (``match_frame``), and so does the label tool when it shows them over a
+run whose track ids are not the ones they were saved with.
 """
 from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Iterable, List, NamedTuple, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Sequence, Tuple
 
 from finetune.data.fileio import atomic_csv
 from finetune.data.labels import COORDINATE_DECIMALS, LabelFormatError, frame_index, frame_name
@@ -32,6 +33,7 @@ IDENTITIES = PLAYERS + (NOT_PLAYER,)
 PLAYER_COLUMNS = ("frame", "player", "x1", "y1", "x2", "y2", "track")
 
 Box = Tuple[float, float, float, float]
+MATCH_IOU = 0.5               # a run's box and a labelled box overlapping this much are the same person
 
 
 class PlayerBoxLabel(NamedTuple):
@@ -41,6 +43,30 @@ class PlayerBoxLabel(NamedTuple):
     player: str
     box: Box
     track: str = ""
+
+
+def box_iou(a: Sequence[float], b: Sequence[float]) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def match_frame(labels: Sequence[PlayerBoxLabel], boxes: Dict[str, List[float]]) -> List[Tuple[int, str]]:
+    """(label index, track) pairs on one frame, one to one, the largest overlaps first, at MATCH_IOU or more."""
+    candidates = sorted(((box_iou(label.box, box), li, track) for li, label in enumerate(labels)
+                         for track, box in boxes.items()), key=lambda c: (-c[0], c[1], c[2]))
+    pairs, used_labels, used_tracks = [], set(), set()
+    for overlap, li, track in candidates:
+        if overlap < MATCH_IOU:
+            break
+        if li in used_labels or track in used_tracks:
+            continue
+        pairs.append((li, track))
+        used_labels.add(li)
+        used_tracks.add(track)
+    return pairs
 
 
 def identity_of(cell: str) -> str:

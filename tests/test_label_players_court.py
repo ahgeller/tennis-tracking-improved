@@ -4,6 +4,7 @@ moved and confirmed, and the files both are saved to. Every file is under tmp_pa
 decoded (the crop reader is not started)."""
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import cv2
@@ -11,7 +12,7 @@ import numpy as np
 import pytest
 
 from finetune.data.court_labels import GROUND_POINTS, read_court_labels
-from finetune.data.player_labels import PlayerBoxLabel, read_player_labels
+from finetune.data.player_labels import PlayerBoxLabel, read_player_labels, write_player_labels
 from finetune.labeling import label_players
 from finetune.labeling import label_window as win
 from finetune.labeling.label_players import Segment, appearance, cut_segments, split_at_labels
@@ -149,6 +150,90 @@ def test_without_a_run_the_player_view_says_how_to_get_one(tmp_path):
     assert source.players is None
 
 
+
+def test_stored_labels_follow_their_boxes_when_a_rerun_has_new_track_ids(tmp_path):
+    """ByteTrack numbers its tracks afresh on every run: a label belongs to its box, found by
+    overlap, not to the track id it was saved with. A fix to one person never touches the other's
+    rows, and a label whose box the run no longer has is kept as it was."""
+    left, right = (100.0, 300.0, 160.0, 460.0), (700.0, 100.0, 740.0, 200.0)
+    stored = ([PlayerBoxLabel(f, "P1", left, "1") for f in range(40)] + [PlayerBoxLabel(f, "P2", right, "2") for f in range(40)]
+              + [PlayerBoxLabel(5, "P3", (1000.0, 500.0, 1040.0, 600.0), "9"),            # nobody there in this run
+                 PlayerBoxLabel(6, "P3", (1000.0, 500.0, 1040.0, 600.0), "3")])
+    source = clip(tmp_path)
+    write_player_labels(source.players_path, stored)
+    run_json(source.run, tracks=lambda f: {"1": list(right), "3": list(left)})           # renumbered, 1 now the other one
+    tool = fake_tool(source)
+    with patch.object(label_players.CropReader, "start"):
+        tool.player_view.open()
+    view = tool.player_view
+    shown = {segment.track: view.identity(segment) for segment in view.segments}
+    assert shown == {"3": "P1", "1": "P2"}                                         # by box, not by id
+    assert view.next_unassigned(-1, 1) is None                                    # f has nothing left to find
+    view.select([s.track for s in view.segments].index("1"))
+    press(tool, "4")                                                              # the right person is P4 after all
+    tool.save(quiet=True)
+    saved = read_player_labels(source.players_path)                               # and it reads back
+    assert {(label.player, label.track) for label in saved if label.box == left} == {("P1", "3")}
+    assert len([label for label in saved if label.box == left]) == 40
+    assert {(label.player, label.track) for label in saved if label.box == right} == {("P4", "1")}
+    assert PlayerBoxLabel(5, "P3", (1000.0, 500.0, 1040.0, 600.0), "9") in saved   # kept, never overwritten,
+    assert PlayerBoxLabel(6, "P3", (1000.0, 500.0, 1040.0, 600.0), "") in saved    # its gone run's id dropped
+                                                                                  # where this run uses it
+
+
+def test_space_with_no_identity_free_leaves_the_label_alone(tmp_path, capsys):
+    tool, source = open_players(tmp_path)
+    view = tool.player_view
+    press(tool, "1")
+    view.select(0)
+    with patch.object(type(view), "suggestion", return_value=None):
+        press(tool, " ")
+    assert view.identity(view.segments[0]) == "P1"                                # SPACE never takes a label off
+    assert "no identity" in capsys.readouterr().out
+
+
+
+# --------------------------------------------------------------------------- the crops
+
+def test_the_crop_reader_cuts_every_crop_asked_for_and_says_where_the_video_ended(tmp_path):
+    from tests._helpers import write_clip
+    video = write_clip(tmp_path / "clip.avi", 6, size=(320, 180))
+    wanted = {1: [("1", (10.0, 10.0, 60.0, 120.0)), ("2", (200.0, 20.0, 240.0, 100.0))], 4: [("1", (12.0, 10.0, 62.0, 120.0))]}
+    got = {}
+    reader = label_players.CropReader(str(video), wanted, lambda track, frame, crop: got.__setitem__((track, frame), crop))
+    reader.read()
+    assert set(got) == {("1", 1), ("2", 1), ("1", 4)} and reader.done == reader.total == 2 and reader.error is None
+    assert all(crop.shape[0] == label_players.CROP_H for crop in got.values())
+    short = label_players.CropReader(str(video), {9: [("1", (10.0, 10.0, 60.0, 120.0))]}, lambda *crop: None)
+    short.read()
+    assert short.error and "ended at frame" in short.error
+
+
+def test_a_crop_at_the_picture_edge_keeps_its_shape_with_the_part_off_the_picture_black():
+    image = np.full((100, 200, 3), 255, np.uint8)
+    inside = label_players.crop_box(image, (50.0, 20.0, 90.0, 80.0))
+    edge = label_players.crop_box(image, (-20.0, 20.0, 20.0, 80.0))               # half off the left edge
+    assert edge.shape == inside.shape
+    assert edge[:, :edge.shape[1] // 3].max() == 0 and edge[:, -3:].min() == 255
+    assert label_players.crop_box(image, (-80.0, 20.0, -40.0, 80.0)) is None      # wholly off it
+
+
+def test_a_split_while_the_crops_load_gives_each_part_the_crops_of_its_frames(tmp_path):
+    from tests._helpers import write_clip
+    tool, source = open_players(tmp_path)
+    write_clip(source.video, 40, size=(WIDTH, HEIGHT))
+    view = tool.player_view
+    first = view.segments[0]
+    view.split(0, 20)                                                             # before any crop is cut
+    view.reader.read()                                                            # the reader carries on
+    before, after = view.segments[0], view.segments[1]
+    assert (before.first, before.last, after.first, after.last) == (first.first, 19, 20, first.last)
+    assert view.crop_frames(before) and all(frame < 20 for frame in view.crop_frames(before))
+    assert view.crop_frames(after) and all(frame >= 20 for frame in view.crop_frames(after))
+    assert all(view.crop(part, frame) is not None for part in (before, after) for frame in view.crop_frames(part))
+    assert view.look(before) is not None
+
+
 # --------------------------------------------------------------------------- the court view
 
 COURT = [300, 200, 980, 200, 100, 650, 1180, 650, 380, 200, 180, 650, 900, 200, 1100, 650,
@@ -242,11 +327,13 @@ def test_space_suggests_the_identity_that_looks_most_alike_among_those_not_on_co
     blue = np.zeros_like(red)
     blue[:] = (220, 60, 40)
 
+    view.reader = SimpleNamespace(wanted={f: [(str(t), (1.0, 1.0, 9.0, 9.0)) for t in range(1, 5)] for f in range(30)})
+
     def segment(track, first, last, crop):
         frames = list(range(first, last + 1))
-        part = Segment(track, frames, {f: (1.0, 1.0, 9.0, 9.0) for f in frames})
-        part.histogram = appearance([crop])
-        return part
+        for frame in frames:
+            view.store_crop(track, frame, crop)
+        return Segment(track, frames, {f: (1.0, 1.0, 9.0, 9.0) for f in frames})
     view.segments = [segment("1", 0, 9, red), segment("2", 0, 9, blue), segment("3", 20, 29, blue),
                      segment("4", 20, 29, red)]
     view.select(0)

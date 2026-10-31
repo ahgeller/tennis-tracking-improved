@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from finetune.data import player_labels
 from finetune.data.court_labels import COURT_METRES, GROUND_POINTS, CourtLabel
 from finetune.data.event_labels import HitLabel
 from finetune.data.player_labels import PlayerBoxLabel
@@ -86,7 +87,7 @@ def test_a_spectator_taken_for_a_player_counts_against_the_track():
 
 
 def test_boxes_below_the_match_overlap_are_not_matched():
-    pairs = players_score.match_frame([PlayerBoxLabel(0, "P1", (0.0, 0.0, 10.0, 10.0), "")],
+    pairs = player_labels.match_frame([PlayerBoxLabel(0, "P1", (0.0, 0.0, 10.0, 10.0), "")],
                                       {"1": [5.0, 5.0, 15.0, 15.0], "2": [0.0, 0.0, 10.0, 9.0]})
     assert pairs == [(0, "2")]
     # One to one, the most box-frames in agreement: 5 + 6 beats 7 alone.
