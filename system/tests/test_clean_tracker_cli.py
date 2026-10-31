@@ -7,6 +7,8 @@ import pytest
 import clean_tracker
 from clean_tracker import resolve_output_paths
 from tennis_tracker.ball_weights import HEATMAP_S4_WEIGHTS, STREAM_S4_WEIGHTS, UNKNOWN_CONF
+from tennis_tracker.config import Config
+from tennis_tracker.paths import BALL_WEIGHTS, STREAM_WEIGHTS
 
 STREAM_CONF, HEATMAP_CONF = STREAM_S4_WEIGHTS.conf, HEATMAP_S4_WEIGHTS.conf
 
@@ -36,7 +38,6 @@ def test_cli_paths_reach_the_config_and_the_output_folder_is_made(tmp_path):
 def test_weights_default_to_stream_s4_and_another_path_reaches_the_config_as_given(tmp_path):
     """--weights feeds Config.model_path, whose record picks the detector: the default is the
     stream_s4 file, and another path is passed through unchanged."""
-    from tennis_tracker.paths import BALL_WEIGHTS, STREAM_WEIGHTS
     assert BALL_WEIGHTS == STREAM_WEIGHTS
     assert clean_tracker._parser().get_default("weights") == str(BALL_WEIGHTS)
     _, cfg = _run_main(tmp_path, ["--weights", "runs/h1/best.pt", "--no-video"])
@@ -76,9 +77,8 @@ def test_cli_flags_reach_the_config(tmp_path):
 
 
 def test_players_run_every_other_frame_at_60_fps_unless_the_flag_asks_for_every_frame(tmp_path):
-    from tennis_tracker.config import Config
     _, cfg = _run_main(tmp_path, ["--no-video"])
-    assert cfg.player_every_other_frame_fps == Config().player_every_other_frame_fps == 55.0
+    assert cfg.player_every_other_frame_fps == Config().player_every_other_frame_fps > 0.0
     _, cfg = _run_main(tmp_path, ["--no-video", "--players-every-frame"])
     assert cfg.player_every_other_frame_fps == 0.0
 

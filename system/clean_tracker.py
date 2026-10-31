@@ -53,8 +53,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="Add per-frame motion diagnostics to the tracking JSON "
                              "(costs ~1.7 ms/frame)")
     parser.add_argument("--players-every-frame", action="store_true",
-                        help="Run the player detector on every frame of a 60 FPS clip too "
-                             "(by default it runs on every other frame there and interpolates)")
+                        help="Do not halve the player rate at 60 FPS: run the player detector on every "
+                             "frame there too (by default it runs on every other frame and interpolates)")
     parser.add_argument("--annotations", help="Validate against this annotation JSON")
     parser.add_argument("--report-json", default=str(OUTPUT / "validation.json"))
     parser.add_argument("--self-test", action="store_true")
