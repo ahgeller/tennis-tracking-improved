@@ -471,3 +471,31 @@ it waits for. The evidence's p99 falls by 25-33 ms, pass 1 doing less per frame.
 Suites at 5ef9654, under the lock: `system/` 750 passed in `tennis-opt`, 739 passed and 11 skipped
 in `tennis-analysis`; the root suite 1476 passed, 11 skipped; mypy clean in `system/` (27 files) and
 at the root (6 files).
+
+### Review fixes (2026-10-31)
+
+31b198b merges the speed round's review fixes from `phase-ABplus-s4` (`opt_abplus.md` has them,
+the memory and the timing; the unfiltered boost masks in `test_live_pipeline.py` became a plain
+`PendingBoost` fake stored with `BoostMasks.defer`). On this branch:
+
+- 4472a56: the commit hook's hold is `pass1.PlayerBoxHold`. It interpolated a held frame's player
+  boxes by pass 1's frame numbers, which skip nothing; live, the source drops frames, so it now
+  weights them by source index (`Pass1Collector.source_position`: the frame itself offline, the
+  pump's source index live; `interpolate_player_boxes` takes the positions). Tested on its own:
+  order, ghosts, the tail at release, and a held frame three quarters of the way across two dropped
+  frames; the commit-hook test collects in a closure.
+- 5579720: AGENTS.md says a skipped frame reaches the commit hook one frame late; one doubled
+  parenthetical above.
+
+Verified at 5579720 (the stream_s4 engine is `phases/ABplus`'s build), against the numbers above:
+
+| gate | recall | FA (bridged / false) | JSON |
+|---|---|---|---|
+| offline (`--court`) | 0.953 | 95 (79 / 16) | 24 / 24 equal to AB+s4's |
+| `--live` (L 0.5 s) | 0.951 | 95 (79 / 16) | 24 / 24 equal to the merge's |
+| `--live --live-delay 1` | 0.953 | 95 (79 / 16) | 24 / 24 equal to the merge's |
+
+Samples (`--court`) JSON-equal to AB+s4's, off court 1090 / 0, 2453 / 0, 3142 / 0. Realtime pomona
+(`--live`): 0 dropped, latency median 778 ms (p99 886), realtime factor 0.99. Suites: `system/` 761
+passed (`tennis-opt`), 750 passed and 11 skipped (`tennis-analysis`); root 1487 passed, 11
+skipped; mypy clean in both; the boxmot order check passes.
