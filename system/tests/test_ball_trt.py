@@ -190,6 +190,7 @@ def test_a_small_streaming_networks_engines_stream_what_its_forward_pass_answers
     if not torch.cuda.is_available():
         pytest.skip("the engines run on a CUDA device")
     pytest.importorskip("tensorrt")
+    pytest.importorskip("onnx", reason="the engines are built from an ONNX export")
     from tennis_tracker.engines.ball_gpu import TransitionRing
     monkeypatch.setattr(ball_trt, "HEIGHT", 64)
     monkeypatch.setattr(ball_trt, "WIDTH", 96)
