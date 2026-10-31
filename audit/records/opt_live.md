@@ -402,3 +402,72 @@ Suites on the merged branch (49b772e), all under `tools/gpu_lock.py`:
 
 Realtime and fast-paced live outputs are identical on the five latency clips (0/11638 frames
 differ, before the review), so pacing changes timing only.
+
+## Speed round merged (2026-10-31)
+
+df4b27c merges `phase-ABplus-s4` at 629417d, which brought in the speed round through the AB+
+branches: `speed-motion` (whole-frame motion masks, the player head decode and pinned outputs,
+the deferred boost filter), the `speed-players` record and the 60 FPS every-other-frame player
+interval (shipped by the owner's decision; `opt_speed_players.md` has its cost) and the worktree
+data tool's reference models. 8a2de41 merges it again for the AB+ records and c2b75f3 (the legacy
+ONNX exporter's notice filtered). Conflicts: `system/mypy.ini` (the live modules and speed-motion's
+`motion.py` and `engines/engine_boxes.py`, all kept) and `system/README.md` (both notes kept). The
+onnx skip in `test_ball_trt.py` was already this branch's line (166d827 and 4a21ee3 resolved to it).
+
+What the live seams needed (72c586f, 5ef9654):
+
+- **The deferred boost filter.** `Pass1Result.boost_masks` now holds a frame's boost unfiltered
+  until it is first read (`motion.BoostMasks`). The commit hook reads it (`frame_evidence_of`), so
+  the frame is filtered there, once, and the selector and the record get the filtered mask; then
+  the entry is set to None as before. Correct as merged; a test now pins it (a live run fed pass 1's
+  deferred masks hands on each mask filtered once and keeps none, in line and in the process).
+  Live does not get the offline saving: every committed frame is filtered in pass 1's process.
+  Handing the unfiltered entry to the selector process would move that work there; not done.
+- **Types.** `BoostMasks` is not a list, so the selector's and `frame_evidence_of`'s protocols
+  failed mypy after the merge; they only read the masks, and now declare them read only (5ef9654).
+- **The pinned player outputs.** Each launch copies into its own pinned buffers on the engine's
+  stream, and pass 1 finishes launches in order a frame later, live or not: nothing to change.
+- **The 60 FPS player interval.** The live context built `PlayerDetector` without the clip's fps,
+  so live kept every frame. It now passes it. That exposed the real issue: pass 1 filled a skipped
+  frame's boxes after the loop, but the hook hands each frame to the selector as it is committed,
+  so the live selector would have read the last tracked frame's boxes, held, where offline reads
+  interpolated ones. `Pass1Collector` now holds a skipped frame (with the ghosts found as it was
+  committed) until the next tracked frame's boxes are in, interpolates the gap there and hands the
+  frames on in order; the frames after the last tracked one keep its boxes, as before. Offline
+  is unchanged (the gate below is equal, JSON for JSON). The cost is one frame of evidence latency
+  on every other frame. Tests: at 30 and 60 FPS the hook sees every frame in order with the boxes
+  the run returns (the 60 FPS case fails without the hold), and the hold keeps order and ghosts.
+
+Verified at 8a2de41, which holds 72c586f (5ef9654 after it is typing only; the suites ran at it) (the stream_s4 engine is `phases/ABplus`'s build):
+
+| gate (`evaluate_archive.py --archive finetune --mode pipeline --holdout mixed_v1`) | recall | FA (bridged / false) | custom / grid / prof |
+|---|---|---|---|
+| offline (`--court`) | 0.953 | 95 (79 / 16) | .971 / .913 / .952 |
+| `--live` (L 0.5 s) | **0.951** | 95 (79 / 16) | .967 / .913 / .952 |
+| `--live --live-delay 1` | **0.953** | 95 (79 / 16) | .971 / .913 / .952 |
+
+- The offline gate's 24 clips equal `phase-ABplus-s4`'s at its merge, JSON for JSON.
+- Both live gates' ball rows equal the gates of the AB+s4 merge before this round (49b772e,
+  `output/gate_merged_live*`) on all 24 clips, though the 10 60 FPS clips now track players every
+  other frame (the log says so for those 10).
+
+Realtime pomona (`clean_tracker.py --live -i sample/pomona.mp4`, 59.67 FPS, realtime pacing),
+f19aef0 (this branch before the round, a treehouse worktree) against the merge, alternated, 2 runs
+each:
+
+| | f19aef0 | merged |
+|---|---|---|
+| latency median / p99 / max (ms) | 764 / 877-879 / 1225-1238 | 777-778 / 883-886 / 1246-1266 |
+| evidence latency median / p99 (ms) | 149 / 201-209 | 157 / 175-176 |
+| dropped frames | 0 | 0 |
+| selector per run (ms) | 19.0-19.1 | 18.2-18.8 |
+| realtime factor | 0.99 | 0.99 |
+
+The ball rows of the four runs are equal. The median latency is 13-14 ms (under a frame) longer:
+a frame the player tracker skips reaches the selector one frame later, which a row batch ending on
+it waits for. The evidence's p99 falls by 25-33 ms, pass 1 doing less per frame. With
+`--players-every-frame` the live run is the old one.
+
+Suites at 5ef9654, under the lock: `system/` 750 passed in `tennis-opt`, 739 passed and 11 skipped
+in `tennis-analysis`; the root suite 1476 passed, 11 skipped; mypy clean in `system/` (27 files) and
+at the root (6 files).
