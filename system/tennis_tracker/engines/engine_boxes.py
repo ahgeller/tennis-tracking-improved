@@ -9,7 +9,7 @@ to source pixels.
 """
 from __future__ import annotations
 
-from typing import Literal, Optional, Sequence, Tuple
+from typing import Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -21,12 +21,21 @@ OUTPUT_MODE_POSTPROCESSED: OutputMode = "postprocessed"
 OUTPUT_MODE_RAW: OutputMode = "raw_nms"
 
 
-def engine_output_mode(pred: torch.Tensor) -> OutputMode:
+# An engine output: the tensor the engine wrote, or that tensor copied to the host.
+EngineOutput = Union[torch.Tensor, np.ndarray]
+
+
+def engine_output_mode(pred: EngineOutput) -> OutputMode:
     """``OUTPUT_MODE_POSTPROCESSED`` for engines that export NMS'd
     ``[x1, y1, x2, y2, conf, cls]`` rows, ``OUTPUT_MODE_RAW`` for raw heads."""
-    if pred.dim() == 3 and pred.shape[-1] == POSTPROCESSED_COLUMNS:
+    if pred.ndim == 3 and pred.shape[-1] == POSTPROCESSED_COLUMNS:
         return OUTPUT_MODE_POSTPROCESSED
     return OUTPUT_MODE_RAW
+
+
+def _host(pred: EngineOutput) -> np.ndarray:
+    """The output on the host, in the dtype the engine wrote it."""
+    return pred.detach().cpu().numpy() if isinstance(pred, torch.Tensor) else pred
 
 
 def xywh_to_xyxy(boxes_xywh: np.ndarray) -> np.ndarray:
@@ -71,47 +80,51 @@ def _no_rows() -> np.ndarray:
     return np.empty((0, POSTPROCESSED_COLUMNS), dtype=np.float64)
 
 
-def _postprocessed_rows(preds: torch.Tensor, conf_threshold: float) -> np.ndarray:
+def _postprocessed_rows(preds: EngineOutput, conf_threshold: float) -> np.ndarray:
     """The engine's own NMS'd rows at or above ``conf_threshold``, as float64."""
-    if preds.dim() == 3:
-        preds = preds[0]
-    rows = preds.detach().float().cpu().numpy()
+    rows = _host(preds).astype(np.float32)
+    if rows.ndim == 3:
+        rows = rows[0]
     if rows.ndim != 2 or rows.size == 0 or rows.shape[1] < POSTPROCESSED_COLUMNS:
         return _no_rows()
     rows = rows[:, :POSTPROCESSED_COLUMNS].astype(np.float64)
     return rows[rows[:, 4] >= float(conf_threshold)]
 
 
-def _raw_head_rows(preds: torch.Tensor, conf_threshold: float, iou_threshold: float) -> np.ndarray:
+def _raw_head_rows(preds: EngineOutput, conf_threshold: float, iou_threshold: float) -> np.ndarray:
     """Threshold and suppress a raw ``[1, 4 + classes, anchors]`` (or
-    transposed) head; the class is the best-scoring one."""
-    if preds.dim() != 3:
+    transposed) head; the class is the best-scoring one.
+
+    The head is read channel-major, where a channel is one contiguous row, and only the anchors
+    that pass the threshold become boxes: a player head has 8400 anchors and a handful of people.
+    Every value is the float32 the anchor-major form computed, so the rows are the same.
+    """
+    if preds.ndim != 3:
         return _no_rows()
-    p = preds[0]
-    if p.shape[0] <= p.shape[1]:
-        p = p.transpose(0, 1)
-    p = p.detach().float().cpu().numpy()
-    if p.size == 0 or p.shape[1] <= 4:
+    head = _host(preds)[0]
+    if head.shape[0] > head.shape[1]:
+        head = head.T                      # anchor-major: make each channel a row
+    if head.size == 0 or head.shape[0] <= 4:
         return _no_rows()
-    boxes = xywh_to_xyxy(p[:, :4].astype(np.float32))
-    cls_scores = p[:, 4:].astype(np.float32)
-    if cls_scores.shape[1] > 1:
-        cls_ids = np.argmax(cls_scores, axis=1)
-        scores = cls_scores[np.arange(cls_scores.shape[0]), cls_ids]
+    cls_scores = head[4:].astype(np.float32)
+    if cls_scores.shape[0] > 1:
+        cls_ids = np.argmax(cls_scores, axis=0)
+        scores = cls_scores[cls_ids, np.arange(cls_scores.shape[1])]
     else:
-        cls_ids = np.zeros((cls_scores.shape[0],), dtype=np.int32)
-        scores = cls_scores[:, 0]
-    keep = scores >= float(conf_threshold)
-    boxes, scores, cls_ids = boxes[keep], scores[keep], cls_ids[keep]
-    if boxes.shape[0] == 0:
+        cls_ids = np.zeros((cls_scores.shape[1],), dtype=np.int32)
+        scores = cls_scores[0]
+    keep = np.flatnonzero(scores >= float(conf_threshold))
+    if keep.size == 0:
         return _no_rows()
+    boxes = xywh_to_xyxy(head[:4, keep].T.astype(np.float32))
+    scores, cls_ids = scores[keep], cls_ids[keep]
     keep_idx = nms_xyxy(boxes, scores, float(iou_threshold))
     boxes, scores, cls_ids = boxes[keep_idx], scores[keep_idx], cls_ids[keep_idx]
     return np.column_stack((boxes.astype(np.float64), scores.astype(np.float64), cls_ids.astype(np.float64)))
 
 
 def decode_engine_boxes(
-    preds: torch.Tensor,
+    preds: EngineOutput,
     scale: Tuple[float, float],
     conf_threshold: float,
     iou_threshold: float,
@@ -119,7 +132,8 @@ def decode_engine_boxes(
     cls_filter: Optional[Sequence[int]] = None,
     frame_size: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
-    """One engine output tensor as ``[x1, y1, x2, y2, conf, cls]`` rows in source pixels.
+    """One engine output tensor (on the device, or already copied to the host) as
+    ``[x1, y1, x2, y2, conf, cls]`` rows in source pixels.
 
     ``scale`` is ``(sx, sy)`` from engine input pixels back to the source
     frame (what the session's preprocessing returns).  ``iou_threshold`` is

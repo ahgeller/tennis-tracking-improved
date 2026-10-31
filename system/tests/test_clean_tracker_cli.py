@@ -76,6 +76,14 @@ def test_cli_flags_reach_the_config(tmp_path):
     assert cfg.save_track_debug_video is False                             # ... without the track-debug video
 
 
+def test_players_run_every_other_frame_at_60_fps_unless_the_flag_asks_for_every_frame(tmp_path):
+    from tennis_tracker.config import Config
+    _, cfg = _run_main(tmp_path, ["--no-video"])
+    assert cfg.player_every_other_frame_fps == Config().player_every_other_frame_fps == 55.0
+    _, cfg = _run_main(tmp_path, ["--no-video", "--players-every-frame"])
+    assert cfg.player_every_other_frame_fps == 0.0
+
+
 def test_cli_defaults(tmp_path):
     run = Mock()
     with patch.object(clean_tracker, "run", run), patch.object(clean_tracker, "OUTPUT", tmp_path):

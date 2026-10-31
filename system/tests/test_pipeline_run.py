@@ -51,6 +51,7 @@ from tennis_tracker.config import FOREGROUND, PROCESS, THREAD, Config
 from tennis_tracker.court.court_geometry import LINE_PAIRS_14
 from tennis_tracker.engines.ball_detectors import prepass_mode
 from tennis_tracker.engines.court_detector import CourtDetector
+from tennis_tracker.engines.player_detector import player_detect_interval
 from tennis_tracker.export import RunResult
 from tennis_tracker.headless import headless_config
 
@@ -267,9 +268,11 @@ class _PlayerPending:
 class FakePlayerDetector:
     """``PlayerDetector`` surface returning two fixed tracked boxes."""
 
-    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None):
+    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None, *,
+                 fps: Optional[float] = None):
         self.cfg = cfg
         self.court_kps = court_keypoints
+        self.fps = fps
         self.cached_boxes: List[List[float]] = []
         self.slots: Dict[int, List[float]] = {}
         self.start_calls: List[int] = []
@@ -740,9 +743,10 @@ def test_a_foreground_or_process_prepass_starts_before_the_engines_and_a_threade
             super().__init__(cfg)
 
     class RecordingPlayers(FakePlayerDetector):
-        def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None):
+        def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None, *,
+                     fps: Optional[float] = None):
             events.append("players")
-            super().__init__(cfg, court_keypoints)
+            super().__init__(cfg, court_keypoints, fps=fps)
 
     install_fakes(monkeypatch)
     monkeypatch.setattr(FakeGridTrackNet, "prepare_video", recording_prepare)
@@ -830,3 +834,50 @@ def test_a_video_run_probes_the_encoder_alongside_init_and_raises_what_the_probe
     monkeypatch.setattr(pipeline, "choose_encoder", broken)
     with pytest.raises(OSError, match="ffmpeg vanished"):
         open_inputs(make_config(tmp_path, clip, use_nvenc=True))
+
+
+class _ScheduledPlayers(FakePlayerDetector):
+    """The fake on the real schedule (``player_detect_interval`` for the clip's frame rate): it
+    launches only on the frames the tracker runs on, and its one player moves 2 px right a frame."""
+
+    built: List["_ScheduledPlayers"] = []
+
+    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None, *,
+                 fps: Optional[float] = None):
+        super().__init__(cfg, court_keypoints, fps=fps)
+        self.interval = player_detect_interval(cfg, fps)
+        _ScheduledPlayers.built.append(self)
+
+    def tracks_frame(self, frame_index: int) -> bool:
+        return frame_index % self.interval == 0
+
+    def detect_async_start(self, frame: np.ndarray, frame_index: int, frame_gpu_chw=None) -> Optional[_PlayerPending]:
+        return super().detect_async_start(frame, frame_index) if self.tracks_frame(frame_index) else None
+
+    def detect_async_finish(self, pending: Optional[_PlayerPending]) -> List[List[float]]:
+        if pending is None:
+            return []
+        shift = 2.0 * pending.frame_index
+        self.slots = {1: [10.0 + shift, 20.0, 30.0 + shift, 60.0]}
+        return list(self.slots.values())
+
+
+@pytest.mark.parametrize("fps", [30.0, 50.0, 59.5, 60.0])
+def test_players_are_detected_every_other_frame_from_60_fps_and_interpolated_between(
+        tmp_path, monkeypatch, fake_cuda, fps):
+    """A clip of nominal 60 FPS runs the player engine on the even frames and interpolates the
+    odd ones; 30 and 50 FPS clips run it on every frame. Either way every frame has its box."""
+    path = tmp_path / f"rally_{fps:g}fps.avi"
+    write_lossless_clip(path, synthetic_frames(), fps=fps)
+    install_fakes(monkeypatch)
+    _ScheduledPlayers.built = []
+    monkeypatch.setattr(pipeline, "PlayerDetector", _ScheduledPlayers)
+    result = pipeline.run(make_config(tmp_path, path, **JSON_ONLY_OVERRIDES))
+    (players,) = _ScheduledPlayers.built
+    assert players.fps == pytest.approx(fps, abs=0.01)
+    every_other = fps >= 55.0
+    assert players.start_calls == list(range(0, FRAMES, 2 if every_other else 1))
+    last_tracked = FRAMES - 2 if every_other else FRAMES - 1
+    for frame, boxes in enumerate(result.player_boxes):
+        shift = 2.0 * min(frame, last_tracked)          # after the last tracked frame, its box is held
+        assert boxes == {1: [10.0 + shift, 20.0, 30.0 + shift, 60.0]}, frame

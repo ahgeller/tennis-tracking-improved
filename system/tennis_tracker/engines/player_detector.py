@@ -61,6 +61,17 @@ def _load_bytetrack() -> ByteTrackImport:
     return _bytetrack
 
 
+def player_detect_interval(cfg: Config, fps: Optional[float]) -> int:
+    """Every how many frames the player engine and ByteTrack run on a clip of ``fps``:
+    ``cfg.player_detect_interval``, and at least every other frame from
+    ``cfg.player_every_other_frame_fps`` up (0 turns that off; an unknown rate keeps the interval)."""
+    interval = max(1, cfg.player_detect_interval)
+    threshold = cfg.player_every_other_frame_fps
+    if fps is not None and threshold > 0 and fps >= threshold:
+        interval = max(interval, 2)
+    return interval
+
+
 @dataclass
 class PlayerPending:
     """A player detection launched for one frame."""
@@ -72,7 +83,7 @@ class PlayerPending:
     court_kps: Optional[List[float]]
     outputs: Optional[List[torch.Tensor]] = None
     input_tensor: Optional[torch.Tensor] = None  # keeps the engine input alive until wait()
-    done: Optional[torch.cuda.Event] = None       # marks this launch's outputs ready (async sessions)
+    done: Optional[torch.cuda.Event] = None       # marks this launch's host outputs ready (async sessions)
 
 
 class PlayerDetector:
@@ -84,17 +95,19 @@ class PlayerDetector:
     then returns no boxes.
     """
 
-    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None):
+    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None, *,
+                 fps: Optional[float] = None):
         self.cfg = cfg
         self.court_kps = court_keypoints
         self.cached_boxes: List[List[float]] = []
         self._frame_diag = 1.0
         self.session: Optional[TensorRTRuntimeSession] = None
         self.tracker: Optional[Any] = None
-        # The engine and ByteTrack run on every Nth frame only; the frames between get their boxes
-        # from ``interpolate_player_boxes`` once pass 1 has them all.  (ByteTrack cannot fill
-        # them: an update with no detections marks every track lost and returns no boxes.)
-        self._current_interval = max(1, cfg.player_detect_interval)
+        # The engine and ByteTrack run on every Nth frame only (``player_detect_interval``); the
+        # frames between get their boxes from ``interpolate_player_boxes`` once pass 1 has them
+        # all.  (ByteTrack cannot fill them: an update with no detections marks every track lost
+        # and returns no boxes.)
+        self._current_interval = player_detect_interval(cfg, fps)
         # ByteTrack's live boxes keyed by track id.
         self.slots: Dict[int, List[float]] = {}
 
@@ -117,7 +130,8 @@ class PlayerDetector:
             track_buffer=max(1, round(60 / self._current_interval)),
             match_thresh=0.8,
         )
-        print("[player] ByteTrack tracking initialized")
+        every = "every frame" if self._current_interval == 1 else f"every {self._current_interval} frames"
+        print(f"[player] ByteTrack tracking initialized, {every}")
 
     @property
     def enabled(self) -> bool:
@@ -160,13 +174,13 @@ class PlayerDetector:
         if stream is not None:
             # The session's output buffers are reused by the next launch, which may come before
             # this one is finished (pass 1 finishes a frame's players one frame later), so the
-            # outputs are copied on the engine's stream, and the event lets ``detect_async_finish``
-            # wait for this launch alone rather than everything launched since.
+            # outputs are copied out on the engine's stream, straight into pinned host memory.  The
+            # event marks this launch's copies alone (not everything launched since), and
+            # ``detect_async_finish`` waits for it and decodes the host copy: no device copy, and no
+            # transfer of its own that would wait for the work queued on the current stream.
             with torch.cuda.stream(stream):
-                outputs = [out.clone() for out in outputs]
-            current = torch.cuda.current_stream(device=self.session.device)
-            for out in outputs:
-                out.record_stream(current)
+                outputs = [torch.empty(out.shape, dtype=out.dtype, pin_memory=True).copy_(out, non_blocking=True)
+                           for out in outputs]
             pending.done = self.session.completion_event()
         pending.outputs = outputs
         pending.input_tensor = t
@@ -189,7 +203,10 @@ class PlayerDetector:
             return []
 
         assert pending.outputs is not None
-        self.session.wait(pending.done)
+        if pending.done is not None:
+            pending.done.synchronize()          # the outputs are host copies
+        else:
+            self.session.wait()
         dets = self._decode_player_boxes(pending.outputs[0], pending.width, pending.height)
         # Drop spectators before the tracker learns them.
         if pending.court_kps and len(dets) > self.cfg.num_players:

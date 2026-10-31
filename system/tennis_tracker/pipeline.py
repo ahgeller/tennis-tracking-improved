@@ -221,7 +221,7 @@ def _open_inputs(setup: _RunSetup, detector: BallDetectorBackend) -> RunContext:
         if not threaded_prepass:
             detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
         court_detector = CourtDetector(cfg)
-        player_detector = PlayerDetector(cfg, court_keypoints=None)
+        player_detector = PlayerDetector(cfg, court_keypoints=None, fps=video.fps)
         if threaded_prepass:
             detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
         encoder = setup.encoder_probe.result() if setup.encoder_probe is not None else None

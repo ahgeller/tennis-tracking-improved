@@ -1,6 +1,6 @@
 """The prepass engine's cache (engines/ball_trt.py) and the detector's choice of runtime, with
 TensorRT and the GPU stood in for: no CUDA or TensorRT needed, except by the one test that builds a
-small streaming network's two engines and runs them (skipped without either)."""
+small streaming network's two engines and runs them (skipped without CUDA, TensorRT or onnx)."""
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
