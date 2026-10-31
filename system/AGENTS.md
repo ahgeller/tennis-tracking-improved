@@ -117,6 +117,10 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   `tools/live_lag_sweep.py` (on `train`) replays another lag on the CPU; `selector_process.py`
   runs the selector in a child process. The prepass is fed through
   `GridTrackNetBallDetector.open_stream` (`PrepassStream`, which `_prepass` also runs).
+  Pass 1 hands each committed frame on through `Pass1Collector.committed` once its player
+  boxes are final (`pass1.PlayerBoxHold`): at 60 FPS a frame the player tracker skipped
+  reaches the hook one frame late, with the next tracked frame, its boxes interpolated by
+  source index (`Pass1Collector.source_position`, so dropped frames count).
   `audit/records/opt_live.md` has the measurements and what is not live yet.
 - `tennis_tracker/court/`: `court_geometry.py`, keypoints, side guides, polygon,
   homography; the court-event stages, each reading one `CourtScene`:

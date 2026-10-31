@@ -438,7 +438,7 @@ What the live seams needed (72c586f, 5ef9654):
   on every other frame. Tests: at 30 and 60 FPS the hook sees every frame in order with the boxes
   the run returns (the 60 FPS case fails without the hold), and the hold keeps order and ghosts.
 
-Verified at 8a2de41, which holds 72c586f (5ef9654 after it is typing only; the suites ran at it) (the stream_s4 engine is `phases/ABplus`'s build):
+Verified at 8a2de41, which holds 72c586f (5ef9654 after it is typing only, and the suites ran at it); the stream_s4 engine is `phases/ABplus`'s build:
 
 | gate (`evaluate_archive.py --archive finetune --mode pipeline --holdout mixed_v1`) | recall | FA (bridged / false) | custom / grid / prof |
 |---|---|---|---|
