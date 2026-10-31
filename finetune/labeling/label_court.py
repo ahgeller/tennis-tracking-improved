@@ -41,7 +41,6 @@ LOUPE_PX = 240                # ... and its size on screen, at ui 1
 POINT_COLOUR = (60, 220, 255)
 SELECTED_COLOUR = (255, 255, 255)
 LINE_COLOUR = (40, 200, 120)
-CONFIRMED_COLOUR = (90, 230, 90)
 NET_POSTS = COURT_POINTS[len(GROUND_POINTS):]
 SHORT_NAMES = {name: name.replace("_singles", " S").replace("_service", " svc").replace("_", " ")
                for name in COURT_POINTS}
@@ -69,8 +68,7 @@ class CourtView(ClipView):
     # ---------------------------------------------------------------- opening a clip
     def load(self) -> None:
         """The clip at the cursor: its labels, the run's points and the frames to offer."""
-        source = self.source
-        assert source is not None
+        source = self.clip
         self.model, self.drafts, self.history = {}, {}, {}
         try:
             if source.court is None:
@@ -234,7 +232,7 @@ class CourtView(ClipView):
         scale, off_x, off_y = self.mapping
         return (x + 0.5 - off_x) / scale, (y + 0.5 - off_y) / scale
 
-    def on_mouse(self, event: int, x: int, y: int, flags: int) -> None:
+    def on_mouse(self, event: int, x: int, y: int, flags: int = 0) -> None:
         """A press near a point picks it up (and selects it), a drag moves it, a press elsewhere puts
         the selected point there."""
         if not self.frames or y >= self.session.view_h:
@@ -268,7 +266,7 @@ class CourtView(ClipView):
         return bool(self.frames)
 
     def draw(self, canvas: np.ndarray) -> None:
-        image = self.source.frame(self.frame)
+        image = self.clip.frame(self.frame)
         picture, scale, off_x, off_y = fit_picture(image, self.session.view_w, self.session.view_h)
         self.mapping = (scale, off_x, off_y)
         canvas[off_y:off_y + picture.shape[0], off_x:off_x + picture.shape[1]] = picture
@@ -309,7 +307,7 @@ class CourtView(ClipView):
         # The region is resampled about the point itself, so the crosshair sits on its sub-pixel spot:
         # frame coordinates put pixel k's centre at k + 0.5, warpAffine at k, and the crosshair is on
         # the loupe's pixel size // 2.
-        matrix = np.float32([[LOUPE, 0, size // 2 - LOUPE * (cx - 0.5)], [0, LOUPE, size // 2 - LOUPE * (cy - 0.5)]])
+        matrix = np.array([[LOUPE, 0, size // 2 - LOUPE * (cx - 0.5)], [0, LOUPE, size // 2 - LOUPE * (cy - 0.5)]], np.float32)
         loupe = cv2.warpAffine(image, matrix, (size, size), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
         on_right = self.to_screen(cx, cy)[0] > display.shape[1] // 2
         x0 = int(10 * ui) if on_right else display.shape[1] - size - int(10 * ui)   # away from the point

@@ -91,6 +91,12 @@ class ClipView(View):
         self.revision += 1
         self.load()
 
+    @property
+    def clip(self) -> "Source":
+        """The clip shown; there is one from the first open on."""
+        assert self.source is not None, "the view has not been opened"
+        return self.source
+
     def load(self) -> None:
         raise NotImplementedError
 

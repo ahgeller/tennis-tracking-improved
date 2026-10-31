@@ -20,6 +20,11 @@ if TYPE_CHECKING:
     from finetune.labeling.label_tool import Tool
 
 
+# The court-event keys of the single frame but ; (whose way SHIFT says): key -> (Tool action, its arguments).
+EVENT_KEYS = {ord("."): ("toggle_hit",), ord(","): ("cycle_hitter",), ord("["): ("toggle_rally", "start"),
+              ord("]"): ("toggle_rally", "end"), ord(":"): ("answer_candidate", -1), ord("\\"): ("reject_candidates",)}
+
+
 class KeyHandler:
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
         self.session = session
@@ -117,21 +122,14 @@ class KeyHandler:
         """The single-frame keys for the court events beside the landing's /: . a hit, , its hitter,
         [ and ] a rally's start and end, ; and SHIFT+; (or :) the next and previous candidate nobody
         has answered, a backslash not an event. False for any other key."""
-        tool = self.tool
-        if code == ord("."):
-            tool.toggle_hit()
-        elif code == ord(","):
-            tool.cycle_hitter()
-        elif code in (ord("["), ord("]")):
-            tool.toggle_rally("start" if code == ord("[") else "end")
-        elif code == ord(";"):
-            tool.answer_candidate(-1 if win.shift_held() else 1)
-        elif code == ord(":"):
-            tool.answer_candidate(-1)
-        elif code == ord("\\"):
-            tool.reject_candidates()
-        else:
+        if code == ord(";"):
+            self.tool.answer_candidate(-1 if win.shift_held() else 1)
+            return True
+        action = EVENT_KEYS.get(code)
+        if action is None:
             return False
+        name, *arguments = action
+        getattr(self.tool, name)(*arguments)
         return True
 
     def common_key(self, code: int) -> None:

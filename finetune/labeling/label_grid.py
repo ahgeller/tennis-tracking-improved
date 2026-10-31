@@ -127,7 +127,7 @@ class GridView(View):
         session = self.session
         rows = session.rows
         key = (session.view_w, session.view_h, session.hud_h, self.zoom, self.size, session.cursor, session.dirty,
-               session.hints.version, session.marks,
+               session.hints.version, session.marks_revision,
                tuple((i, rows[i].x, rows[i].y, rows[i].visible, rows[i].reviewed, rows[i].edited, session.landing_for(i))
                      for i in self.indices))
         if key == self.cache_key:

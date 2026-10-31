@@ -268,7 +268,10 @@ class ChipRow:
 def fit_text(text: str, width: int, scale: float, thin: int) -> str:
     """`text` cut to what fits in `width` pixels. Guessing from the average character width gets it
     about right in one go; the loop is there for the handful of pixels that guess is out by."""
-    measure = lambda s: cv2.getTextSize(s, cv2.FONT_HERSHEY_SIMPLEX, scale, thin)[0][0]
+
+    def measure(s: str) -> int:
+        return cv2.getTextSize(s, cv2.FONT_HERSHEY_SIMPLEX, scale, thin)[0][0]
+
     full = measure(text)
     if full <= width:
         return text

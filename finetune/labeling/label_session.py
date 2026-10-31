@@ -82,7 +82,7 @@ class LabelSession:
                                                               # there (Tool.jump_candidate, Tool.place_candidate)
         self.candidate_stop: Optional[int] = None   # the row a backslash moved on to, unarmed: ; answers it there
         self.disputed_key, self.disputed = None, 0   # disputed_count's cache
-        self.marks = 0                # bumped by every change to a clip's landings, hits, rallies or
+        self.marks_revision = 0       # bumped by every change to a clip's landings, hits, rallies or
                                       # rejected candidates (not row fields): what render_state keys on
 
     # ---------------------------------------------------------------- unsaved edits
@@ -374,7 +374,7 @@ class LabelSession:
         since it is no longer where that point was said, but what else was said of it (a hit's
         hitter). Returns its key, None when one was taken off."""
         worn = self.mark_for(index, marks)
-        self.marks += 1
+        self.marks_revision += 1
         if worn is not None:
             del marks[worn]           # on this frame, or between it and the next: unmarked either way
             return None
@@ -489,7 +489,7 @@ class LabelSession:
         many changed: positive rejected, negative reopened."""
         source = self.by_clip[self.rows[index].clip]
         open_now = self.open_candidates(index)
-        self.marks += 1
+        self.marks_revision += 1
         if open_now:
             for event in open_now:
                 source.rejected.setdefault(event.kind, set()).add(event.frame)

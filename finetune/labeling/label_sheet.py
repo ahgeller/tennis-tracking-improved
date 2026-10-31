@@ -82,7 +82,7 @@ class SheetView(View):
         end = session.clip_bounds(self.start)[1]
         indices = list(range(self.start, min(self.start + SHEET_ROWS, end)))
         key = (tuple(indices), Row.revision, session.hints.version, session.view_w, session.view_h, session.hud_h,
-               session.cursor, session.ui, session.marks)
+               session.cursor, session.ui, session.marks_revision)
         if key == self.cache_key:
             return self.cache
         selected = session.cursor

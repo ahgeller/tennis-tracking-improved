@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from finetune.labeling.label_candidates import (ClipCandidates, Candidate, is_answered, labelled_frames, load_candidates,
+from finetune.labeling.label_candidates import (ClipCandidates, Candidate, is_answered, load_candidates,
                                                 nearest_row)
 from finetune.scoring.tracker_events import (court_block, court_keypoints_by_frame, court_side, player_boxes_by_frame,
                                              rallies_from_legs, read_run, tracker_hits)
@@ -113,4 +113,3 @@ def test_a_candidate_is_answered_by_a_label_of_its_kind_in_reach_or_a_rejection_
     assert not is_answered(hit, 30.0, {}, {"hit": {103}, "landing": {100}})
     start = Candidate("rally_start", 100, "first leg")
     assert is_answered(start, 30.0, {"rally_start": [20]}, {})           # the toss, seconds before the serve's hit
-    assert labelled_frames("rally_end", [1], [2], [3], [4]) == [4]

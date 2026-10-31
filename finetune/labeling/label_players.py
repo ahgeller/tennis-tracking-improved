@@ -262,8 +262,7 @@ class PlayerView(ClipView):
     def load(self) -> None:
         """The clip at the cursor: its segments, its labels, and the reader cutting its crops."""
         self.close_reader()
-        source = self.source
-        assert source is not None
+        source = self.clip
         self.segments, self.labels, self.orphans, self.boxes_by_frame = [], {}, [], {}
         with self.crop_lock:
             self.crops = {}
@@ -485,7 +484,7 @@ class PlayerView(ClipView):
         segment's own thick in its identity's colour, the rest thin with their track and identity."""
         session, segment = self.session, self.segments[self.selected]
         frame = self.overview_frame(segment)
-        picture, scale, off_x, off_y = fit_picture(self.source.frame(frame), session.view_w, height)
+        picture, scale, off_x, off_y = fit_picture(self.clip.frame(frame), session.view_w, height)
         strip[off_y:off_y + picture.shape[0], off_x:off_x + picture.shape[1]] = picture
         ui, thin = session.ui, max(1, int(round(session.ui)))
         for track, box in sorted(self.boxes_by_frame.get(frame, {}).items(), key=lambda item: item[0] == segment.track):
@@ -507,7 +506,7 @@ class PlayerView(ClipView):
         """The frame the overview shows for `segment`: the label frame nearest its middle that it
         has a box on (the label frames are the ones the clip's decoder is sure of), else its middle."""
         middle = segment.frames[len(segment.frames) // 2]
-        label_frames = {row.frame for row in self.source.rows}
+        label_frames = {row.frame for row in self.clip.rows}
         labelled = [frame for frame in segment.frames if frame in label_frames]
         return min(labelled, key=lambda frame: abs(frame - middle)) if labelled else middle
 
@@ -568,7 +567,7 @@ class PlayerView(ClipView):
         elif reader is not None and reader.error:
             loading = f"  crops stopped: {reader.error}"
         suggestion = self.suggestion(self.selected)
-        line1 = (f"{self.source.clip}  PLAYERS  segment {self.selected + 1}/{len(self.segments)}  track {segment.track}  "
+        line1 = (f"{self.clip.clip}  PLAYERS  segment {self.selected + 1}/{len(self.segments)}  track {segment.track}  "
                  f"frames {segment.first}-{segment.last}  {self.identity(segment) or 'unassigned'}  "
                  f"assigned {assigned}/{len(self.segments)}{loading}{'  *unsaved*' if self.session.dirty else ''}")
         line2 = (f"1-4=P1-P4  0/v=not a player  SPACE={suggestion or '-'} (suggested)  u=clear  n/p=segment  "

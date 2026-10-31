@@ -33,24 +33,24 @@ if __name__ == "__main__":          # run as a script: make the repository root 
     import finetune  # noqa: F401,E402  (which puts system/ on sys.path)
 
 from finetune.data.event_labels import HITTERS
+from finetune.data.labels import is_visible
 from finetune.labeling import label_window as win
-from finetune.labeling.label_candidates import nearest_row
+from finetune.labeling.label_candidates import CandidateKind, nearest_row
+from finetune.labeling.label_court import CourtView
 from finetune.labeling.label_cursor import CursorPlacer
 from finetune.labeling.label_draw import FILTERS
 from finetune.labeling.label_frame_view import FrameView
 from finetune.labeling.label_grid import GridView
 from finetune.labeling.label_keys import KeyHandler
 from finetune.labeling.label_mouse import MouseHandler
-from finetune.labeling.label_court import CourtView
 from finetune.labeling.label_players import PlayerView
+from finetune.labeling.label_saving import rescue_source, save_source
 from finetune.labeling.label_session import LabelSession
 from finetune.labeling.label_sheet import SheetView
 from finetune.labeling.label_source import Prefetcher, Source
-from finetune.labeling.label_saving import rescue_source, save_source
 from finetune.labeling.label_store import HitMark, Row, blank_hit, no_point, save_settings
 from finetune.labeling.label_view import View
 from finetune.labeling.label_window import WINDOW
-from finetune.data.labels import is_visible
 
 AUTOSAVE_SECONDS = 5.0    # write labels + review progress this often while there are unsaved changes
 
@@ -282,7 +282,7 @@ class Tool:
         clip's, not the rows', so what the view reads of them is keyed by hand: the landing this
         frame wears and its point, whether one is waiting for its click, and how many there are. The
         hits, rallies and candidates the HUD, the badges and the timeline read are keyed by
-        LabelSession.marks, which every change to them bumps."""
+        LabelSession.marks_revision, which every change to them bumps."""
         s = self.session
         landings = s.source.landings
         landing = s.landing_for(s.cursor)
@@ -290,7 +290,7 @@ class Tool:
                 s.height, s.filter, s.inset, s.trail, s.follow, s.step, s.dirty, id(s.walk), len(s.walk), s.walk_pos,
                 s.ghost, len(s.sources), id(image), id(before), s.hints.version,
                 landing, landings.get(landing) if landing is not None else None, s.awaiting_landing, len(landings),
-                s.marks, s.awaiting_hit, s.awaiting_candidate)
+                s.marks_revision, s.awaiting_hit, s.awaiting_candidate)
 
     def render(self) -> np.ndarray:
         """The window as the view showing draws it."""
@@ -436,7 +436,7 @@ class Tool:
         if landing is None or landing not in session.source.landings:
             return                    # removed since, or never there: nothing to place
         session.source.landings[landing] = session.clamp(x, y)
-        session.marks += 1
+        session.marks_revision += 1
         session.touch("landings")
 
     def toggle_hit(self) -> None:
@@ -465,7 +465,7 @@ class Tool:
         if hit is None or hit not in session.source.hits:
             return
         session.source.hits[hit] = session.source.hits[hit]._replace(point=session.clamp(x, y))
-        session.marks += 1
+        session.marks_revision += 1
         session.touch("hits")
 
     def place_candidate(self, x: float, y: float) -> None:
@@ -478,7 +478,7 @@ class Tool:
         event, session.awaiting_candidate = session.awaiting_candidate, None
         if event is None or session.frame_missing():
             return
-        kind = "landing" if event.kind == "landing" else "hit"
+        kind: CandidateKind = "landing" if event.kind == "landing" else "hit"
         marks: Mapping[float, object] = session.source.landings if kind == "landing" else session.source.hits
         between = session.candidate_between(session.cursor, kind)
         if between is None or session.mark_for(session.cursor, marks) is not None:
@@ -487,7 +487,7 @@ class Tool:
             session.source.landings[between] = session.clamp(x, y)
         else:
             session.source.hits[between] = HitMark(session.clamp(x, y))
-        session.marks += 1
+        session.marks_revision += 1
         session.touch("landings" if kind == "landing" else "hits")
 
     def cycle_hitter(self) -> None:
@@ -501,7 +501,7 @@ class Tool:
         order = (None,) + HITTERS
         mark = session.source.hits[hit]
         session.source.hits[hit] = mark._replace(hitter=order[(order.index(mark.hitter) + 1) % len(order)])
-        session.marks += 1
+        session.marks_revision += 1
         session.touch("hits")
 
     def toggle_rally(self, kind: str) -> None:
@@ -519,7 +519,7 @@ class Tool:
         else:
             marks.add(frame)
             other.discard(frame)
-        session.marks += 1
+        session.marks_revision += 1
         session.touch("rallies")
 
     def reject_candidates(self) -> None:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import bisect
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Mapping, NamedTuple, Optional, Sequence, Set, Tuple, get_args
+from typing import Dict, List, Literal, Mapping, NamedTuple, Optional, Sequence, Set, Tuple, get_args
 
 from finetune.data.event_labels import Hitter
 from finetune.scoring.court_events_score import TOLERANCE_S
@@ -106,12 +106,6 @@ def load_candidates(run_dir: Path, clip: str, model: str = RUN_MODEL) -> Optiona
 
 
 # --------------------------------------------------------------------------- answered or not
-
-def labelled_frames(kind: CandidateKind, landings: Iterable[float], hits: Iterable[float],
-                    rally_starts: Iterable[int], rally_ends: Iterable[int]) -> List[float]:
-    """The frames of a clip's labels of `kind`."""
-    return sorted({"landing": landings, "hit": hits, "rally_start": rally_starts, "rally_end": rally_ends}[kind])
-
 
 def is_answered(candidate: Candidate, fps: float, labels: Mapping[CandidateKind, Sequence[float]],
                 rejected: Mapping[str, Set[int]]) -> bool:
