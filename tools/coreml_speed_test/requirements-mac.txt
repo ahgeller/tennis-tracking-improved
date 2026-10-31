@@ -1,0 +1,6 @@
+# The Mac validator's environment (validate.sh installs it into ./.venv). coremltools 9.0 has
+# macOS wheels for Python 3.7 to 3.13 (arm64 from 3.8); numpy has no single release with wheels
+# for both 3.9 (the Python Xcode installs as /usr/bin/python3) and 3.13, hence the markers.
+coremltools==9.0
+numpy==2.0.2; python_version < "3.13"
+numpy==2.2.6; python_version >= "3.13"
