@@ -24,7 +24,7 @@ def tool_over(*sources):
 def test_parser_defaults_to_the_workspace_folders_and_takes_a_range():
     args = build_parser().parse_args(["video22..video25", "--zoom", "3"])
     assert args.clips == ["video22..video25"] and args.zoom == 3.0 and not args.grid and not args.uncertain
-    assert args.videos.name == "videos" and args.labels.name == "labels"
+    assert args.videos.name == "videos" and label_cli.labels_folder(args).name == "labels"
     with pytest.raises(SystemExit):
         build_parser().parse_args([])                              # a clip is required
 
@@ -49,7 +49,9 @@ def test_open_sources_keeps_the_names_and_drops_clips_that_are_not_ready(tmp_pat
 def test_the_labels_default_to_the_label_home_and_a_run_folder_is_passed_only_when_it_is_there(tmp_path):
     from finetune.data import workspace as ws
 
-    assert build_parser().parse_args(["a"]).labels == ws.label_home()
+    assert build_parser().parse_args(["a"]).labels is None              # resolved when the tool starts
+    assert label_cli.labels_folder(build_parser().parse_args(["a"])) == ws.label_home()
+    assert label_cli.labels_folder(build_parser().parse_args(["a", "--labels", str(tmp_path)])) == tmp_path
     seen = []
     with patch.object(label_cli, "expand_clip_ranges", return_value=["a"]),             patch.object(label_cli, "build_source", side_effect=lambda *args: seen.append(args[3:])):
         open_sources(build_parser().parse_args(["a", "--candidates", str(tmp_path / "missing")]))
@@ -93,3 +95,14 @@ def test_main_stops_before_opening_anything_without_a_qt_build():
     with patch.object(label_cli, "qt_backend", return_value=False), patch.object(label_cli, "build_parser") as parser:
         assert label_cli.main() == 2
     assert not parser.called
+
+
+def test_a_missing_label_home_stops_the_tool_with_its_reason(capsys):
+    from finetune.data import workspace as ws
+
+    def missing():
+        raise ws.LabelHomeMissing("the main checkout has no labels at X; pass --labels")
+    with patch.object(label_cli, "qt_backend", return_value=True), patch.object(ws, "label_home", missing), \
+            patch("sys.argv", ["label_tool.py", "a"]):
+        assert label_cli.main() == 2
+    assert "the main checkout has no labels at X" in capsys.readouterr().err

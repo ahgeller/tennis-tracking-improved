@@ -154,13 +154,20 @@ def main_checkout(repository: Optional[Path] = None) -> Optional[Path]:
     return gitdir.parent.parent.parent
 
 
+class LabelHomeMissing(FileNotFoundError):
+    """A worktree's main checkout has no labels folder: labelling would land in the worktree's copy."""
+
+
 def label_home() -> Path:
     """The labels folder a person's labelling session reads and writes: the label tool's default,
-    and the new label types' scorers'. Within a git worktree of this repository (``phases/<name>``,
-    made with ``git worktree add``), the main checkout's ``finetune/labels``: a worktree only holds a
-    copy of the labels (``tools/link_worktree_data.py``), and an edit made in a copy would never reach
-    the labels everything else reads. In the main checkout, or with the workspace relocated
-    (``TENNIS_WORKSPACE``, or a test replacing ``current``), the workspace's own ``labels/``."""
+    and the label scorers'. Within a git worktree of this repository (``phases/<name>``, made with
+    ``git worktree add``), the main checkout's ``finetune/labels``: a worktree only holds a copy of
+    the labels (``tools/link_worktree_data.py``), and an edit made in a copy would never reach the
+    labels everything else reads. In the main checkout, or with the workspace relocated
+    (``TENNIS_WORKSPACE``, or a test replacing ``current``), the workspace's own ``labels/``.
+
+    A worktree whose main checkout has no labels folder is a LabelHomeMissing naming it, never a
+    quiet fallback to the worktree's copy: work labelled there would be lost to every other reader."""
     layout = current()
     if layout.root != DEFAULT_WORKSPACE:
         return layout.labels
@@ -168,7 +175,11 @@ def label_home() -> Path:
     if main is None or main.resolve() == DEFAULT_WORKSPACE.parent.resolve():
         return layout.labels
     shared = main / DEFAULT_WORKSPACE.name / "labels"
-    return shared if shared.is_dir() else layout.labels
+    if not shared.is_dir():
+        raise LabelHomeMissing(f"this is a worktree, and its main checkout has no labels at {shared}: labels "
+                               f"written here would never reach it. Restore that folder, or name one with --labels "
+                               f"(scorers: --archive)")
+    return shared
 
 
 class VideoMeta(NamedTuple):

@@ -124,7 +124,7 @@ def test_tennis_workspace_reaches_the_label_tool_and_pretrack(tmp_path):
     weights = tmp_path / "w.npz"
     weights.write_bytes(b"")
     code = ("from finetune.labeling import label_cli; from finetune.training import pretrack; "
-            "args = label_cli.build_parser().parse_args(['clip']); print(args.videos); print(args.labels); "
+            "args = label_cli.build_parser().parse_args(['clip']); print(args.videos); print(label_cli.labels_folder(args)); "
             f"raise SystemExit(pretrack.main(['--clips', 'clip', '--weights', {str(weights)!r}]))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPOSITORY, env=env, capture_output=True, text=True)
     assert out.returncode == 1, out.stderr                       # no video named clip there: nothing drafted
@@ -185,5 +185,7 @@ def test_the_label_home_from_a_worktree_is_the_main_checkouts_labels(tmp_path, m
     monkeypatch.setattr(workspace, "DEFAULT_WORKSPACE", tree / "finetune")
     monkeypatch.setattr(workspace, "current", lambda: workspace.Workspace(tree / "finetune"))
     assert workspace.label_home() == main / "finetune" / "labels"
-    (main / "finetune" / "labels").rmdir()                         # no labels there: the worktree's own
-    assert workspace.label_home() == tree / "finetune" / "labels"
+    (main / "finetune" / "labels").rmdir()          # never the worktree's copy instead: an error naming both
+    with pytest.raises(workspace.LabelHomeMissing) as missing:
+        workspace.label_home()
+    assert str(main / "finetune" / "labels") in str(missing.value) and "--labels" in str(missing.value)

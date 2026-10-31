@@ -30,8 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=label_tool.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("clips", nargs="+", help="Clip stem(s), or a range like video22..video53")
     parser.add_argument("--videos", type=Path, default=ws.current().videos)
-    parser.add_argument("--labels", type=Path, default=ws.label_home(),
-                        help="Where the labels are read and written (default: the main checkout's, %(default)s)")
+    parser.add_argument("--labels", type=Path, default=None,
+                        help="Where the labels are read and written (default: the label home, the main checkout's "
+                             "finetune/labels even from a worktree)")
     parser.add_argument("--candidates", type=Path, default=CANDIDATES,
                         help="A pipeline run folder (evaluate_archive.py --mode pipeline --court --out-dir): its "
                              "landings, hits and rallies are offered as candidates, its tracks and court keypoints "
@@ -62,9 +63,15 @@ def qt_backend() -> bool:
     return False
 
 
+def labels_folder(args: argparse.Namespace) -> Path:
+    """--labels, else the label home (``workspace.label_home``; a LabelHomeMissing when a worktree's
+    main checkout has no labels, rather than the worktree's copy)."""
+    return args.labels if args.labels is not None else ws.label_home()
+
+
 def open_sources(args: argparse.Namespace) -> Tuple[List[str], List[Source]]:
     """The clip names the command line expands to and the sources that are ready among them; a
-    bad range is a ValueError naming it."""
+    bad range is a ValueError naming it. `args.labels` is resolved (``labels_folder``)."""
     names = expand_clip_ranges(args.clips, args.labels)
     candidates = args.candidates if args.candidates.is_dir() else None
     if candidates is None:
@@ -78,6 +85,11 @@ def main() -> int:
     if not qt_backend():
         return 2
     args = build_parser().parse_args()
+    try:
+        args.labels = labels_folder(args)
+    except ws.LabelHomeMissing as error:
+        print(f"[error] {error}", file=sys.stderr)
+        return 2
     try:
         names, sources = open_sources(args)
     except ValueError as error:
