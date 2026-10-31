@@ -57,6 +57,7 @@ if __name__ == "__main__":          # run as a script: make the repository root 
 from finetune.data import workspace as ws
 from finetune.data.fileio import atomic_csv
 from finetune.data.workspace import video_meta, videos_in
+from tennis_tracker.ball_weights import operating_conf
 from tennis_tracker.frame_rate import phase_stride
 
 PSEUDO_DIR = "pseudo"            # under the workspace root
@@ -69,7 +70,6 @@ MAX_DRIFT_PX = 3.0               # the selected position against the detector's 
 MIN_CONF = 0.7
 MIN_TRACK_OBS = 10               # detections on the chosen track: a short track is the likeliest wrong object
 QUIET_STEPS = 15                 # label frames either side without any detection for a "none"
-PIPELINE_CONF = 0.5              # the pipeline's detector threshold (the tracker's default)
 REFERENCE_WIDTH = 1920.0
 
 PseudoTarget = Optional[List[float]]
@@ -235,7 +235,10 @@ def cmd_label(args: argparse.Namespace) -> int:
             from tennis_tracker.headless import run_headless     # the pipeline: CUDA and TensorRT, only here
 
             print(f"[pipe] {clip}: {meta.width}x{meta.height} @ {meta.fps:.2f} FPS, {meta.total} frames, teacher {weights.name}")
-            run_headless(found[clip], model_path=weights, conf=PIPELINE_CONF, device=args.device, tracking_json=json_path)
+            # The teacher runs at the threshold the tracker runs its weights at (it was 0.50, a copy of
+            # the tracker's old default, until 2026-10-30); MIN_CONF filters what is kept.
+            run_headless(found[clip], model_path=weights, conf=operating_conf(weights), device=args.device,
+                         tracking_json=json_path)
         states = frame_states(json.loads(json_path.read_text(encoding="utf-8")), stride)
         write_pseudo_labels(target, states)
         print(f"[pseudo] {target.name}: {summary(states)}")
@@ -270,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_add)
     p = commands.add_parser("label", help="run the teacher pipeline and write the filtered pseudo-labels")
     p.add_argument("--clips", nargs="*")
-    p.add_argument("--weights", default=str(ws.current().repo_weights), help="the teacher (default: the tracker's model)")
+    p.add_argument("--weights", default=str(ws.current().repo_weights), help="the teacher (default: the workspace's model, models/ball_detector.pt)")
     p.add_argument("--device", default="0")
     p.add_argument("--force", action="store_true", help="redo clips that already have pseudo-labels")
     p.add_argument("--reuse", action="store_true", help="filter the saved pipeline JSON again instead of rerunning it")

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
-from tennis_tracker.ball_weights import KNOWN, UNKNOWN_CONF, operating_conf
+from tennis_tracker.ball_weights import KNOWN, UNKNOWN_CONF, operating_conf, unknown_weights_note
 from tennis_tracker.config import Config
 from tennis_tracker.paths import BOUNCE_MODEL, COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE, ROOT
 from tennis_tracker.pipeline import run
@@ -114,6 +114,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if not args.no_video:
         print(f"[init] Tracking video: {output_video}")
     print(f"[init] Tracking JSON: {tracking_json}")
+    note = unknown_weights_note(args.weights) if args.conf is None else None
+    if note:
+        print(f"[init] {note}")
     cfg = Config(
         input_video=str(Path(args.input).resolve()),
         output_video=str(output_video),

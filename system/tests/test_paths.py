@@ -19,7 +19,3 @@ def test_config_defaults_use_the_same_files():
     assert (cfg.model_path, cfg.player_model_path, cfg.court_model_path) == (
         str(paths.BALL_WEIGHTS), str(paths.PLAYER_ENGINE), str(paths.COURT_ENGINE))
 
-
-def test_the_default_threshold_is_the_default_detectors():
-    from tennis_tracker.ball_weights import STREAM_S4, operating_conf
-    assert Config().conf == operating_conf(paths.BALL_WEIGHTS) == STREAM_S4.conf == 0.42

@@ -6,6 +6,9 @@ import pytest
 
 import clean_tracker
 from clean_tracker import resolve_output_paths
+from tennis_tracker.ball_weights import HEATMAP_S4_WEIGHTS, STREAM_S4_WEIGHTS, UNKNOWN_CONF
+
+STREAM_CONF, HEATMAP_CONF = STREAM_S4_WEIGHTS.conf, HEATMAP_S4_WEIGHTS.conf
 
 
 def _run_main(tmp_path, argv):
@@ -43,12 +46,12 @@ def test_weights_default_to_stream_s4_and_another_path_reaches_the_config_as_giv
 
 
 @pytest.mark.parametrize("argv, conf", [
-    ([], 0.42),                                                             # the default, stream_s4
-    (["--weights", "models/candidates/stream_s4_e60.pt"], 0.42),            # named, relative to system/
-    (["--weights", "models/ball_detector.pt"], 0.40),                       # the shipped heat-map network
-    (["--weights", "runs/h1/best.pt"], 0.40),                               # weights the table does not know
-    (["--weights", "models/ball_detector.pt", "--conf", "0.40"], 0.40),     # explicit, as before
-    (["--conf", "0.40"], 0.40),                                             # stream_s4 at the old threshold
+    ([], STREAM_CONF),                                                      # the default, stream_s4
+    (["--weights", "models/candidates/stream_s4_e60.pt"], STREAM_CONF),     # named, relative to system/
+    (["--weights", "models/ball_detector.pt"], HEATMAP_CONF),               # the heat-map network
+    (["--weights", "runs/h1/best.pt"], UNKNOWN_CONF),                       # weights the table does not know
+    (["--weights", "models/ball_detector.pt", "--conf", "0.40"], 0.40),     # explicit
+    (["--conf", "0.40"], 0.40),                                             # stream_s4 at another threshold
     (["--weights", "models/ball_detector.pt", "--conf", "0.55"], 0.55),
 ])
 def test_the_threshold_follows_the_weights_unless_conf_is_given(tmp_path, monkeypatch, argv, conf):
@@ -78,7 +81,7 @@ def test_cli_defaults(tmp_path):
         assert clean_tracker.main([]) == 0
     cfg = run.call_args.args[0]
     assert cfg.save_tracking_video is True
-    assert cfg.conf == 0.42
+    assert cfg.conf == STREAM_CONF
     assert cfg.draw_court_minimap is False and cfg.court_events is False and cfg.info_timing is False
     assert cfg.show_all_tracks is False
     assert cfg.input_video.endswith("pomona.mp4")

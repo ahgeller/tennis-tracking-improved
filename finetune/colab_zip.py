@@ -8,7 +8,7 @@ the outputs). It unpacks a single ``tennis_finetune_colab.zip`` whose entries al
     tennis_finetune/videos/<every video in the workspace>
     tennis_finetune/labels/<every file in the workspace labels folder>
     tennis_finetune/clips.csv, review_status.json, holdouts.json, exclude.txt
-    tennis_finetune/models/ball_detector.pt                  (the tracker's weights: the start and the teacher)
+    tennis_finetune/models/ball_detector.pt                  (the workspace's model: the start and the teacher)
     tennis_finetune/pseudo/videos/, pseudo/labels/*_pseudo.csv  (when the workspace has pseudo-labels)
     tennis_finetune/code/<the trainer's import closure>      (``code_files``)
     tennis_finetune/code/code_manifest.json                  (that list, which the notebooks check)
@@ -165,7 +165,7 @@ class ZipPlan:
 
 
 def plan_zip(code_only: bool = False) -> ZipPlan:
-    """Everything the zip will hold, from the workspace, the tracker's weights and the notebook's
+    """Everything the zip will hold, from the workspace, the workspace's model and the notebook's
     REQUIRED list; a ``ColabZipError`` when a required record, the weights or a staged file is missing.
     With `code_only` just the records and the code: the small zip the notebook lays over the big
     one, so a code fix never means uploading the videos again."""
@@ -189,7 +189,7 @@ def plan_zip(code_only: bool = False) -> ZipPlan:
             plan.skipped.append(name)
     if not code_only:
         if not layout.repo_weights.is_file():
-            raise ColabZipError(f"{layout.repo_weights} is missing; the notebook starts from the tracker's weights")
+            raise ColabZipError(f"{layout.repo_weights} is missing; the notebook starts from the workspace's model")
         plan.add("models", f"models/{HEATMAP_WEIGHTS.name}", layout.repo_weights)
         pseudo = layout.root / PSEUDO
         for clip, video in (videos_in(pseudo / "videos") if (pseudo / "videos").is_dir() else {}).items():

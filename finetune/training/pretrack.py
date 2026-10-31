@@ -36,7 +36,7 @@ from finetune.data import workspace as ws
 from finetune.data.labels import DraftRow, write_draft as write_draft_rows
 from finetune.data.workspace import VideoMeta, draft_csv, label_csv, video_meta, videos_in
 from finetune.data.detect import ball_detector, detect_points
-from tennis_tracker.ball_weights import operating_conf
+from tennis_tracker.ball_weights import operating_conf, unknown_weights_note
 from tennis_tracker.frame_rate import require_phase_stride
 
 RAW_DRAFT_CONF = 0.25          # raw drafts keep guesses down to this confidence, so nearly every frame has one
@@ -74,6 +74,9 @@ def pipeline_rows(video: Path, weights: Path, conf: Optional[float], device: str
     from tennis_tracker.headless import run_headless     # the pipeline: CUDA and TensorRT, only for this source
 
     threshold = operating_conf(weights) if conf is None else conf
+    note = unknown_weights_note(weights) if conf is None else None
+    if note:
+        print(f"[pretrack] {note}")
     rows = run_headless(video, model_path=weights, conf=threshold, device=device, tracking_json=json_path).frame_rows()
     return {
         row["frame"]: (row["x"], row["y"], row.get("source", "det"), float(row.get("conf", 0.0)))

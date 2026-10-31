@@ -55,13 +55,11 @@ pip install -r requirements.txt
 
 FilterPy is not needed: the selector's Kalman filter is plain NumPy.
 
-The repository includes the ball-detector weights (`models/candidates/stream_s4_e60.pt`,
-the default, `models/ball_detector.pt`, and the GridTrackNet export in `models/legacy/`),
-the CatBoost bounce model and the TensorRT engines used by the default pipeline
-(`models/README.md` lists them; a run without the default weights says where they come
-from). TensorRT engines
-are platform-specific and may need to be rebuilt for a different GPU or
-TensorRT version.
+The model files are not in the repository: `models/README.md` lists the ones a run needs
+(the default ball detector `models/candidates/stream_s4_e60.pt`, `models/ball_detector.pt`,
+the CatBoost bounce model and the TensorRT engines) and where they come from, and a run
+without the default ball weights says so. TensorRT engines are platform-specific and may
+need to be rebuilt for a different GPU or TensorRT version.
 
 ## Usage
 
@@ -166,14 +164,16 @@ record read stay only so that a stale record is refused by name; if that is not
 wanted, `arch_of` can go back to the suffix alone.
 
 The winner's weights are promoted by copying them over the training workspace's
-model in `tennis_tracker/paths.py` (`HEATMAP_WEIGHTS`, `models/ball_detector.pt`;
-`Config.model_path` defaults to `BALL_WEIGHTS`, the stream_s4 file, since
-2026-10-30), which `ft.py promote` on `train` does with a backup. On 2026-10-26 that file became the heat-map control run's winner (ctrl1,
-the ledger has the numbers); the GridTrackNet `.npz` files moved to
-`models/legacy/` (`gridtracknet_finetuned.npz`, the previous default, and
-`gridtracknet_upstream.npz`, the export it was fine-tuned from, untracked) beside
-the old YOLO `ball.engine`, and `clean_tracker.py --weights` still runs any of
-them. Record every promotion in the ledger with its held-out numbers.
+model in `tennis_tracker/paths.py` (`HEATMAP_WEIGHTS`, `models/ball_detector.pt`), which
+`ft.py promote` on `train` does with a backup; since 2026-10-30 `Config.model_path`
+defaults to `BALL_WEIGHTS`, the stream_s4 file. On 2026-10-26 `ball_detector.pt` became
+the heat-map control run's winner (ctrl1, the ledger has the numbers); the GridTrackNet
+`.npz` files moved to `models/legacy/` (`gridtracknet_finetuned.npz`, the previous
+default, and `gridtracknet_upstream.npz`, the export it was fine-tuned from, untracked)
+beside the old YOLO `ball.engine`, and `clean_tracker.py --weights` still runs any of
+them. Record every promotion in the ledger with its held-out numbers; a promoted file
+runs at the threshold `tennis_tracker/ball_weights.py` gives its path until its entry
+is updated.
 
 ## The bundled weights and the training workspace
 

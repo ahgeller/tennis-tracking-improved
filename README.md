@@ -40,7 +40,7 @@ rebuild the big zip.
 
 | setting | what it is |
 |---|---|
-| `ARCH` | `gridtracknet` (the tracker's current net, `.npz`) or `heatmap_s4` (the stride-4 heat-map net, `.pt`) |
+| `ARCH` | `gridtracknet` (GridTrackNet, `.npz`) or `heatmap_s4` (the stride-4 heat-map net, `.pt`) |
 | `MODE` | `scratch` trains a new network; `finetune` continues from `START_WEIGHTS` |
 | `START_WEIGHTS` | a file in the zip's `models/` folder or a path under `runs/` (say `heat1/best.pt`). A scratch run reads it only for the hard-negative prepass |
 | `HOLDOUT` | `mixed_v1`: 24 whole recordings never trained on, the honest test |
@@ -216,9 +216,12 @@ With one `.pt` architecture left, `read_record` with `arch=None` and `arch_of`'s
 record read stay only so that a stale record is refused by name; if that is not
 wanted, `arch_of` can go back to the suffix alone.
 
-The winner's weights are promoted by copying them over the default path in
-`system/tennis_tracker/paths.py` (`BALL_WEIGHTS`, `system/models/ball_detector.pt`, what
-`Config.model_path` defaults to), which `ft.py promote` does with a backup. On
+The winner's weights are promoted by copying them over the workspace's model in
+`system/tennis_tracker/paths.py` (`HEATMAP_WEIGHTS`, `system/models/ball_detector.pt`), which
+`ft.py promote` does with a backup. Since 2026-10-30 the tracker's default (`BALL_WEIGHTS`, what
+`Config.model_path` defaults to) is stream_s4, `system/models/candidates/stream_s4_e60.pt`; the
+promoted file runs with `--weights`, at the threshold `system/tennis_tracker/ball_weights.py`
+gives its path. On
 2026-10-26 that file became the heat-map control run's winner (ctrl1, the ledger
 has the numbers); the GridTrackNet `.npz` files moved to `system/models/legacy/`
 (`gridtracknet_finetuned.npz`, the previous default, and `gridtracknet_upstream.npz`,

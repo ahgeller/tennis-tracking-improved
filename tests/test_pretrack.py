@@ -2,15 +2,14 @@
 format's own writer (``labels.write_draft``), on a temporary folder. The detector itself is
 exercised in test_label_workflow (raw_rows) and the script's workspace handling in test_workspace."""
 from pathlib import Path
-
-from finetune.data.labels import read_label_rows, read_labels
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from finetune.data.labels import read_label_rows, read_labels
 from finetune.training import pretrack
 from finetune.training.pretrack import RAW_DRAFT_CONF, write_draft
 from tennis_tracker import headless
-from tennis_tracker.ball_weights import HEATMAP_S4, STREAM_S4, UNKNOWN_CONF
+from tennis_tracker.ball_weights import HEATMAP_S4_WEIGHTS, STREAM_S4_WEIGHTS, UNKNOWN_CONF
 
 
 def test_write_draft_covers_every_label_frame_in_the_label_format(tmp_path, capsys):
@@ -45,8 +44,8 @@ def test_pipeline_drafts_use_the_threshold_the_tracker_runs_the_weights_at(tmp_p
         return SimpleNamespace(frame_rows=lambda: [])
 
     with patch.object(headless, "run_headless", run_headless):
-        for weights in (STREAM_S4.path, HEATMAP_S4.path, tmp_path / "other.pt"):
+        for weights in (STREAM_S4_WEIGHTS.path, HEATMAP_S4_WEIGHTS.path, tmp_path / "other.pt"):
             pretrack.pipeline_rows(tmp_path / "clip.mp4", weights, None, "0", tmp_path / "t.json")
-        pretrack.pipeline_rows(tmp_path / "clip.mp4", STREAM_S4.path, 0.3, "0", tmp_path / "t.json")
-    assert seen == [STREAM_S4.conf, HEATMAP_S4.conf, UNKNOWN_CONF, 0.3]
+        pretrack.pipeline_rows(tmp_path / "clip.mp4", STREAM_S4_WEIGHTS.path, 0.3, "0", tmp_path / "t.json")
+    assert seen == [STREAM_S4_WEIGHTS.conf, HEATMAP_S4_WEIGHTS.conf, UNKNOWN_CONF, 0.3]
     assert RAW_DRAFT_CONF < min(seen[:3])                                      # raw drafts keep unsure guesses too

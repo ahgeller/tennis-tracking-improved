@@ -15,7 +15,11 @@ files here under these names (`tennis_tracker/paths.py` is where they are spelle
 `clean_tracker.py --weights <file>` runs any other ball detector, `.pt` or
 GridTrackNet `.npz`, without copying it here. Without `--conf` a run takes the
 threshold the weights were gated at (`tennis_tracker/ball_weights.py`: the two files
-above; 0.40 for any other).
+above; 0.40 for any other). That table is keyed by path, not by what is in the file:
+weights elsewhere (a retrained stream_s4 in `finetune/models/`) run at 0.40, which the
+run prints, and weights copied over one of these names (`ft.py promote`) take that
+name's threshold, which `promote` warns about. Gate new weights and give them their
+own entry in `ball_weights.py`, or pass `--conf`.
 
 ## Train your own ball detector
 

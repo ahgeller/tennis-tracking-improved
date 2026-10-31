@@ -46,15 +46,19 @@ from finetune.data import workspace as ws
 from finetune.data.workspace import (HOLDOUTS_NAME, MANIFEST_NAME, clip_of, find_video, natural_key, read_exclusions,
                                      read_manifest, video_meta)
 from finetune.scoring.pipeline_score import ClipScore, score_pipeline_clip
-from tennis_tracker.ball_weights import operating_conf
+from tennis_tracker.ball_weights import operating_conf, unknown_weights_note
+from tennis_tracker.config import PREPASS_MODES, PrepassMode
 from tennis_tracker.paths import BALL_WEIGHTS
 
 ARCHIVE_VARIABLE = "TENNIS_ARCHIVE"
 MODELS = {
-    "gridtracknet": BALL_WEIGHTS,
+    "gridtracknet": BALL_WEIGHTS,       # the tracker's default detector; ft.py eval names the workspace's model
 }
 DEFAULT_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-PER_CLIP_CONF = 0.4         # the per-clip table and the offset report use this threshold
+# The per-clip table and the offset report use this threshold. Fixed, not the scored weights'
+# operating threshold (ball_weights.operating_conf), so raw tables compare across models and runs at
+# one threshold; the sweep over --thresholds shows the others.
+PER_CLIP_CONF = 0.4
 BAD_FRAMES_LISTED = 40      # how many of a clip's bad frames the pipeline report names
 CELL_BINS = 5               # --cell-histogram: bins across a grid cell, per axis
 
@@ -296,7 +300,7 @@ def run_raw(models: List[str], clips: List[ClipPair], thresholds: List[float], d
 def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, Optional[float]], device: str,
                  out_dir: Path, reuse_json: bool = False, court_events: bool = False,
                  weights: Optional[Dict[str, Path]] = None, window_step: Optional[int] = None,
-                 prepass_mode: Optional[str] = None) -> None:
+                 prepass_mode: Optional[PrepassMode] = None) -> None:
     """Track every clip (``headless.run_headless``) and score the per-frame output; with
     ``court_events`` each clip's tracking JSON also carries its court events, which
     ``score_court_events.py`` reads. `weights` (model name -> file) replaces a model's bundled
@@ -312,6 +316,9 @@ def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, Optio
         threshold = conf[name]
         if threshold is None:
             threshold = operating_conf(model_path)
+            note = unknown_weights_note(model_path)
+            if note:
+                print(f"[pipeline] {note}")
         print(f"[pipeline] {name}: {model_path} at confidence {threshold:.2f}")
         for video_path, csv_path in clips:
             meta = video_meta(video_path)
@@ -378,7 +385,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="Frames of a phase between the prepass's unit starts, in both modes (default: the "
                              "tracker's Config.gridtracknet_window_step); below 5 a frame's overlapping units are "
                              "averaged before it is decoded (1 = a unit at every frame, 5 = one unit per frame)")
-    parser.add_argument("--prepass-mode", choices=("auto", "foreground", "thread", "process"), default=None,
+    parser.add_argument("--prepass-mode", choices=PREPASS_MODES, default=None,
                         help="Pipeline mode: where the prepass runs, Config.ball_prepass_mode (default: the tracker's, "
                              "auto: a child process for a streaming network); the answers are the same in every mode")
     args = parser.parse_args(argv)
