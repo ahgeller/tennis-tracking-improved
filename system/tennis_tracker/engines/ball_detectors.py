@@ -18,7 +18,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple, Union, cast
+from typing import Any, Callable, Deque, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union, cast
 
 import cv2
 import numpy as np
@@ -476,138 +476,45 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             return self.stream_halves.stream
         return torch.cuda.Stream(device=self.device) if self._worker is not None else None
 
+    def open_stream(self, fps: float, width: int, height: int, eager: bool = True) -> "PrepassStream":
+        """A prepass fed one frame at a time (``PrepassStream.push``) instead of reading a clip, for a
+        caller that gets the frames as they arrive (``live``). Its rows land in ``precomputed`` and are
+        published as they become final, as ``prepare_video``'s are. ``eager`` (the default here) runs
+        every unit as soon as it is cut, so a frame is final as soon as no later unit can cover it
+        rather than when a batch fills. The caller pushes inside ``stream_scope`` and calls
+        ``PrepassStream.finish`` after the last frame."""
+        if self._remote is not None:
+            raise RuntimeError("a prepass in its own process reads the clip itself; it cannot be fed frames")
+        cached: List[List[RawDetection]] = []
+        self.precomputed = cached
+        self._ready_upto = 0
+        self._done = False
+        self._worker_error = None
+        self._worker = None
+        return PrepassStream(self, cached, self.source_stride_for(fps), width, height, eager)
+
+    @contextlib.contextmanager
+    def stream_scope(self) -> Iterator[Any]:
+        """Inference mode on the prepass's CUDA stream (``_work_stream``), which it yields (None for
+        the current stream)."""
+        stream = self._work_stream()
+        scope = torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext()
+        with scope, torch.inference_mode():
+            yield stream
+
     def _prepass(self, capture: Any, cached: List[List[RawDetection]], source_stride: int, width: int, height: int,
                  total_hint: int) -> None:
-        # One independent stream of five-frame units per phase. The model wants 30 FPS
-        # spacing, so at 60 FPS the odd frames form a second, equally valid unit stream;
-        # running only phase 0 leaves every odd frame unobserved. ``_UnitStream`` cuts a
-        # phase's units every ``window_step`` of its frames from the last five it saw. A streaming
-        # network's units carry their frames' transition numbers in the ring instead of the frames.
-        window_step = self.window_step()
-        streams = [_UnitStream(window_step) for _ in range(source_stride)]
-        batches: List[_PrepassUnit] = []
-        engine = self.engine
-        network = engine if engine is not None else self.model
-        halves = self.stream_halves
-        static = engine if engine is not None else halves            # a network of a static batch
-        batch_units = static.batch if static is not None else _UNITS_PER_INFERENCE
-        transitions = None
-        if halves is not None:
-            transitions = TransitionRing(halves, transition_slots(batch_units, window_step, source_stride), source_stride)
-        averaging = window_step != 5
-        # The frames summed in the ring and not yet decoded.
-        covered: Set[int] = set()
-        ring: Optional[HeatRing] = None
-        finalized: Set[int] = set()
-        in_flight: Deque[_Flush] = deque()
-        frame_index = inference_calls = detected = 0
-        grid = (0, 0)
         started = time.perf_counter()
-        y_offset = self.cfg.gridtracknet_y_offset_px * height / _REFERENCE_HEIGHT_PX
-        radius = max(_MIN_BOX_RADIUS_PX, _BOX_RADIUS_FRAC * np.hypot(width, height))
-
-        def store(index: int, found: GridPoint) -> None:
-            nonlocal detected
-            point, confidence = found
-            if point is None:
-                return
-            x, y = point[0], point[1] + y_offset
-            cached[index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
-            detected += 1
-
-        def apply(flush: _Flush) -> None:
-            # The peaks become points on the host; with overlapping units each decoded frame is
-            # final, otherwise the first unit to answer a source frame finalises it and a later
-            # overlapping unit (the clip's trailing window) is ignored.
-            points = flush.points
-            if flush.peaks is not None:
-                rows, cols = grid
-                points = peak_points(flush.peaks.wait(), rows, cols, width, height, self.cfg.conf)
-            if points is not None:
-                if averaging:
-                    for index, found in zip(flush.frames, points):
-                        store(index, found)
-                else:
-                    for unit_index, indices in enumerate(flush.units):
-                        for index, found in zip(indices, points[unit_index * FRAMES_PER_UNIT:]):
-                            if index not in finalized:
-                                finalized.add(index)
-                                store(index, found)
-            self._publish(flush.upto)
-
-        def drain(everything: bool = False) -> None:
-            while in_flight and (everything or len(in_flight) > _READBACKS_IN_FLIGHT or in_flight[0].peaks is None
-                                 or in_flight[0].peaks.ready()):
-                apply(in_flight.popleft())
-
-        def flush(final: bool = False) -> None:
-            nonlocal inference_calls, ring, grid
-            # Every frame below the oldest unit not yet cut is final (a mid-clip call cannot be
-            # sure of later frames: the next unit may still cover them).
-            pending_min = min((stream.pending_start for stream in streams if stream.pending_start is not None),
-                              default=frame_index + 1)
-            upto = frame_index if final else min(pending_min, frame_index + 1)
-            record = _Flush(upto)
-            if batches:
-                units = [indices for _, indices in batches]
-                if transitions is not None:     # pads its static batch itself
-                    output = transitions.decode([cast(List[Optional[int]], values) for values, _ in batches])
-                else:
-                    frames = [cast(torch.Tensor, tensor) for tensors, _ in batches for tensor in tensors]
-                    if engine is not None:      # a static batch: pad with the last unit
-                        frames += frames[-FRAMES_PER_UNIT:] * (batch_units - len(batches))
-                    stacked = torch.cat(frames).view(len(frames) // FRAMES_PER_UNIT, -1, *frames[0].shape[1:])
-                    output = network(stacked)
-                grid = (int(output.shape[-2]), int(output.shape[-1]))
-                if averaging:
-                    if ring is None:
-                        ring = HeatRing(_ring_slots(batch_units, window_step, source_stride), *grid, output.device)
-                    for indices in units:
-                        for index in indices:
-                            covered.add(index)
-                    ring.check_span(min(covered), frame_index)
-                    ring.add(output, units)
-                elif self._decode is not None:
-                    record.points, record.units = self._decode(output[:len(units)], width, height, self.cfg.conf), units
-                else:
-                    record.peaks = Readback(grid_peaks(output[:len(units)].reshape(-1, 3, *grid)))
-                    record.units = units
-                inference_calls += 1
-                batches.clear()
-            if ring is not None:
-                ready = sorted(index for index in covered if index < upto)
-                if ready:
-                    for index in ready:
-                        covered.discard(index)
-                    record.peaks, record.frames = Readback(ring.take(ready)), ready
-            in_flight.append(record)
-            drain(everything=final)
-
+        run: Optional[PrepassStream] = None
         try:
-            stream = self._work_stream()
-            stream_scope = torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext()
-            with stream_scope, torch.inference_mode():
+            with self.stream_scope() as stream:
+                run = PrepassStream(self, cached, source_stride, width, height)
                 while True:
                     ok, frame = capture.read()
                     if not ok:
                         break
-                    cached.append([])
-                    phase = frame_index % source_stride
-                    tensor = self._frame_tensor(frame, self.device)
-                    value: _FrameValue = tensor if transitions is None else transitions.push(tensor, phase)
-                    unit = streams[phase].push((value, frame_index))
-                    if unit is not None:
-                        batches.append(unit)
-                        if len(batches) == batch_units:
-                            flush()
-                    frame_index += 1
-                batches.extend(window for window in (stream.trailing_window() for stream in streams) if window is not None)
-                while static is not None and len(batches) > batch_units:    # trailing windows past a static batch
-                    rest = batches[batch_units:]
-                    del batches[batch_units:]
-                    flush()
-                    batches.extend(rest)
-                flush(final=True)
+                    run.push(frame)
+                run.finish()
                 if stream is not None:
                     stream.synchronize()
                 elif self.device.type == "cuda":
@@ -621,7 +528,8 @@ class GridTrackNetBallDetector(BallDetectorBackend):
 
         elapsed = time.perf_counter() - started
         decode = getattr(capture, "backend", video_decode.BACKEND_OPENCV)
-        self._report_prepass(frame_index, detected, inference_calls, source_stride, elapsed, total_hint, decode)
+        frames, detected, calls = (run.frame_index, run.detected, run.inference_calls) if run is not None else (0, 0, 0)
+        self._report_prepass(frames, detected, calls, source_stride, elapsed, total_hint, decode)
 
     def _report_prepass(self, frame_index: int, detected: int, inference_calls: int, source_stride: int,
                         elapsed: float, total_hint: int, decode: str = video_decode.BACKEND_OPENCV) -> None:
@@ -636,6 +544,12 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         if self._worker_error is None and frame_index != total_hint:
             print(f"[detector] GridTrackNet prepass: the container reported {total_hint} frames, "
                   f"{frame_index} decoded; the decoded count is used")
+
+    @property
+    def ready_upto(self) -> int:
+        """Frames below this are final (``precomputed`` holds their answers)."""
+        with self._ready:
+            return self._ready_upto
 
     def wait_until_ready(self, index: int) -> None:
         """Block until frame ``index`` is final or the prepass has finished; raises if it failed."""
@@ -681,6 +595,167 @@ class GridTrackNetBallDetector(BallDetectorBackend):
 
     def detect_async_finish(self, pending: CachedDetections) -> List[RawDetection]:
         return pending.detections
+
+
+class PrepassStream:
+    """One clip's prepass, a frame at a time: ``push`` takes each decoded frame in source order and
+    ``finish``, after the last, cuts the trailing windows and makes every frame final. The rows land
+    in ``cached``, one per pushed frame, and each newly final ``upto`` is published through the
+    detector, which answers ``detections_at`` from them.
+
+    There is one independent stream of five-frame units per phase. The model wants 30 FPS spacing,
+    so at 60 FPS the odd frames form a second, equally valid unit stream; running only phase 0 would
+    leave every odd frame unobserved. ``_UnitStream`` cuts a phase's units every ``window_step`` of its
+    frames from the last five it saw. A streaming network's units carry their frames' transition
+    numbers in the ring instead of the frames.
+
+    Units run when a batch of them fills. ``eager`` runs each unit as soon as it is cut (a static
+    batch padded, as at the clip's end) and waits for its peaks, so a frame is published as soon as
+    no unit still to come covers it (``lookahead_frames``). The answers are the batched ones: each
+    unit's rows are the same, and a frame's answers are summed in the same chronological order."""
+
+    def __init__(self, detector: "GridTrackNetBallDetector", cached: List[List[RawDetection]], source_stride: int,
+                 width: int, height: int, eager: bool = False):
+        self.detector = detector
+        self.cfg = detector.cfg
+        self.cached = cached
+        self.eager = bool(eager)
+        self.width, self.height = int(width), int(height)
+        self.source_stride = int(source_stride)
+        self.window_step = detector.window_step()
+        self.streams = [_UnitStream(self.window_step) for _ in range(self.source_stride)]
+        self.batches: List[_PrepassUnit] = []
+        self.engine = detector.engine
+        self.network = self.engine if self.engine is not None else detector.model
+        self.halves = detector.stream_halves
+        self.static = self.engine if self.engine is not None else self.halves     # a network of a static batch
+        self.batch_units = self.static.batch if self.static is not None else _UNITS_PER_INFERENCE
+        self.transitions: Optional[TransitionRing] = None
+        if self.halves is not None:
+            slots = transition_slots(self.batch_units, self.window_step, self.source_stride)
+            self.transitions = TransitionRing(self.halves, slots, self.source_stride)
+        self.averaging = self.window_step != 5
+        self.covered: Set[int] = set()          # the frames summed in the ring and not yet decoded
+        self.ring: Optional[HeatRing] = None
+        self.finalized: Set[int] = set()
+        self.in_flight: Deque[_Flush] = deque()
+        self.frame_index = self.inference_calls = self.detected = 0      # frame_index: frames pushed
+        self.ended = False
+        self.grid = (0, 0)
+        self.y_offset = self.cfg.gridtracknet_y_offset_px * height / _REFERENCE_HEIGHT_PX
+        self.radius = max(_MIN_BOX_RADIUS_PX, _BOX_RADIUS_FRAC * np.hypot(width, height))
+
+    @property
+    def lookahead_frames(self) -> int:
+        """Mid-clip, the source frames that must follow a frame before it is final: the last unit
+        covering it starts at or before it and is five frames of its phase long, so it is cut at most
+        four frames of the phase later, and a phase's frames are ``source_stride`` apart."""
+        return (FRAMES_PER_UNIT - 1) * self.source_stride
+
+    def push(self, frame: PrepassFrame) -> None:
+        """Take the clip's next decoded frame: a BGR frame (host array or CUDA tensor) or an NV12 picture."""
+        self.cached.append([])
+        index = self.frame_index
+        phase = index % self.source_stride
+        tensor = self.detector._frame_tensor(frame, self.detector.device)
+        value: _FrameValue = tensor if self.transitions is None else self.transitions.push(tensor, phase)
+        unit = self.streams[phase].push((value, index))
+        self.frame_index += 1
+        if unit is not None:
+            self.batches.append(unit)
+            if self.eager or len(self.batches) == self.batch_units:
+                self._flush()
+
+    def finish(self) -> None:
+        """After the last frame: cut each phase's trailing window and make every frame final."""
+        self.ended = True
+        batches = self.batches
+        batches.extend(window for window in (stream.trailing_window() for stream in self.streams) if window is not None)
+        while self.static is not None and len(batches) > self.batch_units:    # trailing windows past a static batch
+            rest = batches[self.batch_units:]
+            del batches[self.batch_units:]
+            self._flush()
+            batches.extend(rest)
+        self._flush(final=True)
+
+    def _store(self, index: int, found: GridPoint) -> None:
+        point, confidence = found
+        if point is None:
+            return
+        x, y, radius = point[0], point[1] + self.y_offset, self.radius
+        self.cached[index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
+        self.detected += 1
+
+    def _apply(self, flush: _Flush) -> None:
+        # The peaks become points on the host; with overlapping units each decoded frame is
+        # final, otherwise the first unit to answer a source frame finalises it and a later
+        # overlapping unit (the clip's trailing window) is ignored.
+        points = flush.points
+        if flush.peaks is not None:
+            rows, cols = self.grid
+            points = peak_points(flush.peaks.wait(), rows, cols, self.width, self.height, self.cfg.conf)
+        if points is not None:
+            if self.averaging:
+                for index, found in zip(flush.frames, points):
+                    self._store(index, found)
+            else:
+                for unit_index, indices in enumerate(flush.units):
+                    for index, found in zip(indices, points[unit_index * FRAMES_PER_UNIT:]):
+                        if index not in self.finalized:
+                            self.finalized.add(index)
+                            self._store(index, found)
+        self.detector._publish(flush.upto)
+
+    def _drain(self, everything: bool = False) -> None:
+        in_flight = self.in_flight
+        while in_flight and (everything or len(in_flight) > _READBACKS_IN_FLIGHT or in_flight[0].peaks is None
+                             or in_flight[0].peaks.ready()):
+            self._apply(in_flight.popleft())
+
+    def _flush(self, final: bool = False) -> None:
+        # Every frame below the oldest unit not yet cut is final (a mid-clip call cannot be sure of
+        # later frames: the next unit may still cover them). ``newest`` is the last frame pushed,
+        # or the frame count once the clip has ended.
+        batches = self.batches
+        newest = self.frame_index if self.ended else self.frame_index - 1
+        pending_min = min((stream.pending_start for stream in self.streams if stream.pending_start is not None),
+                          default=newest + 1)
+        upto = newest if final else min(pending_min, newest + 1)
+        record = _Flush(upto)
+        if batches:
+            units = [indices for _, indices in batches]
+            if self.transitions is not None:     # pads its static batch itself
+                output = self.transitions.decode([cast(List[Optional[int]], values) for values, _ in batches])
+            else:
+                frames = [cast(torch.Tensor, tensor) for tensors, _ in batches for tensor in tensors]
+                if self.engine is not None:      # a static batch: pad with the last unit
+                    frames += frames[-FRAMES_PER_UNIT:] * (self.batch_units - len(batches))
+                stacked = torch.cat(frames).view(len(frames) // FRAMES_PER_UNIT, -1, *frames[0].shape[1:])
+                output = self.network(stacked)
+            self.grid = grid = (int(output.shape[-2]), int(output.shape[-1]))
+            if self.averaging:
+                if self.ring is None:
+                    slots = _ring_slots(self.batch_units, self.window_step, self.source_stride)
+                    self.ring = HeatRing(slots, *grid, output.device)
+                for indices in units:
+                    self.covered.update(indices)
+                self.ring.check_span(min(self.covered), newest)
+                self.ring.add(output, units)
+            elif self.detector._decode is not None:
+                record.points = self.detector._decode(output[:len(units)], self.width, self.height, self.cfg.conf)
+                record.units = units
+            else:
+                record.peaks = Readback(grid_peaks(output[:len(units)].reshape(-1, 3, *grid)))
+                record.units = units
+            self.inference_calls += 1
+            batches.clear()
+        if self.ring is not None:
+            ready = sorted(index for index in self.covered if index < upto)
+            if ready:
+                self.covered.difference_update(ready)
+                record.peaks, record.frames = Readback(self.ring.take(ready)), ready
+        self.in_flight.append(record)
+        self._drain(everything=final or self.eager)
 
 
 def _ring_slots(batch_units: int, window_step: int, source_stride: int) -> int:
