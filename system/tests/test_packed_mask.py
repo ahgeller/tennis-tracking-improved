@@ -26,6 +26,29 @@ def test_pack_with_an_roi_keeps_that_rectangle_and_clips_it_to_the_frame():
     assert PackedMask.pack(_mask(), roi=(35, 4, 40, 15)).roi == (10, 5, 21, 13)
 
 
+def _misaligned(mask):
+    """``mask`` copied into a buffer whose rows start at odd addresses."""
+    h, w = mask.shape
+    out = np.zeros(h * w + 1, np.uint8)[1:].reshape(h, w)
+    out[:] = mask
+    assert out.ctypes.data % 4
+    return out
+
+
+def test_pack_bounds_set_pixels_in_the_first_columns_of_a_misaligned_buffer():
+    """OpenCV 4.9's ``cv2.boundingRect`` can drop a column of such a mask; the packed box holds
+    every set pixel."""
+    rng = np.random.default_rng(0)
+    for _ in range(300):
+        h, w = int(rng.integers(2, 30)), int(rng.integers(3, 60))
+        mask = np.zeros((h, w), np.uint8)
+        mask[rng.integers(0, h, 4), rng.integers(0, 3, 4)] = 255
+        packed = PackedMask.pack(_misaligned(mask))
+        cols, rows = np.flatnonzero(mask.any(axis=0)), np.flatnonzero(mask.any(axis=1))
+        assert packed.roi == (cols[0], rows[0], cols[-1] + 1, rows[-1] + 1)
+        np.testing.assert_array_equal(packed.unpack(), mask)
+
+
 def test_empty_masks_are_never_packed():
     assert PackedMask.pack(None) is None
     assert PackedMask.pack(np.zeros((4, 4), np.uint8)) is None

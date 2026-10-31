@@ -83,6 +83,20 @@ def _clean_raw_motion_mask(mask_u8: Optional[np.ndarray], cfg: MotionSettings) -
     return out
 
 
+def _set_pixel_box(mask: np.ndarray) -> Optional[Roi]:
+    """The ``(x1, y1, x2, y2)`` bounding box of the nonzero pixels of a 2D mask; None when it has none.
+
+    Not ``cv2.boundingRect``: OpenCV 4.9's mask scan can return a box one or two columns too
+    narrow when every set pixel lies in the first three columns, depending on the buffer's
+    address (a misaligned crop of the download buffer hits it)."""
+    rows = np.flatnonzero(mask.any(axis=1))
+    if not rows.size:
+        return None
+    y1, y2 = int(rows[0]), int(rows[-1]) + 1
+    cols = np.flatnonzero(mask[y1:y2].any(axis=0))
+    return int(cols[0]), y1, int(cols[-1]) + 1, y2
+
+
 class BoostMaskBuffers(Protocol):
     """Where ``filter_boost_mask`` may write its result instead of allocating one."""
 
@@ -108,11 +122,11 @@ def filter_boost_mask(raw_motion: np.ndarray, min_area: int, max_area: int, cfg:
         result.fill(0)
     else:
         result = np.zeros((img_h, img_w), dtype=np.uint8)
-    off_x, off_y, box_w, box_h = cv2.boundingRect(raw_motion)
-    if box_w == 0 or box_h == 0:
+    box = _set_pixel_box(raw_motion)
+    if box is None:
         return result
-    num, _labels, stats, centroids = cv2.connectedComponentsWithStats(
-        raw_motion[off_y:off_y + box_h, off_x:off_x + box_w], connectivity=8)
+    off_x, off_y, x2, y2 = box
+    num, _labels, stats, centroids = cv2.connectedComponentsWithStats(raw_motion[off_y:y2, off_x:x2], connectivity=8)
     for cx, cy, radius in _boost_discs(stats[1:num], centroids[1:num], off_x, off_y, (img_h, img_w),
                                        min_area, max_area, cfg):
         cv2.circle(result, (int(cx), int(cy)), int(radius), 255, -1)

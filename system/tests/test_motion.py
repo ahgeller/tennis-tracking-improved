@@ -497,7 +497,23 @@ def test_filter_boost_mask_in_the_motion_bounding_box_matches_the_whole_frame_pa
     edge[86:90, 0:5] = 1
     masks.append(edge)
     cropped = [filter_boost_mask(mask, 1, 600, cfg) for mask in masks]
-    monkeypatch.setattr(motion.cv2, "boundingRect", lambda m: (0, 0, m.shape[1], m.shape[0]))
+    monkeypatch.setattr(motion, "_set_pixel_box", lambda m: (0, 0, m.shape[1], m.shape[0]))
     for mask, got in zip(masks, cropped):
         np.testing.assert_array_equal(got, filter_boost_mask(mask, 1, 600, cfg))
     assert any(np.count_nonzero(got) for got in cropped)
+
+
+def test_filter_boost_mask_keeps_motion_in_the_first_columns_of_a_misaligned_buffer():
+    """OpenCV 4.9's ``cv2.boundingRect`` can return a box a column or two too narrow for a mask
+    whose set pixels all lie in its first three columns, depending on the buffer's address (an
+    ROI crop of the download buffer starts anywhere); the filter's box must hold the whole blob."""
+    cfg = Config(boost_min_blob_area=1, boost_max_blob_area=600)
+    rng = np.random.default_rng(0)
+    for _ in range(300):
+        height, width = int(rng.integers(3, 40)), int(rng.integers(3, 60))
+        mask = np.zeros(height * width + 3, np.uint8)[3:].reshape(height, width)   # rows at odd addresses
+        mask[rng.integers(0, height, 4), rng.integers(0, 3, 4)] = 1
+        expected = np.zeros_like(mask)
+        for cx, cy, radius in _discs_one_by_one(mask, 1, 600, cfg):
+            cv2.circle(expected, (cx, cy), radius, 255, -1)
+        np.testing.assert_array_equal(filter_boost_mask(mask, 1, 600, cfg), expected)
