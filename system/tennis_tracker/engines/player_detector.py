@@ -72,7 +72,7 @@ class PlayerPending:
     court_kps: Optional[List[float]]
     outputs: Optional[List[torch.Tensor]] = None
     input_tensor: Optional[torch.Tensor] = None  # keeps the engine input alive until wait()
-    done: Optional[torch.cuda.Event] = None       # marks this launch's outputs ready (async sessions)
+    done: Optional[torch.cuda.Event] = None       # marks this launch's host outputs ready (async sessions)
 
 
 class PlayerDetector:
@@ -160,13 +160,13 @@ class PlayerDetector:
         if stream is not None:
             # The session's output buffers are reused by the next launch, which may come before
             # this one is finished (pass 1 finishes a frame's players one frame later), so the
-            # outputs are copied on the engine's stream, and the event lets ``detect_async_finish``
-            # wait for this launch alone rather than everything launched since.
+            # outputs are copied out on the engine's stream, straight into pinned host memory.  The
+            # event marks this launch's copies alone (not everything launched since), and
+            # ``detect_async_finish`` waits for it and decodes the host copy: no device copy, and no
+            # transfer of its own that would wait for the work queued on the current stream.
             with torch.cuda.stream(stream):
-                outputs = [out.clone() for out in outputs]
-            current = torch.cuda.current_stream(device=self.session.device)
-            for out in outputs:
-                out.record_stream(current)
+                outputs = [torch.empty(out.shape, dtype=out.dtype, pin_memory=True).copy_(out, non_blocking=True)
+                           for out in outputs]
             pending.done = self.session.completion_event()
         pending.outputs = outputs
         pending.input_tensor = t
@@ -189,7 +189,10 @@ class PlayerDetector:
             return []
 
         assert pending.outputs is not None
-        self.session.wait(pending.done)
+        if pending.done is not None:
+            pending.done.synchronize()          # the outputs are host copies
+        else:
+            self.session.wait()
         dets = self._decode_player_boxes(pending.outputs[0], pending.width, pending.height)
         # Drop spectators before the tracker learns them.
         if pending.court_kps and len(dets) > self.cfg.num_players:
