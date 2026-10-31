@@ -1,4 +1,4 @@
-"""Export the ball detectors to Core ML, ready to time on an iPhone in Xcode's performance report.
+"""Export the ball and player detectors to Core ML, ready to time on an iPhone in Xcode's performance report.
 
     python tools/export_coreml.py                    # writes output/coreml_speed_test/
 
@@ -20,12 +20,22 @@ branches and BatchNorm folded from the float32 record):
 - ``stream_s4_unit`` and ``heatmap_s4_unit``: the whole five-frame unit, ``frames``
   ``(1, 15, 432, 768)`` to ``grids`` ``(1, 15, 108, 192)`` (per frame heat, x offset, y offset).
 
+- ``player_detector``: the player YOLO11n (``system/models/sources/player.pt``, gitignored, the
+  checkpoint the shipped ``player.engine`` was matched to), ``image`` ``(1, 3, 640, 640)``, the
+  frame stretched as the tracker's TensorRT session does, to the raw head ``predictions``
+  ``(1, 5, 8400)``. NMS stays in the app: Ultralytics' Core ML NMS pipeline needs an image
+  input and bakes its own thresholds, and the tracker's (score 0.21, IoU 0.10) run on the few
+  anchors above the threshold (``engine_boxes``). The court model is not exported: no source
+  weights matching the shipped ``courtdetection.engine`` exist (``audit/records/opt_coreml.md``).
+
 The tracker at window step 1 runs one encoder call and one decoder call per source frame, so
-stream_s4's per-frame cost is the encoder's time plus the decoder's.
+stream_s4's per-frame cost is the encoder's time plus the decoder's; at 60 FPS it runs the player
+detector on every other frame.
 
 Beside them: sample units of ``system/sample/pomona.mp4`` (five consecutive same-phase frames,
-the tracker's own resize, float16 as the packages take them), the PyTorch FP32 outputs of the
-trainable networks on them, the encoder features the decoder is checked on, ``manifest.json``
+the tracker's own resize, float16 as the packages take them), the player detector's input for
+each unit's first frame, the PyTorch FP32 outputs of the source networks on them, the encoder
+features the decoder is checked on, ``manifest.json``
 (packages, cases, the PC checks) and the Mac kit from ``tools/coreml_speed_test/``
 (``MAC_SPEED_TEST.md``, ``validate.sh``, ``validate_coreml.py``, ``requirements-mac.txt``).
 
@@ -46,10 +56,10 @@ import shutil
 import subprocess
 import sys
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
@@ -79,6 +89,14 @@ UNIT_INPUT = "frames"
 GRIDS = "grids"
 PAIRS = streamnet.PAIRS_PER_UNIT
 FEATURE_STRIDES = (4, 8, 16)
+
+# The player detector: the checkpoint the shipped models/player.engine was matched to (md5, and
+# boxes on pomona within FP16 noise; audit/records/opt_coreml.md), at the engine's input size.
+DEFAULT_PLAYER_WEIGHTS = paths.MODELS / "sources" / "player.pt"
+PLAYER_SOURCE_MD5 = "4de317cc3e2cad7e9196fa438b439544"
+PLAYER_SIZE = 640
+PLAYER_INPUT = "image"
+PLAYER_OUTPUT = "predictions"
 
 
 def decoder_input(pair: int, level: str) -> str:
@@ -115,6 +133,9 @@ class PackageSpec:
     inputs: List[TensorSpec]
     outputs: List[TensorSpec]
     description: str
+    threshold: float = 0.0
+    fold_note: str = ""
+    notes: Dict[str, str] = field(default_factory=dict)
     gmac: float = 0.0
 
     def probes(self, dtype: torch.dtype = torch.float32) -> Tuple[torch.Tensor, ...]:
@@ -147,6 +168,13 @@ def load_trainable(weights: Path) -> nn.Module:
 def fused_copy(model: nn.Module) -> nn.Module:
     """`model`'s inference form (``ball_models.deployed``), leaving `model` as it is."""
     return ball_models.deployed(copy.deepcopy(model)).eval()
+
+
+def ball_fold_note(arch: str) -> str:
+    """What was folded before conversion, for the package metadata."""
+    if callable(getattr(ball_models.model_class(arch), "reparameterize", None)):
+        return "RepVGG branches and BatchNorm folded (ball_models.deployed)"
+    return "no RepVGG blocks; coremltools folds BatchNorm into the convolutions"
 
 
 def file_md5(path: Path) -> str:
@@ -226,7 +254,7 @@ def stream_specs(weights: Path, height: int = HEIGHT, width: int = WIDTH) -> Lis
         [], "stream_s4 ball detector, the whole five-frame unit in one call (encoder on four transitions plus the "
             "decoder); for comparison with the encoder + decoder split.")
     _finish(unit, [(GRIDS, _GRIDS_TEXT)])
-    return [encoder, decoder, unit]
+    return [_ball_words(spec) for spec in (encoder, decoder, unit)]
 
 
 def heatmap_specs(weights: Path, height: int = HEIGHT, width: int = WIDTH) -> List[PackageSpec]:
@@ -237,14 +265,89 @@ def heatmap_specs(weights: Path, height: int = HEIGHT, width: int = WIDTH) -> Li
         [TensorSpec(UNIT_INPUT, (1, FRAMES_PER_UNIT * 3, height, width),
                     f"five consecutive same-phase frames, oldest first, 3 channels each, {_FRAME_TEXT}")],
         [], "heatmap_s4 ball detector (the heavy U-Net), the whole five-frame unit in one call; it runs once per frame.")
-    return [_finish(unit, [(GRIDS, _GRIDS_TEXT)])]
+    return [_ball_words(_finish(unit, [(GRIDS, _GRIDS_TEXT)]))]
+
+
+def _ball_words(spec: PackageSpec) -> PackageSpec:
+    """A ball package's threshold (``operating_conf``) and fold note."""
+    spec.threshold = operating_conf(spec.weights)
+    spec.fold_note = ball_fold_note(spec.arch)
+    return spec
+
+
+class YoloRawHead(nn.Module):
+    """An Ultralytics detection model's raw head, ``(1, 4 + classes, anchors)``: per anchor the box
+    centre, width and height in input pixels, then each class's sigmoid score, the layout the
+    player engine emits and ``engine_boxes`` decodes. `export` puts the head in Ultralytics' own
+    export mode (Conv and BatchNorm fused, ``Detect.export``, as its exporter sets it for Core ML),
+    the graph that is converted; without it the model answers as it trained, the reference."""
+
+    def __init__(self, model: nn.Module, export: bool):
+        super().__init__()
+        from ultralytics.nn.modules import Detect
+        model = copy.deepcopy(model).float().eval()
+        if export:
+            model = cast(nn.Module, cast(Any, model).fuse(verbose=False))
+            for module in model.modules():
+                if isinstance(module, Detect):
+                    head: Any = module          # Ultralytics' attributes are untyped
+                    head.export, head.format, head.dynamic = True, "coreml", False
+                    head.xyxy, head.shape = False, None
+        self.model = model.eval()
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        output = self.model(image)
+        return cast(torch.Tensor, output[0] if isinstance(output, (tuple, list)) else output)
+
+
+def load_yolo(weights: Path) -> nn.Module:
+    """The FP32 eval network of an Ultralytics checkpoint (``ultralytics.nn.tasks.load_checkpoint``)."""
+    from ultralytics.nn.tasks import load_checkpoint
+    model, _ = load_checkpoint(str(weights), device="cpu")
+    return cast(nn.Module, model).float().eval()
+
+
+def player_specs(weights: Path, size: int = PLAYER_SIZE, expected_md5: Optional[str] = PLAYER_SOURCE_MD5
+                 ) -> List[PackageSpec]:
+    """The player detector's one package at the engine's `size`; weights whose md5 is not
+    `expected_md5` (the checkpoint the shipped ``player.engine`` matches) are a ValueError."""
+    if expected_md5 is not None and file_md5(weights) != expected_md5:
+        raise ValueError(f"{weights} (md5 {file_md5(weights)}) is not the checkpoint the shipped player.engine "
+                         f"was matched to (md5 {expected_md5}); pass --player-md5 to export it anyway")
+    model = load_yolo(weights)
+    classes = len(cast(Any, model).names)
+    from tennis_tracker.config import Config
+    cfg = Config()
+    spec = PackageSpec(
+        "player_detector", "yolo11n_player", "detector", weights, YoloRawHead(model, True), YoloRawHead(model, False),
+        [TensorSpec(PLAYER_INPUT, (1, 3, size, size),
+                    f"the whole source frame stretched (not letterboxed) to {size}x{size}, bilinear, RGB in [0, 1] "
+                    f"(uint8 / 255), as the tracker's TensorRT session prepares it")],
+        [], f"tennis tracker player detector (YOLO11n, {classes} class: player), raw head without NMS. At 60 FPS the "
+            f"tracker runs it on every other frame.",
+        threshold=float(cfg.player_conf), fold_note="Conv and BatchNorm fused (Ultralytics fuse)",
+        notes={"nms": f"not in the model: keep anchors scoring >= {cfg.player_conf:.2f}, then greedy NMS at IoU "
+                      f"{cfg.player_iou:.2f} (tennis_tracker/engines/engine_boxes.py)",
+               "nms_iou": f"{cfg.player_iou:.2f}"})
+    anchors = "per anchor (80x80, 40x40 and 20x20 grids at 640)" if size == PLAYER_SIZE else "per anchor"
+    return [_finish(spec, [(PLAYER_OUTPUT, f"{anchors}: box centre x, centre y, width, height in input pixels, "
+                                           f"then the player score (sigmoid); the app thresholds and runs NMS")])]
+
+
+def player_input(frame_bgr: np.ndarray, size: int = PLAYER_SIZE) -> np.ndarray:
+    """The player model's ``(1, 3, size, size)`` float16 input for a BGR uint8 frame: the ops of
+    ``engine_session.TensorRTRuntimeSession.preprocess_frame`` (float32 / 255, BGR to RGB, bilinear
+    resize without corner alignment, then FP16), on the CPU."""
+    value = torch.from_numpy(np.ascontiguousarray(frame_bgr)).to(torch.float32).permute(2, 0, 1).unsqueeze(0)
+    value = value.flip(1) / 255.0
+    if value.shape[-2:] != (size, size):
+        value = nn.functional.interpolate(value, size=(size, size), mode="bilinear", align_corners=False)
+    return value.half().numpy()
 
 
 def package_metadata(spec: PackageSpec, weights_md5: str, commit: str) -> Dict[str, Any]:
     """What a package carries: the description, author and version fields, a description per
     input and output, and the user-defined metadata (string values, as Core ML stores them)."""
-    conf = operating_conf(spec.weights)
-    folds = callable(getattr(ball_models.model_class(spec.arch), "reparameterize", None))
     return {
         "short_description": spec.description,
         "author": "tennis tracker, tools/export_coreml.py",
@@ -253,11 +356,10 @@ def package_metadata(spec: PackageSpec, weights_md5: str, commit: str) -> Dict[s
         "outputs": {tensor.name: tensor.description for tensor in spec.outputs},
         "user_defined": {
             "arch": spec.arch, "role": spec.role, "source_weights": spec.weights.name,
-            "source_weights_md5": weights_md5, "source_commit": commit, "operating_threshold": f"{conf:.2f}",
-            "fused": ("RepVGG branches and BatchNorm folded (ball_models.deployed)" if folds
-                      else "no RepVGG blocks; coremltools folds BatchNorm into the convolutions"),
+            "source_weights_md5": weights_md5, "source_commit": commit,
+            "operating_threshold": f"{spec.threshold:.2f}", "fused": spec.fold_note,
             "input_layout": "NCHW float16, batch 1, RGB in [0, 1]",
-            "conv_gmac_per_call": f"{spec.gmac:.3f}",
+            "conv_gmac_per_call": f"{spec.gmac:.3f}", **spec.notes,
         },
     }
 
@@ -308,30 +410,44 @@ def describe_package(spec_proto: Any) -> Dict[str, List[Dict[str, Any]]]:
     return {"inputs": tensors(spec_proto.description.input), "outputs": tensors(spec_proto.description.output)}
 
 
-def sample_units(video: Path, starts: Sequence[int]) -> List[Tuple[List[int], np.ndarray]]:
-    """Per start, the unit's source frame indices and its ``(1, 15, HEIGHT, WIDTH)`` float16 input:
-    five frames of one phase (``require_phase_stride``) from the start, each the tracker's
-    ``frame_tensor`` of OpenCV's decoded picture."""
+def video_stride(video: Path) -> int:
+    """The source frames between consecutive frames of one phase (``require_phase_stride``)."""
     import cv2
     capture = cv2.VideoCapture(str(video))
     if not capture.isOpened():
         raise FileNotFoundError(f"cannot open {video}")
-    stride = require_phase_stride(float(capture.get(cv2.CAP_PROP_FPS)))
-    wanted = {start: [start + stride * k for k in range(FRAMES_PER_UNIT)] for start in starts}
-    needed = {index for indices in wanted.values() for index in indices}
-    pictures: Dict[int, torch.Tensor] = {}
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    capture.release()
+    return require_phase_stride(fps)
+
+
+def read_frames(video: Path, indices: Iterable[int]) -> Dict[int, np.ndarray]:
+    """The BGR uint8 pictures OpenCV decodes at the source frame `indices`, read in order."""
+    import cv2
+    needed = set(indices)
+    capture = cv2.VideoCapture(str(video))
+    pictures: Dict[int, np.ndarray] = {}
     index = 0
     while needed - set(pictures):
         ok, frame = capture.read()
         if not ok:
             raise ValueError(f"{video} ends at frame {index}, before frames {sorted(needed - set(pictures))}")
         if index in needed:
-            pictures[index] = frame_tensor(frame, torch.device("cpu"))
+            pictures[index] = frame
         index += 1
     capture.release()
-    return [(indices, torch.cat([pictures[i] for i in indices]).unsqueeze(0).numpy().astype(np.float16))
-            for indices in (wanted[start] for start in starts)]
+    return pictures
 
+
+def unit_frames(starts: Sequence[int], stride: int) -> List[List[int]]:
+    """Per start, the source frames of its five-frame unit: one phase, `stride` apart."""
+    return [[start + stride * k for k in range(FRAMES_PER_UNIT)] for start in starts]
+
+
+def unit_input(pictures: Mapping[int, np.ndarray], indices: Sequence[int]) -> np.ndarray:
+    """A unit's ``(1, 15, HEIGHT, WIDTH)`` float16 input: each frame the tracker's ``frame_tensor``."""
+    cpu = torch.device("cpu")
+    return torch.cat([frame_tensor(pictures[i], cpu) for i in indices]).unsqueeze(0).numpy().astype(np.float16)
 
 def _load_validator() -> ModuleType:
     location = KIT / "validate_coreml.py"
@@ -385,10 +501,13 @@ def reference_outputs(spec: PackageSpec, inputs: Sequence[np.ndarray]) -> Tuple[
 
 
 def write_samples(out: Path, specs: Mapping[str, PackageSpec], units: Sequence[Tuple[List[int], np.ndarray]],
-                  stream: bool, heatmap: bool) -> List[Dict[str, Any]]:
-    """The sample inputs and PyTorch references under ``out/samples``, and the manifest's cases."""
+                  players: Sequence[Tuple[int, np.ndarray]] = ()) -> List[Dict[str, Any]]:
+    """The sample inputs and PyTorch references under ``out/samples``, and the manifest's cases:
+    the ball packages' on each unit, the player detector's on each of `players` (source frame,
+    input) when `specs` holds it."""
     cases: List[Dict[str, Any]] = []
-    stream_conf = operating_conf(specs["stream_s4_unit"].weights) if stream else 0.0
+    stream, heatmap = "stream_s4_unit" in specs, "heatmap_s4_unit" in specs
+    stream_conf = specs["stream_s4_unit"].threshold if stream else 0.0
     for k, (indices, frames) in enumerate(units):
         folder = Path("samples") / f"unit{k}"
         (out / folder / "reference").mkdir(parents=True, exist_ok=True)
@@ -400,7 +519,7 @@ def write_samples(out: Path, specs: Mapping[str, PackageSpec], units: Sequence[T
             np.save(out / heat_ref, reference_outputs(specs["heatmap_s4_unit"], [frames])[0])
             cases.append({"group": "heatmap_s4_unit", "kind": "grids", "package": "heatmap_s4_unit", "unit": k,
                           "inputs": unit_input, "output": GRIDS, "reference": heat_ref,
-                          "threshold": operating_conf(specs["heatmap_s4_unit"].weights)})
+                          "threshold": specs["heatmap_s4_unit"].threshold})
         if not stream:
             continue
         (out / folder / "stream_s4_features").mkdir(parents=True, exist_ok=True)
@@ -431,6 +550,20 @@ def write_samples(out: Path, specs: Mapping[str, PackageSpec], units: Sequence[T
         cases.append({"group": "stream_s4_chain", "kind": "stream_chain", "encoder": "stream_s4_encoder",
                       "decoder": "stream_s4_decoder", "unit": k, "encoder_steps": steps, "output": GRIDS,
                       "reference": grids_ref, "threshold": stream_conf})
+    if "player_detector" in specs:
+        player = specs["player_detector"]
+        folder = Path("samples") / "players"
+        folder_path = out / folder
+        folder_path.mkdir(parents=True, exist_ok=True)
+        for source_frame, image in players:
+            image_npy = (folder / f"frame{source_frame}_image.npy").as_posix()
+            reference = (folder / f"frame{source_frame}_predictions.npy").as_posix()
+            np.save(out / image_npy, image)
+            np.save(out / reference, reference_outputs(player, [image])[0])
+            cases.append({"group": "player_detector", "kind": "boxes", "package": "player_detector",
+                          "frame": source_frame, "inputs": {PLAYER_INPUT: {"npy": image_npy}}, "output": PLAYER_OUTPUT,
+                          "reference": reference, "threshold": player.threshold,
+                          "iou": float(player.notes["nms_iou"])})
     return cases
 
 
@@ -469,7 +602,8 @@ def prepare_out(out: Path, overwrite: bool) -> None:
 
 
 def export(out: Path, stream_weights: Optional[Path], heat_weights: Optional[Path], video: Path,
-           starts: Sequence[int], convert_packages: bool = True) -> Dict[str, Any]:
+           starts: Sequence[int], convert_packages: bool = True, player_weights: Optional[Path] = None,
+           player_md5: Optional[str] = PLAYER_SOURCE_MD5) -> Dict[str, Any]:
     """Everything the Mac needs, written to `out` (which must be empty); returns the manifest."""
     missing = [name for name in KIT_FILES if not (KIT / name).is_file()]
     if missing:
@@ -480,6 +614,8 @@ def export(out: Path, stream_weights: Optional[Path], heat_weights: Optional[Pat
         specs.update({spec.name: spec for spec in stream_specs(stream_weights)})
     if heat_weights is not None:
         specs.update({spec.name: spec for spec in heatmap_specs(heat_weights)})
+    if player_weights is not None:
+        specs.update({spec.name: spec for spec in player_specs(player_weights, expected_md5=player_md5)})
     md5 = {path: file_md5(path) for path in {spec.weights for spec in specs.values()}}
     traced = {name: trace(spec.fused, spec.probes()) for name, spec in specs.items()}
     packages: Dict[str, Any] = {}
@@ -498,14 +634,18 @@ def export(out: Path, stream_weights: Optional[Path], heat_weights: Optional[Pat
             entry["saved_spec"] = describe_package(mlmodel.get_spec())
         packages[name] = entry
     print(f"[coreml] sampling units at {list(starts)} of {video.name}")
-    units = sample_units(video, starts)
-    cases = write_samples(out, specs, units, "stream_s4_unit" in specs, "heatmap_s4_unit" in specs)
+    frame_lists = unit_frames(starts, video_stride(video))
+    pictures = read_frames(video, [index for indices in frame_lists for index in indices])
+    units = [(indices, unit_input(pictures, indices)) for indices in frame_lists]
+    players = [(start, player_input(pictures[start])) for start in starts] if player_weights is not None else []
+    cases = write_samples(out, specs, units, players)
     manifest: Dict[str, Any] = {
         "exported": datetime.datetime.now().isoformat(timespec="seconds"), "source_commit": commit,
         "coremltools": _version("coremltools"), "torch": torch.__version__, "numpy": np.__version__,
         "python": platform.python_version(), "platform": platform.platform(),
         "deployment_target": DEPLOYMENT_TARGET, "compute_precision": "FLOAT16",
         "video": video.name, "units": [{"unit": k, "source_frames": indices} for k, (indices, _) in enumerate(units)],
+        "player_frames": [start for start, _ in players],
         "packages": packages, "cases": cases,
     }
     print("[coreml] scoring the PyTorch graphs on the PC")
@@ -537,6 +677,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--stream-weights", type=Path, default=paths.STREAM_WEIGHTS)
     parser.add_argument("--heat-weights", type=Path, default=paths.HEATMAP_WEIGHTS)
+    parser.add_argument("--player-weights", type=Path, default=DEFAULT_PLAYER_WEIGHTS,
+                        help=f"the player detector's Ultralytics checkpoint (default {_display_path(DEFAULT_PLAYER_WEIGHTS)})")
+    parser.add_argument("--player-md5", default=PLAYER_SOURCE_MD5,
+                        help="the md5 the player checkpoint must have (the one matched to the shipped player.engine)")
+    parser.add_argument("--no-player", action="store_true", help="leave the player detector out")
     parser.add_argument("--video", type=Path, default=DEFAULT_VIDEO)
     parser.add_argument("--starts", type=int, nargs="+", default=list(DEFAULT_STARTS),
                         help="source frames the sample units start at")
@@ -545,8 +690,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="write the samples, references and PC checks only (no coremltools needed)")
     args = parser.parse_args(argv)
     prepare_out(args.out, args.overwrite)
+    player = None if args.no_player else args.player_weights.resolve()
     manifest = export(args.out, args.stream_weights.resolve(), args.heat_weights.resolve(), args.video,
-                      args.starts, convert_packages=not args.no_convert)
+                      args.starts, convert_packages=not args.no_convert, player_weights=player,
+                      player_md5=args.player_md5)
     for variant, groups in manifest["pc_validation"].items():
         for group, result in groups.items():
             print(f"[pc] {variant:<12} {'PASS' if result['pass'] else 'FAIL'} {group:<18} {json.dumps(result['summary'])}")

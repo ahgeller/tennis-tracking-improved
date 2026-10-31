@@ -54,17 +54,49 @@ nearest stand-in for Core ML's FP16; the Neural Engine's own FP16 is checked by 
 Tests: `tests/test_export_coreml.py` (shapes, names, metadata, the fuse against the trainable network,
 the Mac cases on the PyTorch graphs; the conversion itself where coremltools installs, i.e. WSL).
 
-## Player and court models
+## Player and court models (follow-up, same day)
 
-`player.engine` and `courtdetection.engine` are bare TensorRT plans (no Ultralytics metadata header).
-No `.onnx`, `.pt` or other source weights for either exist in the repository, its worktrees or
-`system/models`, and a TensorRT plan cannot be converted back. To export them later: obtain the
-Ultralytics checkpoints the engines were built from (`models/player.pt`, a YOLO detector at 640;
-`models/courtdetection.pt`, a YOLO pose model at 1280, per `build_engines.py`), then
-`YOLO(pt).export(format="coreml", imgsz=..., half=True)` (Ultralytics' own Core ML export) or trace
-and convert as `export_coreml.py` does. Without the checkpoints they must be retrained
-(`system/models/README.md` names open starting points).
+Inside the repository there are no source weights for either: `player.engine` and
+`courtdetection.engine` are bare TensorRT plans (no Ultralytics header). Outside it, three folders hold
+`player` and `courtdetection` `.pt` / `.onnx`, byte-identical across the three (md5):
 
+| file | md5 | what it is |
+|---|---|---|
+| `player.pt` | 4de317cc3e2cad7e9196fa438b439544 | YOLO11n detect, 1 class (player), trained at 640, Ultralytics 8.3.171 |
+| `player.onnx` | edfb391d8703fe26435cf37b70e7fdbd | its export |
+| `player.engine` (HoldsSomeTennis, Interview Prep) | 60d2d31dd45408361dd0dbb08bbd6dab | **the shipped `system/models/player.engine`, byte for byte** |
+| `courtdetection.pt` | 833bd8d6024fdd8c0c4aac409695d1ca | YOLO26n-pose, 14 keypoints, end-to-end head, trained at 1280, Ultralytics 8.4.1 |
+| `courtdetection.onnx` | b008aa59c1bdf78eefb64514f44e3065 | its export |
+| `courtdetection.engine` (HoldsSomeTennis, Interview Prep) | 3d7e85e71777fad5f7c9bf940b8c5500 | 11.0 MB; the shipped one is 26.1 MB, md5 8b57ae924093beef80d9701a644c8378 |
+
+Folders: `C:\Users\Andrew\Desktop\HoldsSomeTennis\models`, `C:\Users\Andrew\Desktop\Interview
+Prep\triton-ball-tennis\models`, `C:\Users\Andrew\Desktop\tmp\pass1_perf\engines` (no engines). Both
+shipped engines' SHA-256 equal `system/audit/records/snapshot.json`'s.
+
+Run on eight pomona frames (0, 240, 600, 900, 1200, 1500, 1800, 2000), preprocessed by the tracker's own
+`TensorRTRuntimeSession.preprocess_frame`, each engine and the `.pt` (Ultralytics, CUDA, FP32 and FP16)
+on the identical input tensor:
+
+- **Player: matches.** Same players on every frame (15 boxes) at the tracker's thresholds (0.21, NMS IoU
+  0.10); `.pt` FP32 against the shipped engine: IoU >= 0.963, corners within 0.33 px of the 640 input
+  (1.0 source px), scores within 0.001; `.pt` FP16: IoU >= 0.994.
+- **Court: no match.** The shipped engine finds the court on all eight frames (conf 0.88 to 0.92); the
+  `.pt` scores 0.0000 to 0.0001 on frames 0 to 1200 and, where both find it (1500 to 2000), its keypoints
+  are 630 px from the engine's. The 11 MB engine beside the `.pt` agrees with it (keypoints within 1 px,
+  box within 1.1 px, conf within 0.004), so the `.pt` is that engine's source and the shipped engine was
+  built from other weights (2026-07-13), which no folder holds. The court model is not exported.
+
+The player detector is exported as `player_detector` from a gitignored copy at
+`system/models/sources/player.pt` (md5 checked by `export_coreml.player_specs`; a checkpoint of another
+md5 is refused). `export_coreml.player_input` (the session's preprocessing on the CPU) gives the CUDA
+session's input bit for bit on all eight frames. The package is the raw head, `image` (1x3x640x640) to
+`predictions` (1x5x8400), NMS left to the app: Ultralytics' Core ML NMS (`nms=True`) wraps the model in a
+pipeline with an image input and its own thresholds, which is not the tracker's tensor contract, and the
+tracker's NMS runs on the handful of anchors above 0.21 (`engine_boxes._raw_head_rows`).
+
+To export the court model later: find the weights the 26 MB engine was built from (2026-07-13), check them
+the same way, then add them as the player was (YOLO pose, end-to-end head: the 300x48 output already holds
+the chosen rows, no NMS).
 ## Open
 
 - The iPhone numbers themselves: the owner runs `MAC_SPEED_TEST.md` on a Mac.

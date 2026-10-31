@@ -1,6 +1,6 @@
-# Timing the ball models on an iPhone
+# Timing the tracker's models on an iPhone
 
-This folder holds the tennis tracker's ball-detector networks as Core ML models, ready for
+This folder holds the tennis tracker's ball and player detectors as Core ML models, ready for
 Xcode's performance report: Xcode copies a model to a connected iPhone, runs it many times and
 reports how long one prediction takes and which chip (Neural Engine, GPU or CPU) ran each layer.
 No app and no code are needed. The whole session takes about 30 to 45 minutes, most of it the
@@ -11,13 +11,15 @@ one-time setup.
 | `models/stream_s4_encoder.mlpackage` | **the phone model, part 1.** Runs once per video frame: the new frame and the one before it in, its features out. |
 | `models/stream_s4_decoder.mlpackage` | **the phone model, part 2.** Runs once per video frame: the last four encoder results in, the ball heat map out. |
 | `models/stream_s4_unit.mlpackage` | the same network as one model over five frames, for comparison only |
-| `models/heatmap_s4_unit.mlpackage` | the heavy network, for comparison only |
+| `models/heatmap_s4_unit.mlpackage` | the heavy ball network, for comparison only |
+| `models/player_detector.mlpackage` | **the player detector** (YOLO11n): one frame squeezed to 640x640 in, candidate player boxes out |
 | `validate.sh`, `validate_coreml.py`, `requirements-mac.txt` | an optional check that the models give the same answers as the PC |
-| `samples/` | five-frame clips from the Pomona video and the PC's answers on them, for that check |
+| `samples/` | five-frame clips and single frames from the Pomona video and the PC's answers on them, for that check |
 | `manifest.json` | the details: tensor shapes, source weights and their md5, the PC's checks |
 
-All four models take fixed 768x432 frames, compute in 16-bit floating point, and need iOS 17
-or later on the iPhone.
+The ball models take fixed 768x432 frames and the player detector a fixed 640x640 picture; all
+compute in 16-bit floating point and need iOS 17 or later on the iPhone. The court model is not
+here: its source weights could not be matched to the one the tracker ships.
 
 ## 1. What you need
 
@@ -59,9 +61,10 @@ bash /path/to/coreml_speed_test/validate.sh
 
 The first run sets up a private Python environment in `.venv` here (it needs the internet once)
 and then runs every model on this Mac, first with all compute units and then with CPU and
-Neural Engine. Each line says PASS or FAIL. It ends with **ALL PASS** when every model's heat
-map stays within 0.05 of the PC's and finds the ball in the same grid cell on every frame
-where the PC sees a ball. Keep the output (copy the Terminal text) and send it back. The
+Neural Engine. Each line says PASS or FAIL. It ends with **ALL PASS** when every ball model's
+heat map stays within 0.05 of the PC's and finds the ball in the same grid cell on every frame
+where the PC sees a ball, and the player detector finds the same players with boxes overlapping
+the PC's by at least 90%. Keep the output (copy the Terminal text) and send it back. The
 times it prints are this Mac's, not the iPhone's.
 
 ## 4. Time each model on the iPhone
@@ -70,8 +73,9 @@ Before you start: close the other apps on the iPhone, plug it in, keep it unlock
 screen on (Settings > Display & Brightness > Auto-Lock > Never, for the session; set it back
 after), and do not use it while a report runs.
 
-For **each** of the four models, in this order: `stream_s4_encoder`, `stream_s4_decoder`,
-`stream_s4_unit`, `heatmap_s4_unit`:
+For **each** of the five models, in this order: `stream_s4_encoder`, `stream_s4_decoder`,
+`player_detector`, `stream_s4_unit`, `heatmap_s4_unit` (the first three are the ones that
+matter most; do them first if time is short):
 
 1. In Finder, open `models/` and double-click the `.mlpackage` (or in Xcode: File > Open). Xcode
    opens the model viewer; no project is needed.
@@ -84,7 +88,7 @@ For **each** of the four models, in this order: `stream_s4_encoder`, `stream_s4_
 7. Click **+** again, choose the iPhone, choose **CPU and Neural Engine**, **Run Test**, and take
    the same screenshots.
 
-That is 8 reports in all. Xcode keeps every report in the model's Performance tab.
+That is 10 reports in all. Xcode keeps every report in the model's Performance tab.
 Apple's guide to these reports:
 [Analyzing a Core ML model's performance in Xcode](https://developer.apple.com/documentation/coreml/analyzing-a-core-ml-model-s-performance-in-xcode).
 
@@ -124,6 +128,12 @@ above 16.7 ms it cannot keep up with 60 FPS at all.
   numbers match, the Neural Engine is doing the work. Layers that fall back to the CPU are the
   first thing to fix for speed (in the encoder, watch the first layers: `sub`, `relu`, `concat`
   and `pixel_unshuffle`, which turn the two frames into the network's input).
+- **player_detector**: at 60 FPS the tracker runs it on every other frame (and fills the frames
+  between), so its cost per frame is **half its median Prediction**. The model stops before
+  the last step, removing duplicate boxes (non-maximum suppression); the app does that on the
+  few boxes above the score threshold, which costs microseconds.
+- **The court model** (not in this folder) runs once every 400 frames, about every 7 seconds;
+  its cost is a short stall now and then, not a per-frame share.
 - **Load** is paid once when the app starts the model, not per frame.
 
 The work per call, counted on the PC (billions of multiply-accumulates, GMAC):
@@ -135,15 +145,16 @@ The work per call, counted on the PC (billions of multiply-accumulates, GMAC):
 | stream_s4 (encoder + decoder) | | | **2.64** |
 | stream_s4_unit | 6.51 | (comparison) | |
 | heatmap_s4_unit | 24.75 | 1 | 24.75 |
+| player_detector | 3.16 | 1/2 | 1.58 |
 
-Please send back: the 8 reports' screenshots, the CSV exports, the iPhone model and iOS version
+Please send back: the 10 reports' screenshots, the CSV exports, the iPhone model and iOS version
 (Settings > General > About), the Xcode version (Xcode > About Xcode), and the `validate.sh`
 output if you ran it. A filled-in line like this is the summary we need:
 
-| iPhone / iOS | units | encoder ms | decoder ms | encoder + decoder | stream_s4_unit ms | heatmap_s4_unit ms |
-|---|---|---:|---:|---:|---:|---:|
-| | All | | | | | |
-| | CPU and Neural Engine | | | | | |
+| iPhone / iOS | units | encoder ms | decoder ms | encoder + decoder | player ms | stream_s4_unit ms | heatmap_s4_unit ms |
+|---|---|---:|---:|---:|---:|---:|---:|
+| | All | | | | | | |
+| | CPU and Neural Engine | | | | | | |
 
 ## 7. If something goes wrong
 

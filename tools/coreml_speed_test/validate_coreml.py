@@ -14,11 +14,16 @@ loads it with coremltools, predicts on each sample and prints:
   difference, and in how many of the unit's frames the heat map's argmax lands on the same cell as
   PyTorch's (exactly, and within one cell), over all frames and over the frames whose PyTorch peak
   reaches the weights' operating threshold;
-- features (the stream_s4 encoder): the largest difference, also relative to the reference's range.
+- features (the stream_s4 encoder): the largest difference, also relative to the reference's range;
+- boxes (the player detector, on each unit's first frame): both raw heads decoded as the tracker
+  does (score threshold, then NMS), whether the frames find as many players, and over the matched
+  boxes the lowest IoU and the largest corner and score differences.
 
 ``stream_s4 chain`` runs the phone's path: the Core ML encoder on the unit's four transitions, its
 outputs fed straight to the Core ML decoder. Exit status 1 when an argmax disagrees on a frame
-above the threshold or a heat map differs by more than ``--heat-tolerance``.
+above the threshold, a heat map differs by more than ``--heat-tolerance``, or a frame finds a
+different number of players or a player box overlaps the reference's by less than
+``BOX_IOU_TOLERANCE``.
 
 Only numpy and coremltools are needed (``requirements-mac.txt``); predictions need macOS 14 or
 later (the packages target iOS 17). This file is also imported on the PC, where the metric
@@ -44,6 +49,7 @@ OFFSET_CHANNELS = tuple(c for c in range(FRAMES_PER_UNIT * GRID_PLANES) if c not
 DEFAULT_COMPUTE_UNITS = ("ALL", "CPU_AND_NE")
 DEFAULT_HEAT_TOLERANCE = 0.05
 FEATURE_TOLERANCE = 0.05            # an encoder feature's largest difference over the reference's largest magnitude
+BOX_IOU_TOLERANCE = 0.9             # the lowest IoU a player box may have with the reference's
 
 
 @dataclass
@@ -101,6 +107,76 @@ def score_features(output: np.ndarray, reference: np.ndarray) -> Dict[str, float
     largest = float(np.abs(out - ref).max())
     scale = float(np.abs(ref).max()) or 1.0
     return {"max_diff": round(largest, 5), "max_diff_relative": round(largest / scale, 6)}
+
+
+def decode_head(head: np.ndarray, threshold: float, iou: float) -> np.ndarray:
+    """A raw detection head ``(1, 4 + classes, anchors)`` as the tracker decodes it
+    (``engine_boxes``): anchors whose best class scores at least `threshold`, as ``[x1, y1, x2, y2,
+    score]`` rows in input pixels, after greedy NMS at `iou`, best first."""
+    values = np.asarray(head, dtype=np.float32).reshape(np.shape(head)[-2:])
+    scores = values[4:].max(axis=0)
+    keep = np.flatnonzero(scores >= threshold)
+    cx, cy, w, h = values[:4, keep]
+    boxes = np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, scores[keep]], axis=1)
+    order = list(np.argsort(-boxes[:, 4]))
+    kept: List[np.ndarray] = []
+    while order:
+        best = boxes[order.pop(0)]
+        kept.append(best)
+        order = [i for i in order if box_iou(best, boxes[i]) <= iou]
+    return np.array(kept, dtype=np.float32).reshape(-1, 5)
+
+
+def box_iou(a: np.ndarray, b: np.ndarray) -> float:
+    width = max(0.0, float(min(a[2], b[2]) - max(a[0], b[0])))
+    height = max(0.0, float(min(a[3], b[3]) - max(a[1], b[1])))
+    inter = width * height
+    union = float((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1])) - inter
+    return inter / union if union > 0 else 0.0
+
+
+@dataclass
+class BoxScore:
+    """How a detector's decoded boxes compare with the reference's, over one or more frames: per
+    frame whether the counts agree, and over the pairs matched by IoU the lowest IoU, the largest
+    corner difference (input pixels) and the largest score difference."""
+    same_count: List[bool]
+    boxes: int
+    reference_boxes: int
+    min_iou: float
+    max_corner_diff: float
+    max_score_diff: float
+
+    def summary(self) -> Dict[str, Any]:
+        return {"frames_same_count": f"{sum(self.same_count)}/{len(self.same_count)}",
+                "boxes": f"{self.boxes} vs {self.reference_boxes}", "min_iou": round(self.min_iou, 4),
+                "max_corner_diff_px": round(self.max_corner_diff, 3), "max_score_diff": round(self.max_score_diff, 4)}
+
+
+def score_boxes(output: np.ndarray, reference: np.ndarray, threshold: float, iou: float) -> BoxScore:
+    """`output`'s players against `reference`'s, both raw heads decoded by ``decode_head``; each
+    reference box is paired with the unpaired output box it overlaps most."""
+    ours, theirs = decode_head(output, threshold, iou), decode_head(reference, threshold, iou)
+    used: set = set()
+    ious, corners, scores = [], [], []
+    for box in theirs:
+        candidates = [(box_iou(box, other), j) for j, other in enumerate(ours) if j not in used]
+        if not candidates:
+            ious.append(0.0)
+            continue
+        best_iou, j = max(candidates)
+        used.add(j)
+        ious.append(best_iou)
+        corners.append(float(np.abs(box[:4] - ours[j][:4]).max()))
+        scores.append(float(abs(box[4] - ours[j][4])))
+    return BoxScore([len(ours) == len(theirs)], len(ours), len(theirs), min(ious, default=1.0),
+                    max(corners, default=0.0), max(scores, default=0.0))
+
+
+def merge_box_scores(scores: Sequence[BoxScore]) -> BoxScore:
+    return BoxScore([f for s in scores for f in s.same_count], sum(s.boxes for s in scores),
+                    sum(s.reference_boxes for s in scores), min(s.min_iou for s in scores),
+                    max(s.max_corner_diff for s in scores), max(s.max_score_diff for s in scores))
 
 
 def merge_grid_scores(scores: Sequence[GridScore]) -> GridScore:
@@ -163,6 +239,9 @@ def run_case(runner: CoreMLRunner, case: Mapping[str, Any], root: Path) -> Dict[
     if kind == "grids":
         output = outputs[case["output"]]
         return {"grid_score": score_grids(output, np.load(root / case["reference"]), case["threshold"])}
+    if kind == "boxes":
+        output = outputs[case["output"]]
+        return {"box_score": score_boxes(output, np.load(root / case["reference"]), case["threshold"], case["iou"])}
     if kind == "features":
         return {"features": {name: score_features(outputs[name], np.load(root / path))
                              for name, path in case["references"].items()}}
@@ -196,6 +275,10 @@ def evaluate(runner: Any, manifest: Mapping[str, Any], root: Path, heat_toleranc
             merged = merge_grid_scores([r["grid_score"] for r in results])
             ok = merged.max_heat_diff <= heat_tolerance and all(e for e, c in zip(merged.exact, merged.confident) if c)
             scored[group] = {"pass": bool(ok), "summary": merged.summary()}
+        elif "box_score" in results[0]:
+            boxes = merge_box_scores([r["box_score"] for r in results])
+            ok = all(boxes.same_count) and boxes.min_iou >= BOX_IOU_TOLERANCE
+            scored[group] = {"pass": bool(ok), "summary": boxes.summary()}
         else:
             worst: Dict[str, Dict[str, float]] = {}
             for result in results:

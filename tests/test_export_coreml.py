@@ -135,7 +135,7 @@ def test_heatmap_metadata_says_coremltools_folds_its_batch_norms(heatmap_spec):
 def test_the_mac_cases_pass_on_the_pytorch_graphs(tmp_path, stream_specs, heatmap_spec):
     specs = {**stream_specs, heatmap_spec.name: heatmap_spec}
     units = [([0, 2, 4, 6, 8], _unit(3)), ([1, 3, 5, 7, 9], _unit(4))]
-    cases = export_coreml.write_samples(tmp_path, specs, units, stream=True, heatmap=True)
+    cases = export_coreml.write_samples(tmp_path, specs, units)
     groups = {case["group"] for case in cases}
     assert groups == {"stream_s4_unit", "stream_s4_encoder", "stream_s4_decoder", "stream_s4_chain", "heatmap_s4_unit"}
     assert sum(case["group"] == "stream_s4_encoder" for case in cases) == 2 * 4
@@ -180,6 +180,77 @@ def test_the_kit_names_every_file_the_export_copies():
     assert b"\r\n" not in (export_coreml.KIT / "validate.sh").read_bytes()
 
 
+PLAYER_SIZE = 128                # a small player input (a multiple of the head's stride 32)
+
+
+@pytest.fixture(scope="module")
+def player_spec(tmp_path_factory):
+    tasks = pytest.importorskip("ultralytics.nn.tasks")
+    torch.manual_seed(7)
+    model = tasks.DetectionModel("yolo11n.yaml", nc=1, verbose=False).eval()
+    _randomise_batch_norms(model, 7)
+    weights = tmp_path_factory.mktemp("player") / "player.pt"
+    torch.save({"model": model, "train_args": {}}, weights)
+    (spec,) = export_coreml.player_specs(weights, PLAYER_SIZE, expected_md5=None)
+    return spec
+
+
+def test_the_player_package_is_the_raw_head_at_a_fixed_size(player_spec):
+    anchors = sum((PLAYER_SIZE // stride) ** 2 for stride in (8, 16, 32))
+    assert [(t.name, t.shape) for t in player_spec.inputs] == [("image", (1, 3, PLAYER_SIZE, PLAYER_SIZE))]
+    assert [(t.name, t.shape) for t in player_spec.outputs] == [("predictions", (1, 5, anchors))]
+    assert not any(isinstance(m, nn.BatchNorm2d) for m in player_spec.fused.modules())
+    image = torch.rand(1, 3, PLAYER_SIZE, PLAYER_SIZE)
+    traced = export_coreml.trace(player_spec.fused, player_spec.probes())
+    with torch.no_grad():
+        reference = player_spec.trainable(image)
+        assert (traced(image) - reference).abs().max() < 1e-3
+    user = export_coreml.package_metadata(player_spec, "beef", "abc1234")["user_defined"]
+    assert user["role"] == "detector" and user["nms"].startswith("not in the model")
+    assert float(user["operating_threshold"]) == pytest.approx(0.21) and float(user["nms_iou"]) == pytest.approx(0.1)
+
+
+def test_a_player_checkpoint_of_another_md5_is_refused(player_spec):
+    with pytest.raises(ValueError, match="not the checkpoint the shipped player.engine"):
+        export_coreml.player_specs(player_spec.weights, PLAYER_SIZE)
+
+
+def test_player_input_is_the_sessions_stretched_rgb_frame():
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    frame[..., 0], frame[..., 1], frame[..., 2] = 0, 128, 255          # BGR
+    image = export_coreml.player_input(frame)
+    assert image.shape == (1, 3, 640, 640) and image.dtype == np.float16
+    assert np.allclose(image[0, 0], 1.0) and np.allclose(image[0, 1], np.float16(128 / 255)) and np.allclose(image[0, 2], 0)
+
+
+def test_the_player_cases_pass_on_the_pytorch_graphs(tmp_path, player_spec):
+    specs = {player_spec.name: player_spec}
+    rng = np.random.default_rng(9)
+    players = [(5, rng.random((1, 3, PLAYER_SIZE, PLAYER_SIZE)).astype(np.float16))]
+    cases = export_coreml.write_samples(tmp_path, specs, [], players)
+    assert [(c["group"], c["kind"], c["frame"]) for c in cases] == [("player_detector", "boxes", 5)]
+    traced = {player_spec.name: export_coreml.trace(player_spec.fused, player_spec.probes())}
+    for case in cases:        # an untrained head scores little: decode everything it says
+        case["threshold"] = 0.0
+    scored = validator.evaluate(export_coreml.TorchRunner(specs, traced, "traced_fp32"), {"cases": cases}, tmp_path, 1e-3)
+    assert scored["player_detector"]["pass"], scored
+
+
+def test_decode_head_thresholds_then_suppresses():
+    head = np.zeros((1, 5, 4), dtype=np.float32)
+    head[0, :, 0] = [100, 100, 20, 40, 0.9]          # a player
+    head[0, :, 1] = [101, 101, 20, 40, 0.8]          # the same player, suppressed at IoU 0.1
+    head[0, :, 2] = [300, 100, 20, 40, 0.5]          # another player
+    head[0, :, 3] = [500, 100, 20, 40, 0.1]          # below the threshold
+    rows = validator.decode_head(head, 0.21, 0.1)
+    assert rows.shape == (2, 5) and rows[0, 4] == pytest.approx(0.9)
+    assert rows[0, :4].tolist() == [90, 80, 110, 120]
+    moved = head.copy()
+    moved[0, 0, 0] += 2.0
+    score = validator.score_boxes(moved, head, 0.21, 0.1)
+    assert score.same_count == [True] and score.max_corner_diff == pytest.approx(2.0) and score.min_iou < 1.0
+
+
 def test_the_conversion_writes_an_ios17_fp16_program(tmp_path, stream_specs):
     ct = pytest.importorskip("coremltools")
     if sys.platform == "win32":
@@ -200,3 +271,16 @@ def test_the_conversion_writes_an_ios17_fp16_program(tmp_path, stream_specs):
     assert all(t["dtype"] == float16 for t in [*described["inputs"], *described["outputs"]])
     assert saved.user_defined_metadata["source_weights_md5"] == "feedface"
     assert saved.input_description["previous"].startswith("the same phase's frame before it")
+
+
+def test_the_player_head_converts_with_fixed_fp16_tensors(player_spec):
+    pytest.importorskip("coremltools")
+    if sys.platform == "win32":
+        pytest.skip("coremltools converts on macOS and Linux only")
+    metadata = export_coreml.package_metadata(player_spec, "feedface", "abc1234")
+    mlmodel = export_coreml.convert(player_spec, export_coreml.trace(player_spec.fused, player_spec.probes()), metadata)
+    described = export_coreml.describe_package(mlmodel.get_spec())
+    anchors = player_spec.outputs[0].shape[-1]
+    assert [(t["name"], t["shape"]) for t in described["inputs"]] == [("image", [1, 3, PLAYER_SIZE, PLAYER_SIZE])]
+    assert [(t["name"], t["shape"]) for t in described["outputs"]] == [("predictions", [1, 5, anchors])]
+    assert mlmodel.user_defined_metadata["nms"].startswith("not in the model")
