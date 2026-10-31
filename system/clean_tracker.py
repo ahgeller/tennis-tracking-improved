@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
+from tennis_tracker.ball_weights import KNOWN, UNKNOWN_CONF, operating_conf
 from tennis_tracker.config import Config
 from tennis_tracker.paths import BOUNCE_MODEL, COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE, ROOT
 from tennis_tracker.pipeline import run
@@ -32,8 +33,13 @@ def _parser() -> argparse.ArgumentParser:
                         help=f"Default: <input stem>{TRACKING_JSON_SUFFIX} beside a folder's video, "
                              f"else {OUTPUT / 'tracking.json'}")
     parser.add_argument("--weights", default=str(BALL_WEIGHTS),
-                        help="ball detector weights, .pt HeatmapNet (the default) or .npz GridTrackNet")
-    parser.add_argument("--conf", type=float, default=0.40)
+                        help="Ball-detector weights, a .pt record (default: the stream_s4 detector, "
+                             f"{BALL_WEIGHTS.relative_to(ROOT).as_posix()}) or a GridTrackNet .npz")
+    parser.add_argument("--conf", type=float, default=None,
+                        help="Ball-detector confidence threshold (default: the one the weights were gated at: "
+                             + ", ".join(f"{known.conf:.2f} for {known.path.relative_to(ROOT).as_posix()}"
+                                         for known in KNOWN)
+                             + f", {UNKNOWN_CONF:.2f} for other weights)")
     parser.add_argument("--device", default="0")
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument("--court", action="store_true",
@@ -115,7 +121,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         model_path=args.weights,
         player_model_path=str(PLAYER_ENGINE),
         court_model_path=str(COURT_ENGINE),
-        conf=float(args.conf),
+        conf=float(operating_conf(args.weights) if args.conf is None else args.conf),
         device=str(args.device),
         save_tracking_video=not args.no_video,
         court_events=bool(args.court),

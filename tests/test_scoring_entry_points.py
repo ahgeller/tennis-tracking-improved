@@ -60,5 +60,5 @@ def test_the_scorers_and_the_workspace_use_the_shared_model_paths():
     from finetune.scoring import archive
 
     assert archive.default_archive() == workspace.current().root or archive.ARCHIVE_VARIABLE in os.environ
-    assert archive.MODELS["gridtracknet"] == paths.BALL_WEIGHTS
-    assert workspace.current().repo_weights == paths.BALL_WEIGHTS
+    assert archive.MODELS["gridtracknet"] == paths.BALL_WEIGHTS          # the tracker's default detector
+    assert workspace.current().repo_weights == paths.HEATMAP_WEIGHTS     # the model the workspace trains

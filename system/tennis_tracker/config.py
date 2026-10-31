@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from tennis_tracker.ball_weights import DEFAULT_CONF
 from tennis_tracker.paths import COURT_ENGINE, BALL_WEIGHTS, MODELS, PLAYER_ENGINE
 
 
@@ -9,12 +10,16 @@ class Config:
     # paths
     input_video: str = r"input_videos/TMP.mp4"
     output_video: str = "output_videos/prof_test.mp4"
-    # The ball detector: .pt HeatmapNet (the default; ``ball_models`` reads its record), .npz GridTrackNet, .engine TensorRT.
+    # The ball detector: a .pt record (``ball_models`` reads its architecture; the default is stream_s4),
+    # .npz GridTrackNet, .engine TensorRT.
     model_path: str = str(BALL_WEIGHTS)
 
     # Ball detector
     ball_class_name: Optional[str] = None
-    conf: float = 0.40     # 0.50 until 2026-10-27: on mixed_v1 0.40 gave +92 hits for +2 false alarms (output/selector_baseline)
+    # The default detector's gated threshold (ball_weights.py; a caller naming other weights passes theirs,
+    # ball_weights.operating_conf). heatmap_s4 runs at 0.40 (0.50 until 2026-10-27: on mixed_v1 0.40 gave +92
+    # hits for +2 false alarms), stream_s4 at 0.42.
+    conf: float = DEFAULT_CONF
     device: str = "auto"
     # Shift applied to GridTrackNet points, in px at 1080p (positive = down).
     # Measured on the 41 hand-verified clips video13-53: with 0 the median error
@@ -22,10 +27,13 @@ class Config:
     # (p90 6.5), the detections sitting a median 2 px below the labels.
     gridtracknet_y_offset_px: float = 0.0
     gridtracknet_source_stride: Optional[int] = None  # None = 2 at 60 FPS / 1 at 30 FPS (the training cadence)
-    # Overlap the GridTrackNet prepass with pass 1 (a worker thread, or the child process below). Off:
-    # with the TensorRT engine the prepass takes ~4 s alone, and overlapped it slowed pass 1 more than
-    # that (audit/records/opt_ball_prepass.md, item 3).
-    gridtracknet_prepass_background: bool = False
+    # Where the five-frame prepass runs: "foreground" (before pass 1, alone), "thread" (a worker thread,
+    # beside pass 1), "process" (a child process, engines/ball_prepass_process.py, beside pass 1 and from
+    # the start of init) or "auto": the process for a network that streams (stream_s4 with
+    # ball_prepass_streaming), the foreground for the others. Measured in audit/records/opt_abplus_s4.md:
+    # the streamed prepass in the child saves its time end to end; the windowed heatmap_s4 prepass, ~4 s,
+    # slowed pass 1 by more than that beside it (opt_ball_prepass.md item 3, opt_abplus.md item 3).
+    ball_prepass_mode: str = "auto"
     # Frames of a phase between one five-frame unit's start and the next: 1 starts a unit at every
     # frame and averages the up-to-five answers each frame gets (the default since 2026-10-26: on
     # heat4's weights, held out, false alarm 0.085 to 0.073 at recall 0.894 to 0.900, and through the
@@ -44,9 +52,6 @@ class Config:
     # (audit/records/opt_stream_prepass.md on the optimization branch).
     ball_prepass_streaming: bool = True
     ball_engine_dir: str = str(MODELS / "engine_cache")
-    # Run the background prepass in a child process (engines/ball_prepass_process.py) instead of a
-    # worker thread, so it never contends with pass 1 for the interpreter lock.
-    gridtracknet_prepass_process: bool = False
     # The prepass decodes with NVDEC (PyNvVideoCodec) where it opens the clip, and its frames stay on
     # the GPU; else cv2 decodes into pinned memory. Both give the same bytes (video_decode.py).
     ball_prepass_gpu_decode: bool = True

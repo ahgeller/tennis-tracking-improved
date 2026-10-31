@@ -22,7 +22,8 @@ from .court.contact_events import detect_player_contacts
 from .court.court_scene import CourtScene
 from .court.rally_legs import assemble_rally_legs
 from .ball_models import WEIGHTS_SUFFIX
-from .engines.ball_detectors import BallDetectorBackend, GridTrackNetBallDetector, TensorRTRuntimeBallDetector
+from .ball_weights import missing_weights
+from .engines.ball_detectors import THREAD, BallDetectorBackend, GridTrackNetBallDetector, TensorRTRuntimeBallDetector
 from .engines.court_detector import CourtDetector
 from .engines.engine_files import find_ball_class_id_from_names, read_engine_class_names, resolve_engine_path
 from .export import RunResult, write_tracking_json
@@ -107,7 +108,7 @@ def _build_ball_detector(cfg: Config) -> BallDetectorBackend:
     model_path = Path(cfg.model_path).expanduser().resolve()
     if model_path.suffix.lower() in PREPASS_WEIGHTS:
         if not model_path.is_file():
-            raise FileNotFoundError(f"Ball-detector weights not found: {model_path}")
+            raise missing_weights(model_path)
         return GridTrackNetBallDetector(str(model_path), cfg)
     engine_path = resolve_engine_path(cfg.model_path)
     if engine_path is None:
@@ -172,45 +173,49 @@ def _open_inputs(cfg: Config) -> RunContext:
     # The run owns the process: let cuDNN autotune the fixed-shape convolutions.
     torch.backends.cudnn.benchmark = True
     detector = _build_ball_detector(cfg)
+    try:   # a prepass process is stopped when init fails or is interrupted
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open input video: {input_path}")
+        video = VideoInfo(
+            path=input_path,
+            fps=cap.get(cv2.CAP_PROP_FPS) or _DEFAULT_FPS,
+            width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            frame_count_hint=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+        )
+        print(f"[init] Video: {video.width}x{video.height} @ {video.fps:.1f}fps, ~{video.frame_count_hint} frames")
+        # A prepass on a worker thread starts after the court and player engines are built and the
+        # player engine's CUDA graph is captured: a capture is invalidated by CUDA work from another
+        # thread. A prepass in the foreground runs first instead, so boxmot's import (prefetch_bytetrack,
+        # ~2 s that PlayerDetector waits for) finishes behind it; so does a prepass process, which returns
+        # at once and runs beside the engines' builds (its own CUDA context cannot break a capture here).
+        threaded_prepass = detector.prepass_mode == THREAD
+        if not threaded_prepass:
+            detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
+        court_detector = CourtDetector(cfg)
+        player_detector = PlayerDetector(cfg, court_keypoints=None)
+        if threaded_prepass:
+            detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
+        encoder = encoder_probe.result() if encoder_probe is not None else None
+        print_platform_report(cfg, encoder)
 
-    cap = cv2.VideoCapture(str(input_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open input video: {input_path}")
-    video = VideoInfo(
-        path=input_path,
-        fps=cap.get(cv2.CAP_PROP_FPS) or _DEFAULT_FPS,
-        width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-        frame_count_hint=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
-    )
-    print(f"[init] Video: {video.width}x{video.height} @ {video.fps:.1f}fps, ~{video.frame_count_hint} frames")
-    # A prepass on a worker thread starts after the court and player engines are built and the
-    # player engine's CUDA graph is captured: a capture is invalidated by CUDA work from another
-    # thread. A prepass in the foreground (the default) runs first instead, so boxmot's import
-    # (prefetch_bytetrack, ~2 s that PlayerDetector waits for) finishes behind it.
-    foreground_prepass = not (cfg.gridtracknet_prepass_background and isinstance(detector, GridTrackNetBallDetector))
-    if foreground_prepass:
-        detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
-    court_detector = CourtDetector(cfg)
-    player_detector = PlayerDetector(cfg, court_keypoints=None)
-    if not foreground_prepass:
-        detector.prepare_video(input_path, video.fps, video.width, video.height, video.frame_count_hint)
-    encoder = encoder_probe.result() if encoder_probe is not None else None
-    print_platform_report(cfg, encoder)
-
-    return RunContext(
-        cfg=cfg,
-        video=video,
-        capture=cap,
-        device=device,
-        encoder=encoder,
-        detector=detector,
-        court_detector=court_detector,
-        player_detector=player_detector,
-        timing=timing,
-        started_at=started_at,
-        init_t0=init_t0,
-    )
+        return RunContext(
+            cfg=cfg,
+            video=video,
+            capture=cap,
+            device=device,
+            encoder=encoder,
+            detector=detector,
+            court_detector=court_detector,
+            player_detector=player_detector,
+            timing=timing,
+            started_at=started_at,
+            init_t0=init_t0,
+        )
+    except BaseException:
+        detector.close()
+        raise
 
 
 def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
@@ -323,7 +328,10 @@ def run(cfg: Config) -> RunResult:
     """Track the ball through ``cfg.input_video``, write the configured outputs
     and return what was found (see ``RunResult``)."""
     ctx = _open_inputs(cfg)
-    pass1 = collect_pass1(ctx)
+    try:
+        pass1 = collect_pass1(ctx)
+    finally:
+        ctx.detector.close()        # pass 1 has every detection: a prepass process is done
     erase_ghost_rois(pass1)
     selection = _select(ctx, pass1)
     events = _court_events(ctx, pass1, selection)

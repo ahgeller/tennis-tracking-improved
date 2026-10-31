@@ -12,6 +12,7 @@ import torch
 from tennis_tracker import streamnet
 from tennis_tracker.engines import ball_detectors
 from tennis_tracker.engines.ball_gpu import StreamHalves, transition_slots
+from tennis_tracker.engines.ball_prepass_process import PrepassRows
 from tennis_tracker.engines.ball_detectors import (
     BallDetectorBackend,
     CachedDetections,
@@ -74,6 +75,8 @@ def _bare_detector(cfg=None) -> GridTrackNetBallDetector:
     frame encoder are stand-ins that find a ball at (10, 20) on every frame."""
     detector = GridTrackNetBallDetector.__new__(GridTrackNetBallDetector)
     detector.cfg = cfg or Config(device="0", gridtracknet_window_step=ONE_UNIT_PER_FRAME)
+    mode = detector.cfg.ball_prepass_mode
+    detector.prepass_mode = ball_detectors.FOREGROUND if mode == ball_detectors.AUTO else mode
     detector.device = torch.device("cpu")
     detector.model = StandInModel(lambda batch: batch)
     detector._frame_tensor = lambda frame, device: torch.zeros((1, 3))
@@ -126,7 +129,7 @@ def test_foreground_prepass_failure_raises_instead_of_returning_empty_frames(mon
 
 
 def test_background_prepass_failure_reaches_the_consumer(monkeypatch, fake_cuda):
-    detector = _bare_detector(Config(device="0", gridtracknet_prepass_background=True,
+    detector = _bare_detector(Config(device="0", ball_prepass_mode="thread",
                                      gridtracknet_window_step=ONE_UNIT_PER_FRAME))
     monkeypatch.setattr(ball_detectors.cv2, "VideoCapture", lambda path: RaisingCapture(7, fail_at=2))
     detector.prepare_video(Path("clip.mp4"), 30.0, 1920, 1080, total=7)
@@ -430,8 +433,8 @@ class FakeRemote:
     def run(self, video_path, fps, width, height, total, on_rows, on_end):
         def feed():
             half = len(self.rows) // 2
-            on_rows(0, self.rows[:half])
-            on_rows(half, self.rows[half:])
+            on_rows(PrepassRows(0, self.rows[:half]))
+            on_rows(PrepassRows(half, self.rows[half:]))
             on_end(self.error)
         threading.Thread(target=feed).start()
 
@@ -440,7 +443,7 @@ class FakeRemote:
 
 
 def _remote_detector(remote):
-    detector = _bare_detector(Config(device="0", gridtracknet_prepass_background=True, gridtracknet_prepass_process=True))
+    detector = _bare_detector(Config(device="0", ball_prepass_mode="process"))
     detector.on_publish = None
     detector._remote = remote
     return detector

@@ -363,6 +363,13 @@ class TransitionRing:
         self.encoded = self.pushed
 
     def decode(self, units: Sequence[Sequence[Optional[int]]]) -> torch.Tensor:
+        return self.halves.decode(*self.gather(units))
+
+    def gather(self, units: Sequence[Sequence[Optional[int]]]) -> List[torch.Tensor]:
+        """The decoder's inputs for `units` (as ``decode`` takes them): per stride, each unit's four
+        cached transitions concatenated in temporal order, ``(batch, 4 C, h, w)``, padded as ``decode``
+        pads. A decoder over a region of the frame would slice these maps; the buffers are reused by
+        the next call."""
         if not 0 < len(units) <= self.batch:
             raise ValueError(f"TransitionRing decodes 1 to {self.batch} units a call, not {len(units)}")
         self._encode()
@@ -380,7 +387,7 @@ class TransitionRing:
             index = index.pin_memory().to(device, non_blocking=True)
         for ring, gathered in zip(self.features, self.gathered):
             torch.index_select(ring, 0, index, out=gathered.view(len(numbers), *ring.shape[1:]))
-        return self.halves.decode(*self.gathered)
+        return self.gathered
 
 
 def transition_slots(batch: int, step: int, stride: int) -> int:

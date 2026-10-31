@@ -49,7 +49,7 @@ from finetune import REPOSITORY
 from finetune.data import workspace as ws
 from finetune.data.fileio import replace_file, temporary_for
 from finetune.data.workspace import videos_in
-from tennis_tracker.paths import BALL_WEIGHTS
+from tennis_tracker.paths import HEATMAP_WEIGHTS
 
 NOTEBOOK = REPOSITORY / "finetune" / "GridTrackNet_FineTune_Colab.ipynb"
 OPTIMIZATION_NOTEBOOK = REPOSITORY / "finetune" / "Optimization_Train_Colab.ipynb"
@@ -190,7 +190,7 @@ def plan_zip(code_only: bool = False) -> ZipPlan:
     if not code_only:
         if not layout.repo_weights.is_file():
             raise ColabZipError(f"{layout.repo_weights} is missing; the notebook starts from the tracker's weights")
-        plan.add("models", f"models/{BALL_WEIGHTS.name}", layout.repo_weights)
+        plan.add("models", f"models/{HEATMAP_WEIGHTS.name}", layout.repo_weights)
         pseudo = layout.root / PSEUDO
         for clip, video in (videos_in(pseudo / "videos") if (pseudo / "videos").is_dir() else {}).items():
             labels = pseudo / "labels" / f"{clip}{PSEUDO_SUFFIX}"

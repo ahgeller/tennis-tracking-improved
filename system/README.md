@@ -55,9 +55,11 @@ pip install -r requirements.txt
 
 FilterPy is not needed: the selector's Kalman filter is plain NumPy.
 
-The repository includes the ball-detector weights (`models/ball_detector.pt`, and
-the GridTrackNet export in `models/legacy/`), the CatBoost bounce model and the
-TensorRT engines used by the default pipeline. TensorRT engines
+The repository includes the ball-detector weights (`models/candidates/stream_s4_e60.pt`,
+the default, `models/ball_detector.pt`, and the GridTrackNet export in `models/legacy/`),
+the CatBoost bounce model and the TensorRT engines used by the default pipeline
+(`models/README.md` lists them; a run without the default weights says where they come
+from). TensorRT engines
 are platform-specific and may need to be rebuilt for a different GPU or
 TensorRT version.
 
@@ -81,7 +83,8 @@ Export JSON without rendering a video:
 python clean_tracker.py --input path\to\match.mp4 --tracking-json output\tracking.json --no-video
 ```
 
-Use another CUDA device or detector threshold:
+Use another CUDA device or detector threshold (without `--conf` a run takes the threshold
+the weights were gated at: 0.42 for the default stream_s4, 0.40 for `models/ball_detector.pt`):
 
 ```powershell
 python clean_tracker.py --device 1 --conf 0.55
@@ -96,18 +99,20 @@ python clean_tracker.py --input path	o\match.mp4 --showtracks
 `--showtracks` draws every selector track on the tracking video in its own colour, chosen
 or not, under the chosen track's green trail and marker.
 
-## Ball detector weights: two networks
+## Ball detector weights
 
-The tracker runs either of two ball-detector networks and picks by the weights
-file. Nothing else changes: same video, same JSON, same selector.
+The tracker picks the ball-detector network by the weights file. Nothing else
+changes: same video, same JSON, same selector.
 
 | weights file | network | status |
 |---|---|---|
-| `.pt` naming `heatmap_s4` (default: `models/ball_detector.pt`) | HeatmapNet, 192x108 heat map (`tennis_tracker/heatmapnet.py`) | the bundled detector |
-| `.npz` (`models/legacy/gridtracknet_finetuned.npz`) | GridTrackNet, 48x27 grid (`tennis_tracker/gridtracknet.py`) | the previous default, run with `--weights` |
+| `.pt` naming `stream_s4` (default: `models/candidates/stream_s4_e60.pt`, at 0.42) | StreamNet, each frame's transition encoded once (`tennis_tracker/streamnet.py`) | the default; its prepass runs in a child process beside pass 1 |
+| `.pt` naming `heatmap_s4` (`models/ball_detector.pt`, at 0.40) | HeatmapNet, 192x108 heat map (`tennis_tracker/heatmapnet.py`) | the previous default, run with `--weights` |
+| `.npz` (`models/legacy/gridtracknet_finetuned.npz`) | GridTrackNet, 48x27 grid (`tennis_tracker/gridtracknet.py`) | the one before, run with `--weights` |
 
 ```powershell
-python clean_tracker.py --input path\to\match.mp4                                                    bundled HeatmapNet
+python clean_tracker.py --input path\to\match.mp4                                                    stream_s4
+python clean_tracker.py --input path\to\match.mp4 --weights models\ball_detector.pt                   HeatmapNet at 0.40
 python clean_tracker.py --input path\to\match.mp4 --weights models\legacy\gridtracknet_finetuned.npz  GridTrackNet
 ```
 
@@ -160,10 +165,10 @@ With one `.pt` architecture left, `read_record` with `arch=None` and `arch_of`'s
 record read stay only so that a stale record is refused by name; if that is not
 wanted, `arch_of` can go back to the suffix alone.
 
-The winner's weights are promoted by copying them over the default path in
-`tennis_tracker/paths.py` (`BALL_WEIGHTS`, `models/ball_detector.pt`, what
-`Config.model_path` defaults to), which `ft.py promote` on `train` does with a
-backup. On 2026-10-26 that file became the heat-map control run's winner (ctrl1,
+The winner's weights are promoted by copying them over the training workspace's
+model in `tennis_tracker/paths.py` (`HEATMAP_WEIGHTS`, `models/ball_detector.pt`;
+`Config.model_path` defaults to `BALL_WEIGHTS`, the stream_s4 file, since
+2026-10-30), which `ft.py promote` on `train` does with a backup. On 2026-10-26 that file became the heat-map control run's winner (ctrl1,
 the ledger has the numbers); the GridTrackNet `.npz` files moved to
 `models/legacy/` (`gridtracknet_finetuned.npz`, the previous default, and
 `gridtracknet_upstream.npz`, the export it was fine-tuned from, untracked) beside
@@ -172,8 +177,8 @@ them. Record every promotion in the ledger with its held-out numbers.
 
 ## The bundled weights and the training workspace
 
-The bundled weights, `models/ball_detector.pt`, are the heat-map network's
-control run of 2026-10-26 (ctrl1: ten epochs of fine-tuning on the from-scratch
+The heat-map weights, `models/ball_detector.pt` (the default until stream_s4), are
+the heat-map network's control run of 2026-10-26 (ctrl1: ten epochs of fine-tuning on the from-scratch
 run heat4), trained on the `train` branch with the `mixed_v1` recordings held
 out (held out, dense prepass: recall 0.929 at false alarm 0.083 at threshold
 0.50; the ledger there, `audit/records/gridtracknet_recipe_2026-10.md`, has the
@@ -256,7 +261,8 @@ tennis_tracker/render/                   Drawing for pass 2:
   motion_trails.py                         Motion-debug video's raw-motion trails
   summaries.py                             Console summaries printed at the end of a run
 ball_in_play_selector/                   Track construction, scoring, and recovery
-models/ball_detector.pt                  The ball detector the tracker runs (heatmap_s4)
+models/candidates/stream_s4_e60.pt      The ball detector the tracker runs (stream_s4)
+models/ball_detector.pt                  The heat-map ball detector (heatmap_s4, --weights)
 models/legacy/                           GridTrackNet .npz files and the old YOLO ball.engine (--weights)
 models/ctb_regr_bounce.cbm               CatBoost bounce model (--court)
 models/                                  Player and court TensorRT engines

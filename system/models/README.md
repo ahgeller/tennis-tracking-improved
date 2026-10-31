@@ -6,13 +6,16 @@ files here under these names (`tennis_tracker/paths.py` is where they are spelle
 
 | file | what it is | needed for |
 |---|---|---|
-| `ball_detector.pt` | the ball detector (a `heatmap_s4` record) | every run |
+| `candidates/stream_s4_e60.pt` | the default ball detector (a `stream_s4` record, epoch 60; run at 0.42) | every run, unless `--weights` names another |
+| `ball_detector.pt` | the heat-map ball detector (a `heatmap_s4` record; run at 0.40), the training workspace's model | `--weights models/ball_detector.pt` |
 | `player.engine` | TensorRT player detector | every run |
 | `courtdetection.engine` | TensorRT court keypoint detector | every run |
 | `ctb_regr_bounce.cbm` | CatBoost bounce model | `--court` only |
 
 `clean_tracker.py --weights <file>` runs any other ball detector, `.pt` or
-GridTrackNet `.npz`, without copying it here.
+GridTrackNet `.npz`, without copying it here. Without `--conf` a run takes the
+threshold the weights were gated at (`tennis_tracker/ball_weights.py`: the two files
+above; 0.40 for any other).
 
 ## Train your own ball detector
 

@@ -196,6 +196,8 @@ class FakeGridTrackNet:
     def __init__(self, weights_path: str, cfg: Config):
         self.weights_path = str(weights_path)
         self.cfg = cfg
+        self.prepass_mode = "foreground" if cfg.ball_prepass_mode == "auto" else cfg.ball_prepass_mode
+        self.closed = False
         self.prepared: Optional[Dict[str, Any]] = None
         self.precomputed: Optional[List[List[Tuple[List[float], float]]]] = None
         self.inputs_seen: List[Tuple[int, Any]] = []
@@ -224,6 +226,9 @@ class FakeGridTrackNet:
 
     def detect_async_finish(self, pending: _Pending) -> List[Tuple[List[float], float]]:
         return pending.detections
+
+    def close(self) -> None:
+        self.closed = True
 
     def detect(self, frame_bgr, frame_index: int):
         return self.detect_async_finish(self.detect_async_start(frame_bgr, frame_index))
@@ -704,12 +709,13 @@ def test_pass2_refuses_a_clip_it_cannot_reopen(tmp_path, monkeypatch, fake_cuda,
         pipeline.run(cfg)
 
 
-@pytest.mark.parametrize("background", [False, True])
-def test_a_foreground_prepass_runs_before_the_engines_and_a_background_one_after(
-        tmp_path, monkeypatch, fake_cuda, clip, background):
+@pytest.mark.parametrize("mode", ["foreground", "process", "thread"])
+def test_a_foreground_or_process_prepass_starts_before_the_engines_and_a_threaded_one_after(
+        tmp_path, monkeypatch, fake_cuda, clip, mode):
     """A prepass on the main thread runs before the court and player detectors are built, so
-    boxmot's import finishes behind it; a prepass on a worker thread starts after them, so the
-    player engine's CUDA graph is captured with no other thread's CUDA work in flight."""
+    boxmot's import finishes behind it, and so does a prepass process, which runs beside their
+    builds; a prepass on a worker thread starts after them, so the player engine's CUDA graph is
+    captured with no other thread's CUDA work in flight."""
     events: List[str] = []
     prepare = FakeGridTrackNet.prepare_video
 
@@ -731,8 +737,30 @@ def test_a_foreground_prepass_runs_before_the_engines_and_a_background_one_after
     monkeypatch.setattr(FakeGridTrackNet, "prepare_video", recording_prepare)
     monkeypatch.setattr(pipeline, "CourtDetector", RecordingCourt)
     monkeypatch.setattr(pipeline, "PlayerDetector", RecordingPlayers)
-    pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, gridtracknet_prepass_background=background))
-    assert events == (["court", "players", "prepass"] if background else ["prepass", "court", "players"])
+    pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode=mode))
+    assert events == (["court", "players", "prepass"] if mode == "thread" else ["prepass", "court", "players"])
+    assert FakeGridTrackNet.instances[0].closed
+
+
+@pytest.mark.parametrize("stage", ["init", "pass1"])
+def test_the_ball_detector_is_closed_when_a_run_fails_or_is_interrupted(tmp_path, monkeypatch, fake_cuda, clip, stage):
+    """The detector, which may own a prepass process, is closed whatever ends the run early: an
+    error while the other engines are built, or Ctrl-C during pass 1."""
+    install_fakes(monkeypatch)
+
+    def no_engine(*args, **kwargs):
+        raise OSError("no engine")
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    if stage == "init":
+        monkeypatch.setattr(pipeline, "PlayerDetector", no_engine)
+    else:
+        monkeypatch.setattr(pipeline, "collect_pass1", interrupted)
+    with pytest.raises(OSError if stage == "init" else KeyboardInterrupt):
+        pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode="process"))
+    assert FakeGridTrackNet.instances[0].closed
 
 
 def test_a_video_run_probes_the_encoder_alongside_init_and_raises_what_the_probe_raised(

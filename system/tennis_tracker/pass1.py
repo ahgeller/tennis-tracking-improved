@@ -22,7 +22,7 @@ from ball_in_play_selector import PackedMask, RawDetection
 from .court.court_geometry import court_keypoints_key
 from .court.court_scene import PlayerBoxes
 from .cuda_kernels import KernelUnavailable
-from .engines.ball_detectors import FrameInput
+from .engines.ball_detectors import THREAD, BallDetectorBackend, FrameInput
 from .engines.player_detector import PlayerPending, interpolate_player_boxes
 from .frame_window import FrameWindow
 from .motion import (
@@ -199,7 +199,7 @@ class _Pass1Collector:
         self.player_detector = ctx.player_detector
         self.window = window
         self.detector_input_writer = detector_input_writer
-        self.background = BackgroundModel(self.cfg, ctx.device, cuda_graphs=_use_cuda_graphs(self.cfg))
+        self.background = BackgroundModel(self.cfg, ctx.device, cuda_graphs=_use_cuda_graphs(self.cfg, ctx.detector))
         self.motion_kernels = _load_motion_kernels(self.cfg, ctx.device)
         self.roi_tracker = ROIMotionTracker(self.cfg, self.video.width, self.video.height, self.video.fps)
         self.pre_cuda_perf: Optional[Dict[str, float]] = (
@@ -472,12 +472,11 @@ def _open_detector_input_writer(ctx: RunContext) -> Optional[VideoWriter]:
                        cfg, encoder=ctx.encoder)
 
 
-def _use_cuda_graphs(cfg) -> bool:
+def _use_cuda_graphs(cfg, detector: BallDetectorBackend) -> bool:
     """Whether pass 1 replays its fixed-shape GPU work from CUDA graphs: ``cfg.pass1_cuda_graphs``,
     unless the prepass runs on a worker thread of this process, whose CUDA work during a capture
     would invalidate it (a prepass process has its own context)."""
-    threaded_prepass = cfg.gridtracknet_prepass_background and not cfg.gridtracknet_prepass_process
-    return bool(cfg.pass1_cuda_graphs) and not threaded_prepass
+    return bool(cfg.pass1_cuda_graphs) and detector.prepass_mode != THREAD
 
 
 def _pinned_frame_shape(ctx: RunContext) -> Optional[Tuple[int, int]]:
@@ -515,7 +514,8 @@ def collect_pass1(ctx: RunContext) -> Pass1Result:
         reader.release()
         raise RuntimeError(f"No frames in video: {ctx.video.path}")
     second = reader.read()
-    window = FrameWindow(ctx.device, cfg.enable_preprocess, first, second, cuda_graphs=_use_cuda_graphs(cfg))
+    window = FrameWindow(ctx.device, cfg.enable_preprocess, first, second,
+                         cuda_graphs=_use_cuda_graphs(cfg, ctx.detector))
     timing.add("init_total", ctx.init_t0)
     pass1_t0 = timing.start()
     print("[pass 1] Collecting detections...")
