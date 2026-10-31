@@ -27,12 +27,17 @@ import torch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "system"))
 
-from tennis_tracker.config import Config  # noqa: E402
+from tennis_tracker.config import FOREGROUND, Config  # noqa: E402
 from tennis_tracker.engines import ball_gpu  # noqa: E402
 from tennis_tracker.engines.ball_detectors import GridTrackNetBallDetector  # noqa: E402
 
-RUNS = {"W": dict(ball_prepass_streaming=False), "S": {}, "T": dict(ball_prepass_runtime="torch"),
-        "R": dict(ball_prepass_streaming=False, ball_prepass_runtime="torch")}
+# In this process (FOREGROUND), so the HeatRing patch below sees every unit: a streaming run would
+# otherwise go to a child process (Config.ball_prepass_mode "auto").
+RUNS: Dict[str, Dict[str, Any]] = {
+    "W": dict(ball_prepass_mode=FOREGROUND, ball_prepass_streaming=False),
+    "S": dict(ball_prepass_mode=FOREGROUND),
+    "T": dict(ball_prepass_mode=FOREGROUND, ball_prepass_runtime="torch"),
+    "R": dict(ball_prepass_mode=FOREGROUND, ball_prepass_streaming=False, ball_prepass_runtime="torch")}
 PAIRS = (("W", "S"), ("W", "R"), ("S", "R"), ("T", "R"), ("T", "S"))
 Peak = Optional[Tuple[float, float, float]]
 
@@ -66,8 +71,13 @@ def run(label: str, weights: Path, video: Path) -> Tuple[List[Peak], Dict[Tuple[
             units[tuple(indices)] = output[row].detach().to(torch.float16).cpu()
         add(ring, output, cut)
 
-    with patch.object(ball_gpu.HeatRing, "add", recording):
-        rows = detector.detect_clip(video, fps, width, height, total)
+    try:
+        with patch.object(ball_gpu.HeatRing, "add", recording):
+            rows = detector.detect_clip(video, fps, width, height, total)
+    finally:
+        detector.close()
+    if not units:
+        raise RuntimeError(f"run {label} recorded no units: its prepass did not run in this process")
     peaks: List[Peak] = []
     for row in rows:
         box, confidence = row[0] if row else (None, None)
