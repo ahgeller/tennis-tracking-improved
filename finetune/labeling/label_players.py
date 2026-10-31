@@ -27,6 +27,7 @@ court the segment stands on.
 from __future__ import annotations
 
 import math
+import statistics
 import threading
 from collections import defaultdict
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
 
 SEGMENT_GAP_S = 0.5           # a track missing this long ends its segment
 CROPS = 12                    # crops shown per segment, evenly through it
+MIN_WHOLE = 0.8               # a crop is taken only where the box shows at least this share of the person
 CROP_H = 176                  # crops are kept at this height in pixels, scaled to the row when drawn
 CROP_PAD = 0.12               # each crop takes this share of the box's size around it
 ROWS_SHOWN = 4                # segment rows on screen at once, at most
@@ -81,15 +83,44 @@ class Segment:
     def last(self) -> int:
         return self.frames[-1]
 
-    def samples(self) -> List[int]:
-        """The frames its crops are taken on: CROPS of them, evenly through it, ends included."""
-        if len(self.frames) <= CROPS:
-            return list(self.frames)
-        step = (len(self.frames) - 1) / (CROPS - 1)
-        return sorted({self.frames[int(round(k * step))] for k in range(CROPS)})
+    def samples(self, picture: Optional[Tuple[int, int]] = None) -> List[int]:
+        """The frames its crops are taken on: CROPS of them, evenly through it, ends included. Given
+        the picture's (width, height), only frames whose box shows the person whole (visible_share)
+        are taken, while there are any: a box half off the picture is a sliver of person in a cell."""
+        frames = self.frames
+        if picture is not None:
+            full_w = statistics.median(box[2] - box[0] for box in self.boxes.values())
+            whole = [frame for frame in frames if visible_share(self.boxes[frame], picture, full_w) >= MIN_WHOLE]
+            frames = whole or frames
+        return evenly(frames, CROPS)
 
     def overlaps(self, other: "Segment") -> bool:
         return self.first <= other.last and other.first <= self.last
+
+
+def evenly(frames: Sequence[int], count: int) -> List[int]:
+    """`count` of `frames` spread evenly through them, the first and last included."""
+    if len(frames) <= count:
+        return list(frames)
+    if count <= 1:
+        return [frames[len(frames) // 2]] if count == 1 else []
+    step = (len(frames) - 1) / (count - 1)
+    return sorted({frames[int(round(k * step))] for k in range(count)})
+
+
+def visible_share(box: Box, picture: Tuple[int, int], full_w: float) -> float:
+    """How much of the person `box` shows: its part on the picture over the whole person. Within
+    `full_w` (the segment's usual box width) of the picture's left or right side, a box may be the
+    tracker's view of someone walking in or out, part of them off the picture and missing from the
+    box too, so the whole person is taken as the larger of the box's width and `full_w`."""
+    x1, y1, x2, y2 = box
+    width, height = picture
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    whole_w = max(x2 - x1, full_w) if x1 < full_w or x2 > width - full_w else x2 - x1
+    seen_w = max(0.0, min(x2, width) - max(x1, 0.0))
+    seen_h = max(0.0, min(y2, height) - max(y1, 0.0))
+    return (seen_w * seen_h) / (whole_w * (y2 - y1))
 
 
 def cut_segments(boxes_by_frame: Dict[int, Dict[str, List[float]]], fps: float) -> List[Segment]:
@@ -329,7 +360,7 @@ class PlayerView(ClipView):
         self.selected = self.next_unassigned(-1, 1) or 0
         wanted: Wanted = defaultdict(list)
         for segment in self.segments:
-            for frame in segment.samples():
+            for frame in segment.samples((source.width, source.height)):
                 wanted[frame].append((segment.track, segment.boxes[frame]))
         self.reader = CropReader(str(source.video), dict(wanted), self.store_crop)
         self.reader.start()

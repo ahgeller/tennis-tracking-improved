@@ -511,3 +511,19 @@ def test_leaving_the_court_view_with_changes_not_confirmed_is_held_back_once(tmp
     assert tool.view is tool.court_view and "NOT CONFIRMED" in tool.court_view.notice
     press(tool, "\t")
     assert tool.view is tool.frame_view
+
+
+def test_a_box_cut_by_the_pictures_side_is_never_a_crop_when_whole_ones_are_there():
+    frames = list(range(30))
+    boxes = {f: (400.0, 200.0, 460.0, 360.0) for f in frames}
+    boxes[0] = (0.0, 200.0, 18.0, 360.0)                                          # walking in: the tracker cut it at x 0
+    boxes[1] = (25.0, 200.0, 45.0, 360.0)                                         # a step in, its box still short of x 0
+    boxes[2] = (50.0, 200.0, 80.0, 360.0)                                         # half in: the box misses the part off it
+    boxes[29] = (-40.0, 200.0, 20.0, 360.0)                                       # walking out: two thirds off the picture
+    boxes[15] = (950.0, 200.0, 1000.0, 360.0)                                     # at the right edge, all but whole
+    segment = Segment("1", frames, boxes)
+    samples = segment.samples((1000, 600))
+    assert not {0, 1, 2, 29} & set(samples) and samples[0] == 3 and samples[-1] == 28
+    assert 15 in samples or len(samples) == label_players.CROPS
+    edge = Segment("2", [0, 1], {0: (-6.0, 0.0, 4.0, 50.0), 1: (-8.0, 0.0, 2.0, 50.0)})
+    assert edge.samples((1000, 600)) == [0, 1]                                    # nothing whole: still something
