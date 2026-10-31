@@ -36,6 +36,16 @@ class GridView(View):
     frame), the page size and the tiles' zoom, and the last canvas with the state it was drawn
     from, so an unchanged page costs nothing to show again."""
 
+    help_title = "GRID"
+    help = (
+        ("SPACE / ENTER / c", "confirm every tile: next page"), ("click", "the ball is here"),
+        ("right click", "that frame, full size"), ("1-9  , / .", "select a tile"), ("y", "take the hint"),
+        ("x", "keep the draft"), ("v", "no ball"), ("i j k l", "nudge 1 px (SHIFT 0.25 px)"), ("u", "undo"),
+        ("/", "a landing"), ("a / d, arrows", "previous / next page"), ("+ -", "zoom the tiles"), ("z", "tiles per page"),
+        ("TAB", "back to the single frame"), ("w", "the trajectory sheet"),
+    ("t", "trail"), ("g", "auto-centre on / off"), ("h", "picture filter"), ("o", "inset"),
+    ("m", "full screen"), ("s", "save"), ("q / ESC", "save and quit"), ("? / F1", "these keys"))
+
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
         super().__init__(session, tool)
         self.indices: List[int] = []            # the rows on this page, in order

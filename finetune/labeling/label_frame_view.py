@@ -39,6 +39,19 @@ class FrameView(View):
     """The single-frame view's picture and HUD, drawn for the tool's current frame."""
 
     overview = False
+    help_title = "FRAME"
+    help = (
+        ("SPACE / ENTER / c", "the mark is good: next frame"), ("click", "the ball is here"),
+        ("right click", "centre the view here"), ("wheel / + -", "zoom"), ("y", "take the hint"),
+        ("x", "keep the draft, not the hint"), ("v", "no ball on this frame"), ("r", "accept the run's sure frames"),
+        ("u", "undo on this frame"), ("i j k l", "nudge 1 px (SHIFT 0.25 px)"), ("a / d, arrows", "previous / next frame"),
+        ("1 2 4 6 8", "frames a / d move"), ("f / b", "next / previous uncertain or flagged"),
+        ("e", "next frame the hint disagrees with"), ("/", "a landing here (again: not)"), (".", "a racket hit here"),
+        (",", "who hit it: near, far, not said"), ("[ / ]", "a rally starts / ends here"),
+        ("; / SHIFT+;", "next / previous open candidate"), ("\\", "the candidates here are not events"),
+        ("TAB", "the grid of crops"), ("w", "the trajectory sheet"), ("z", "the grid's size"),
+    ("t", "trail"), ("g", "auto-centre on / off"), ("h", "picture filter"), ("o", "inset"),
+    ("m", "full screen"), ("s", "save"), ("q / ESC", "save and quit"), ("? / F1", "these keys"))
 
     def render(self) -> np.ndarray:
         return self.tool.render_frame()

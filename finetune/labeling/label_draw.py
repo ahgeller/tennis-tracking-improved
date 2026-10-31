@@ -324,6 +324,35 @@ def fit_items(line: HudLine, width: int, scale: float, thin: int) -> str:
     return ""
 
 
+def draw_key_help(canvas: np.ndarray, title: str, keys: Sequence[Tuple[str, str]], ui: float) -> np.ndarray:
+    """A copy of `canvas` with the view's keys over it (? or F1): a dark panel, the key in white and
+    what it does in grey, in as many columns as the height needs."""
+    out = canvas.copy()
+    thin = max(1, int(round(ui)))
+    scale, line_h, pad = 0.5 * ui, int(round(24 * ui)), int(round(16 * ui))
+    height, width = out.shape[:2]
+    rows_fit = max(1, (height - 3 * pad - line_h) // line_h)
+    columns = [keys[k:k + rows_fit] for k in range(0, len(keys), rows_fit)]
+    key_w = max((text_width(key, scale, thin) for key, _ in keys), default=0) + int(14 * ui)
+    column_w = min((width - 2 * pad) // max(1, len(columns)),
+                   key_w + max((text_width(what, scale, thin) for _, what in keys), default=0) + int(24 * ui))
+    panel_w = column_w * len(columns) + 2 * pad
+    panel_h = line_h * (min(len(keys), rows_fit) + 1) + 2 * pad
+    x0, y0 = max(0, (width - panel_w) // 2), max(0, (height - panel_h) // 2)
+    region = out[y0:y0 + panel_h, x0:x0 + panel_w]
+    region[:] = (region * 0.15).astype(np.uint8)
+    cv2.rectangle(out, (x0, y0), (x0 + panel_w - 1, y0 + panel_h - 1), (120, 120, 120), thin)
+    cv2.putText(out, fit_text(f"{title} KEYS   (any key closes this)", panel_w - 2 * pad, scale, thin),
+                (x0 + pad, y0 + pad + int(14 * ui)), cv2.FONT_HERSHEY_SIMPLEX, scale, UNSAVED_COLOUR, thin, cv2.LINE_AA)
+    for c, column in enumerate(columns):
+        for r, (key, what) in enumerate(column):
+            x, y = x0 + pad + c * column_w, y0 + pad + (r + 1) * line_h + int(14 * ui)
+            cv2.putText(out, key, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), thin, cv2.LINE_AA)
+            cv2.putText(out, fit_text(what, column_w - key_w - int(10 * ui), scale, thin), (x + key_w, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, scale, (180, 180, 180), thin, cv2.LINE_AA)
+    return out
+
+
 def fit_picture(image: np.ndarray, width: int, height: int) -> Tuple[np.ndarray, float, int, int]:
     """`image` scaled to fit inside `width` x `height` with its aspect kept: the scaled picture, the
     scale, and the offsets that centre it in the box."""

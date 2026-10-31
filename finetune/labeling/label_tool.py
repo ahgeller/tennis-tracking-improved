@@ -38,7 +38,7 @@ from finetune.labeling import label_window as win
 from finetune.labeling.label_candidates import CandidateKind, nearest_row
 from finetune.labeling.label_court import CourtView
 from finetune.labeling.label_cursor import CursorPlacer
-from finetune.labeling.label_draw import FILTERS
+from finetune.labeling.label_draw import FILTERS, draw_key_help
 from finetune.labeling.label_frame_view import FrameView
 from finetune.labeling.label_grid import GridView
 from finetune.labeling.label_keys import KeyHandler
@@ -69,6 +69,8 @@ class Tool:
         self.player_view = PlayerView(session, self)    # --players: who each tracked person is; see label_players
         self.court_view = CourtView(session, self)      # --court: the court keypoints; see label_court
         self.view: View = self.frame_view               # the view the window shows (label_view)
+        self.help_shown = False                         # ? or F1: the view's keys over it
+        self.help_cache: Optional[Tuple[int, int, np.ndarray]] = None   # (id of the picture, of the view, the overlay)
         self.pointer = MouseHandler(session, self)      # what clicks and the wheel do; see label_mouse
         self.keys = KeyHandler(session, self)           # what the keys do; see label_keys
         self.prefetcher = Prefetcher(session)           # decodes ahead of the cursor while idle; see label_source
@@ -293,8 +295,15 @@ class Tool:
                 s.marks_revision, s.awaiting_hit, s.awaiting_candidate)
 
     def render(self) -> np.ndarray:
-        """The window as the view showing draws it."""
-        return self.view.render()
+        """The window as the view showing draws it, under its key list while that is up."""
+        canvas = self.view.render()
+        if not self.help_shown:
+            return canvas
+        cached = self.help_cache
+        if cached is None or cached[0] != id(canvas) or cached[1] != id(self.view):
+            overlay = draw_key_help(canvas, self.view.help_title, self.view.help, self.session.ui)
+            cached = self.help_cache = (id(canvas), id(self.view), overlay)
+        return cached[2]
 
     def render_frame(self) -> np.ndarray:
         """The single-frame view (FrameView.render), cached on everything it is drawn from."""

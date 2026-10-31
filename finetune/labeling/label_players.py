@@ -241,6 +241,13 @@ class PlayerView(ClipView):
 
     title = "PLAYERS"
     tag = "play"
+    help_title = "PLAYERS"
+    help = (
+        ("1-4", "this segment is P1-P4"), ("0 / v", "not a player"), ("SPACE / ENTER / c", "take the suggestion"),
+        ("u", "say nothing of it"), ("a / d, arrows", "previous / next segment"), ("f", "next segment not said"),
+        ("click a row", "select it"), ("right click a crop", "split the segment there"),
+    ("SHIFT+n", "next clip"), ("TAB", "back to the frames"), ("m", "full screen"), ("s", "save"),
+    ("q / ESC", "save and quit"), ("? / F1", "these keys"))
 
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
         super().__init__(session, tool)

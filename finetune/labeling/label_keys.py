@@ -36,6 +36,13 @@ class KeyHandler:
         plain_key, and the grid and the single frame then share common_key."""
         tool = self.tool
         code = key & 0xFF if key < 0x10000 else key
+        if win.help_key(code):
+            tool.help_shown = not tool.help_shown
+            return False
+        if tool.help_shown:
+            tool.help_shown = False   # any key closes the list; only q (and ESC) goes on to act
+            if code not in KEYS_QUIT:
+                return False
         if win.non_character_key(code):
             return False          # F1 is not p, F2 is not q: see NON_CHARACTER_KEYS
         if not tool.overview and not tool.view_ready() and code not in KEYS_QUIT:

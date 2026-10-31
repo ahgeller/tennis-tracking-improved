@@ -35,6 +35,12 @@ class SheetView(View):
     A motion trace was tried as the background and dropped: the players' movement swamped it,
     and the ball's streak is a pixel or two wide at this scale, under the labels anyway."""
 
+    help_title = "TRAJECTORY"
+    help = (
+        ("click a point", "open that frame"), ("a / d, arrows", "the stretch before / after"),
+        ("w / right click", "back to the single frame"), ("TAB", "the grid"), ("q / ESC", "save and quit"),
+        ("? / F1", "these keys"))
+
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
         super().__init__(session, tool)
         self.start = 0                          # the first row on the sheet

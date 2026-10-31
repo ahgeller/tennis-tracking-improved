@@ -170,6 +170,14 @@ def next_clip_key(code: int) -> bool:
 NON_CHARACTER_KEYS = set(range(0x70, 0x7C)) | {0x2C, 0x2D, 0x2E} | set(range(0x21, 0x25)) | set(range(0x5B, 0x5E))
 
 
+VK_F1 = 0x70
+
+
+def help_key(code: int) -> bool:
+    """? or F1: the list of the view's keys (F1 comes as p's code; non_character_key tells them apart)."""
+    return code == ord("?") or (code == VK_F1 and non_character_key(code))
+
+
 def non_character_key(code: int) -> bool:
     """Is `code` an F-key, Insert, Delete or a page key that only looks like a printable one?"""
     return (_user32 is not None and code in NON_CHARACTER_KEYS

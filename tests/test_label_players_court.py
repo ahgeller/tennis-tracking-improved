@@ -267,7 +267,7 @@ def test_points_are_moved_by_nudge_drag_and_click_and_undone(tmp_path):
     press(tool, "l")
     press(tool, "k", shift=True)
     assert view.points()["far_left"] == (301.0, 200.25)
-    press(tool, "u")
+    press(tool, "u", shift=True)
     assert view.points()["far_left"] == (301.0, 200.0)
     tool.render()
     sx, sy = view.to_screen(*view.points()["near_right"])
@@ -276,7 +276,7 @@ def test_points_are_moved_by_nudge_drag_and_click_and_undone(tmp_path):
     mouse(tool, cv2.EVENT_LBUTTONUP, sx - 20, sy - 10)
     moved = view.points()["near_right"]
     assert view.selected == GROUND_POINTS.index("near_right") and moved[0] < 1180.0 and moved[1] < 650.0
-    press(tool, "u")                                                              # the whole drag is one step
+    press(tool, "u", shift=True)                                                  # the whole drag is one step
     assert view.points()["near_right"] == (1180.0, 650.0)
     for _ in range(GROUND_POINTS.index("near_right"), 14):                       # select the left net post
         press(tool, ".")
@@ -294,16 +294,47 @@ def test_points_outside_the_picture_are_not_written_and_frames_copy_unlabel_and_
     view = tool.court_view
     press(tool, " ")
     assert "near_left" not in source.court[0] and len(source.court[0]) == 13
-    press(tool, "r")                                                              # frame 10: the model's points
+    press(tool, "r", shift=True)                                                  # frame 10: the model's points
     press(tool, "y")                                                              # ... or the last labelled frame's
     assert view.points() == source.court[0]
     press(tool, " ")
     press(tool, "p")
-    press(tool, "x")
+    press(tool, "x", shift=True)
     assert sorted(source.court) == [0]
     tool.save(quiet=True)
     assert [label.frame for label in read_court_labels(source.court_path)] == [0]
 
+
+
+def test_the_keys_that_throw_work_away_take_shift_and_leaving_unconfirmed_changes_warns_first(tmp_path):
+    tool, source = open_court(tmp_path)
+    view = tool.court_view
+    press(tool, " ")                                                              # frame 0 labelled; on to 10
+    press(tool, "p")
+    press(tool, "x")                                                              # without SHIFT: only a warning
+    assert sorted(source.court) == [0] and "SHIFT+x" in view.notice
+    press(tool, "l")                                                              # a change, not confirmed
+    assert view.notice is None
+    press(tool, "d")
+    assert view.frame == 0 and "NOT CONFIRMED" in view.notice                     # held back once
+    press(tool, "d")
+    assert view.frame == 10                                                       # the same key again leaves
+    press(tool, "a")
+    press(tool, "u", shift=True)
+    assert view.points() == source.court[0]
+
+
+def test_a_point_said_hidden_is_listed_apart_from_one_not_placed_and_the_loupe_stays_on_the_picture(tmp_path):
+    tool, _ = open_court(tmp_path)
+    view = tool.court_view
+    press(tool, "v")                                                              # 0 far left: cannot be seen
+    line1 = " ".join(text for _, text in view.hud_lines()[0])
+    assert "hidden: 0" in line1 and "not placed: 14,15" in line1 and "point 0 far left" in line1
+    tool.fit_view(1280, 720)
+    tool.render()
+    x0, y0, size = view.loupe_box
+    left, top, right, bottom = view.picture_box(tool.court_view.clip.frame(view.frame))
+    assert left <= x0 and x0 + size <= right and top <= y0 and y0 + size + int(22 * tool.session.ui) <= bottom
 
 def test_a_clip_without_a_run_starts_from_blank_frames(tmp_path):
     source = clip(tmp_path)
@@ -398,3 +429,29 @@ def test_the_loupe_of_a_point_not_placed_follows_the_mouse(tmp_path):
     view.selected = 0                                                             # a placed point: the mouse is not followed
     mouse(tool, cv2.EVENT_MOUSEMOVE, x + 5, y)
     assert view.revision == revision
+
+
+def test_question_mark_or_f1_lists_the_views_keys_and_any_key_closes_the_list(tmp_path):
+    tool, source = open_court(tmp_path)
+    plain = tool.render()
+    press(tool, "?")
+    assert tool.help_shown and tool.render() is not plain and tool.render() is tool.render()   # drawn once, then kept
+    press(tool, "l")                                                              # closes the list, nothing else
+    assert not tool.help_shown and tool.court_view.points()["far_left"] == (300.0, 200.0)
+    with patch.object(win, "non_character_key", return_value=True):
+        tool.keys.handle(win.VK_F1)                                               # F1 (p's code, the F1 key down)
+    assert tool.help_shown
+    for view in (tool.frame_view, tool.grid_view, tool.sheet_view, tool.player_view, tool.court_view):
+        assert view.help_title and ("? / F1", "these keys") in view.help
+
+
+def test_tab_takes_a_clip_view_back_to_the_frames_and_m_goes_full_screen_there(tmp_path):
+    tool, _ = open_players(tmp_path)
+    with patch.object(Tool, "toggle_fullscreen") as fullscreen:
+        press(tool, "m")
+    fullscreen.assert_called_once()
+    press(tool, "	")
+    assert tool.view is tool.frame_view and tool.player_view.reader is None      # left: no crops cut for nobody
+    tool.court_view.open()
+    press(tool, "	")
+    assert tool.view is tool.frame_view

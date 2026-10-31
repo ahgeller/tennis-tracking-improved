@@ -33,6 +33,8 @@ class View:
 
     overview = True        # no single frame under a parked mouse
     ball_view = True       # works on the ball labels: the cursor and zoom are the clip's resume point
+    help_title = ""        # the key list's (? or F1) title ...
+    help: Tuple[Tuple[str, str], ...] = ()   # ... and its rows: (key, what it does), the view's own keys
 
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
         self.session = session
