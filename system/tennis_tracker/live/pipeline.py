@@ -271,6 +271,9 @@ class _LiveCollector(Pass1Collector):
     def committed(self, frame_index: int, ghosts: List[Tuple[int, Box]]) -> None:
         self.run_state.committed_frame(frame_index, ghosts)
 
+    def source_position(self, frame_index: int) -> int:
+        return self.run_state.pump.source_index[frame_index]
+
 
 class _LiveRun:
     """The run's state after pass 1: the selector (in line or in its process), the evidence record

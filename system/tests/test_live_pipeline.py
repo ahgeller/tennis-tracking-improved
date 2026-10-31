@@ -11,7 +11,9 @@ from ball_in_play_selector import PackedMask
 
 from tennis_tracker.live.evidence import EMPTY_EVIDENCE, replay
 from tennis_tracker.live.fixed_lag import LagSettings
-from tennis_tracker.live.pipeline import LiveOptions, LiveStats, _LiveRun, _Pump, _stop_on_interrupt, camera_name
+from tennis_tracker.live.pipeline import (
+    LiveOptions, LiveStats, _LiveCollector, _LiveRun, _Pump, _stop_on_interrupt, camera_name,
+)
 from tennis_tracker.live.source import ArrivedFrame, DropPolicy, FrameQueue
 from tennis_tracker.motion import BoostMasks
 from tennis_tracker.pass1 import Pass1Result
@@ -104,6 +106,14 @@ def test_committing_a_frame_hands_on_its_boost_mask_filtered_once_and_keeps_none
                    for a, b in zip(run.recorded.boost_masks, eager.recorded.boost_masks, strict=True))
         assert all(same_row(a, b) for a, b in zip(run.committed, eager.committed))
         assert all(mask is None for mask in result.boost_masks)
+
+
+def test_the_live_collector_places_its_frames_by_source_index():
+    """Pass 1 interpolates a skipped frame's player boxes by source position; live, that is the
+    source frame index, which skips the dropped frames."""
+    collector = object.__new__(_LiveCollector)
+    collector.run_state = SimpleNamespace(pump=SimpleNamespace(source_index=[0, 3, 4]))
+    assert [collector.source_position(frame) for frame in range(3)] == [0, 3, 4]
 
 
 def test_after_a_drop_the_selector_process_commits_what_the_selector_in_line_does(quiet_spawn):

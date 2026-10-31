@@ -13,7 +13,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -182,6 +182,45 @@ def _new_frame_cache(ctx: RunContext) -> Optional[FrameCache]:
     return None
 
 
+Ghosts = List[Tuple[int, Box]]       # ghost ROIs ``(frame, box)`` found as a frame was committed
+
+
+class PlayerBoxHold:
+    """Hands committed frames on in order once their player boxes are final.
+
+    A frame the player tracker ran on goes on at once; one it skipped is held, with the ghosts
+    found as it was committed, until the next tracked frame is committed: then the boxes of the
+    held frames are interpolated between the two tracked frames, weighted by where each frame
+    sits on the source's time line (``position``: a dropped frame between them counts), and the
+    held frames go on before the tracked one.  ``release`` hands on what is still held (the
+    frames after the last tracked one, which keep its boxes).
+    """
+
+    def __init__(self, hand_on: Callable[[int, Ghosts], None], position: Callable[[int], int]) -> None:
+        self._hand_on = hand_on
+        self._position = position
+        self._held: List[Tuple[int, Ghosts]] = []
+
+    def add(self, frame: int, ghosts: Ghosts, boxes: List[PlayerBoxes], tracked: List[bool]) -> None:
+        """Frame `frame` is committed: `boxes` and `tracked` hold every committed frame's player
+        boxes (rewritten in place for the held frames) and whether the tracker ran on it."""
+        if not tracked[frame]:
+            self._held.append((frame, ghosts))
+            return
+        if self._held:
+            start = max(0, self._held[0][0] - 1)          # the tracked frame before the gap
+            span = slice(start, frame + 1)
+            boxes[span] = interpolate_player_boxes(boxes[span], tracked[span],
+                                                   [self._position(index) for index in range(start, frame + 1)])
+        self.release()
+        self._hand_on(frame, ghosts)
+
+    def release(self) -> None:
+        held, self._held = self._held, []
+        for held_frame, held_ghosts in held:
+            self._hand_on(held_frame, held_ghosts)
+
+
 def _same_box(a: Box, b: Box) -> bool:
     return all(abs(int(a[i]) - int(b[i])) <= _ROI_MATCH_TOLERANCE_PX for i in range(4))
 
@@ -223,9 +262,8 @@ class Pass1Collector:
         self._progress_frame, self._progress_elapsed = 0, 0.0   # where the last progress line was
         self._player_pending: Deque[PlayerPending] = collections.deque()   # launched, not yet finished
         self._players_tracked: List[bool] = []    # per committed frame: did the player tracker run on it
-        # Committed frames the player tracker skipped, with the ghosts found as each was committed:
-        # handed on (``committed``) with the next tracked frame, once their boxes are interpolated.
-        self._held: List[Tuple[int, List[Tuple[int, Box]]]] = []
+        # Hands each committed frame on (``committed``) once its player boxes are final.
+        self._player_hold = PlayerBoxHold(self.committed, self.source_position)
 
     # -- per-frame steps -------------------------------------------------------
 
@@ -358,7 +396,7 @@ class Pass1Collector:
         out.rois.append(record.rois)
         out.ghost_rois.append([])
         # A frame the player tracker skips (``effective_player_interval``) holds the last tracked
-        # frame's boxes until the next tracked frame's are in (``_hand_on`` interpolates them).
+        # frame's boxes until the next tracked frame's are in (``PlayerBoxHold`` interpolates them).
         out.player_boxes.append(self.player_detector.player_boxes_by_slot())
         self._players_tracked.append(self.player_detector.tracks_frame(record.frame_index))
         out.court_keypoints.append(record.court_keypoints)
@@ -369,33 +407,18 @@ class Pass1Collector:
             elif record.detector_frame_cuda is not None:
                 self.detector_input_writer.write(record.detector_frame_cuda.detach().cpu().numpy())
         self.timing.add("pass1_store", t0)
-        self._hand_on(record.frame_index, found)
+        self._player_hold.add(record.frame_index, found, self.result.player_boxes, self._players_tracked)
 
-    def _hand_on(self, frame_index: int, ghosts: List[Tuple[int, Box]]) -> None:
-        """Hand committed frame `frame_index` on (``committed``) once its player boxes are final: a
-        frame the player tracker ran on at once, after the frames it skipped since the one before,
-        whose boxes are now interpolated between the two; a skipped frame waits for that."""
-        if not self._players_tracked[frame_index]:
-            self._held.append((frame_index, ghosts))
-            return
-        if self._held:
-            start = self._held[0][0] - 1                  # the tracked frame before the gap
-            span = slice(start, frame_index + 1)
-            self.result.player_boxes[span] = interpolate_player_boxes(
-                self.result.player_boxes[span], self._players_tracked[span])
-        self._release_held()
-        self.committed(frame_index, ghosts)
-
-    def _release_held(self) -> None:
-        for held_frame, held_ghosts in self._held:
-            self.committed(held_frame, held_ghosts)
-        self._held.clear()
-
-    def committed(self, frame_index: int, ghosts: List[Tuple[int, Box]]) -> None:
+    def committed(self, frame_index: int, ghosts: Ghosts) -> None:
         """Called once frame `frame_index`'s evidence is final, its player boxes included, in frame
         order, with the ghost ROIs ``(frame, box)`` added to earlier frames as it was committed; for a
         subclass that hands frames on (the live tracker). A frame the player tracker skipped comes
-        with the next frame it ran on (``_hand_on``), so its boxes are the interpolated ones."""
+        with the next frame it ran on (``PlayerBoxHold``), so its boxes are the interpolated ones."""
+
+    def source_position(self, frame_index: int) -> int:
+        """Where committed frame `frame_index` sits on the source's time line: the frame itself,
+        unless a subclass drops source frames (the live tracker)."""
+        return frame_index
 
     def _finish_pending(self, pending: PendingDetection) -> None:
         t0 = self.timing.start()
@@ -495,9 +518,9 @@ class Pass1Collector:
         if pending is not None:
             self._finish_pending(pending)
         self._finish_players(frame_index)
-        # The frames the player tracker skipped have their boxes (``_hand_on``), except those after
-        # the last frame it ran on, which keep that frame's boxes.
-        self._release_held()
+        # The frames the player tracker skipped have their boxes (``PlayerBoxHold``), except those
+        # after the last frame it ran on, which keep that frame's boxes.
+        self._player_hold.release()
         return self.result
 
 
