@@ -97,11 +97,11 @@ On four units (source frames 240, 810, 1800 with the ball in view; 660 without),
 above the operating threshold (0.42 stream, 0.40 heatmap), each graph against the trainable FP32 network,
 scored by the Mac validator's own functions:
 
-| graph | heatmap_s4 unit | stream_s4 unit | encoder (max abs / rel) | decoder | encoder fp16 -> decoder chain | player (4 frames) |
+| graph | heatmap_s4 unit | stream_s4 unit | encoder (worst level: max abs / rel) | decoder | encoder fp16 -> decoder chain | player (4 frames) |
 |---|---|---|---|---|---|---|
 | fused, eager FP32 | 0 | heat 0, offs 1e-5 | 0.015 / 4.4e-4 | heat 8e-5 | heat 8e-5 | exact |
 | traced FP32 (converted graph) | 0 | heat 0, offs 1e-5 | 0.015 / 4.4e-4 | heat 8e-5 | heat 8e-5 | exact |
-| traced FP16 (PyTorch CPU) | heat 0.0018, offs 0.026 | heat 0.0009, offs 0.006 | 0.047 / 1.6e-3 | heat 0.0006 | heat 0.0009 | 8 vs 8 boxes, IoU >= 0.958, <= 0.33 px |
+| traced FP16 (PyTorch CPU) | heat 0.0018, offs 0.026 | heat 0.0009, offs 0.006 | 0.047 / 2.3e-3 | heat 0.0006 | heat 0.0009 | 8 vs 8 boxes, IoU >= 0.958, <= 0.33 px |
 
 Every ball row: heat-map argmax on the same cell in 20/20 frames (15/15 confident). The encoder's FP32
 0.015 is not a network difference: the saved references are float16 (they are also the decoder's
