@@ -1,0 +1,145 @@
+[score] 24 clips, 8515 visible labels, 518 absent-ball labels, K=5
+[score] identity check passed: rank 1 of the dump equals the tracker's answer on every frame of every clip
+
+=== rank-1 thresholding (the raw metric, no selector) ===
+rank1 conf>=0.30             recall=0.965 wrong=0.006 FA=101/518 (bridged=55 false=46)
+rank1 conf>=0.34             recall=0.960 wrong=0.006 FA= 82/518 (bridged=47 false=35)
+rank1 conf>=0.38             recall=0.954 wrong=0.005 FA= 63/518 (bridged=36 false=27)
+rank1 conf>=0.40             recall=0.952 wrong=0.005 FA= 55/518 (bridged=31 false=24)
+rank1 conf>=0.42             recall=0.948 wrong=0.005 FA= 43/518 (bridged=22 false=21)
+rank1 conf>=0.46             recall=0.940 wrong=0.004 FA= 33/518 (bridged=15 false=18)
+rank1 conf>=0.50             recall=0.930 wrong=0.004 FA= 27/518 (bridged=13 false=14)
+  sanity at 0.40: recorded recall 0.952 FA 55; got 0.952 FA 55 -> OK
+  sanity at 0.50: recorded recall 0.930 FA 27; got 0.930 FA 27 -> OK
+
+=== oracle ceiling: label within 10 px of any of the top-K peaks ===
+  top-1: floor 0.05: 0.9765  floor 0.10: 0.9763  floor 0.20: 0.9728  floor 0.42: 0.9483
+  top-2: floor 0.05: 0.9833  floor 0.10: 0.9825  floor 0.20: 0.9770  floor 0.42: 0.9506
+  top-3: floor 0.05: 0.9853  floor 0.10: 0.9837  floor 0.20: 0.9775  floor 0.42: 0.9506
+  top-4: floor 0.05: 0.9866  floor 0.10: 0.9839  floor 0.20: 0.9775  floor 0.42: 0.9506
+  top-5: floor 0.05: 0.9868  floor 0.10: 0.9839  floor 0.20: 0.9775  floor 0.42: 0.9506
+  ceiling (top-5, floor 0.05): 0.9868 = 8403/8515
+
+=== frames the e60_0.42 pipeline missed (no output or beyond 10 px): 404 frames ===
+  rank of the true ball: rank 1: 244, rank 2: 38, rank 3: 15, rank 4: 11, rank 5: 2, not in top-5 above 0.05: 94
+  its confidence when present: 0.05-0.10: 24, 0.10-0.20: 51, 0.20-0.30: 58, 0.30-0.42: 106, 0.42-1.00: 71
+  by group:
+    grid       labels= 1592 missed= 139 (0.087)  recoverable in top-5: 86 (rank 1 below threshold: 51, rank 2+: 35)  not present: 53
+    own        labels= 3569 missed= 103 (0.029)  recoverable in top-5: 88 (rank 1 below threshold: 71, rank 2+: 17)  not present: 15
+    prof       labels= 3354 missed= 162 (0.048)  recoverable in top-5: 136 (rank 1 below threshold: 122, rank 2+: 14)  not present: 26
+  by speed:
+    0-6        labels= 3202 missed= 186 (0.058)  recoverable in top-5: 148 (rank 1 below threshold: 105, rank 2+: 43)  not present: 38
+    30-70      labels=  953 missed=  46 (0.048)  recoverable in top-5: 31 (rank 1 below threshold: 26, rank 2+: 5)  not present: 15
+    6-30       labels= 4243 missed= 129 (0.030)  recoverable in top-5: 112 (rank 1 below threshold: 97, rank 2+: 15)  not present: 17
+    70+        labels=  112 missed=  40 (0.357)  recoverable in top-5: 17 (rank 1 below threshold: 14, rank 2+: 3)  not present: 23
+    unknown    labels=    5 missed=   3 (0.600)  recoverable in top-5: 2 (rank 1 below threshold: 2, rank 2+: 0)  not present: 1
+
+=== frames rank-1 at 0.42 missed (raw metric): 440 frames ===
+  rank of the true ball: rank 1: 240, rank 2: 58, rank 3: 17, rank 4: 11, rank 5: 2, not in top-5 above 0.05: 112
+  its confidence when present: 0.05-0.10: 25, 0.10-0.20: 55, 0.20-0.30: 78, 0.30-0.42: 151, 0.42-1.00: 19
+  by group:
+    grid       labels= 1592 missed= 164 (0.103)  recoverable in top-5: 102 (rank 1 below threshold: 59, rank 2+: 43)  not present: 62
+    own        labels= 3569 missed= 131 (0.037)  recoverable in top-5: 114 (rank 1 below threshold: 85, rank 2+: 29)  not present: 17
+    prof       labels= 3354 missed= 145 (0.043)  recoverable in top-5: 112 (rank 1 below threshold: 96, rank 2+: 16)  not present: 33
+  by speed:
+    0-6        labels= 3202 missed= 206 (0.064)  recoverable in top-5: 165 (rank 1 below threshold: 114, rank 2+: 51)  not present: 41
+    30-70      labels=  953 missed=  45 (0.047)  recoverable in top-5: 22 (rank 1 below threshold: 14, rank 2+: 8)  not present: 23
+    6-30       labels= 4243 missed= 153 (0.036)  recoverable in top-5: 132 (rank 1 below threshold: 106, rank 2+: 26)  not present: 21
+    70+        labels=  112 missed=  33 (0.295)  recoverable in top-5: 7 (rank 1 below threshold: 4, rank 2+: 3)  not present: 26
+    unknown    labels=    5 missed=   3 (0.600)  recoverable in top-5: 2 (rank 1 below threshold: 2, rank 2+: 0)  not present: 1
+
+=== recall by group and speed: rank-1 at 0.42 vs the top-5 ceiling ===
+  group=grid       n= 1592  rank1@0.42=0.897  ceiling=0.961
+  group=own        n= 3569  rank1@0.42=0.963  ceiling=0.995
+  group=prof       n= 3354  rank1@0.42=0.957  ceiling=0.990
+  speed=0-6        n= 3202  rank1@0.42=0.936  ceiling=0.987
+  speed=30-70      n=  953  rank1@0.42=0.953  ceiling=0.976
+  speed=6-30       n= 4243  rank1@0.42=0.964  ceiling=0.995
+  speed=70+        n=  112  rank1@0.42=0.705  ceiling=0.768
+  speed=unknown    n=    5  rank1@0.42=0.400  ceiling=0.800
+
+=== step 3: peaks on the 518 no-ball frames ===
+  conf>=0.05: 2.82 peaks/frame (1463 in all; 425 frames with at least one; capped at K=5), 633 inside a player box (43.3%); 518 of 518 frames have player boxes
+  conf>=0.20: 0.37 peaks/frame (192 in all; 159 frames with at least one; capped at K=5), 76 inside a player box (39.6%); 518 of 518 frames have player boxes
+  conf>=0.42: 0.08 peaks/frame (43 in all; 43 frames with at least one; capped at K=5), 13 inside a player box (30.2%); 518 of 518 frames have player boxes
+  (visible frames, the true ball's peak excluded: 2.33 other peaks/frame above 0.05)
+  (visible frames, the true ball's peak excluded: 0.19 other peaks/frame above 0.20)
+
+=== step 4: path scorer over the last 8 frames ===
+gravity (median labelled d2y, 1080p px/frame^2) by fps: {60: 0.2250000000000032, 30: 1.5900000000000176}
+  statistic sum:
+    >= -2.42: recall=0.970 wrong=0.015 FA=308 (bridged 95)
+    >= -0.83: recall=0.967 wrong=0.014 FA=256 (bridged 91)
+    >= 0.22: recall=0.963 wrong=0.011 FA=204 (bridged 89)
+    >= 0.95: recall=0.954 wrong=0.009 FA=156 (bridged 86)
+    >= 1.71: recall=0.940 wrong=0.007 FA=135 (bridged 81)
+    >= 2.38: recall=0.917 wrong=0.005 FA=119 (bridged 74)
+    >= 3.04: recall=0.887 wrong=0.004 FA=104 (bridged 68)
+    >= 3.69: recall=0.841 wrong=0.003 FA=77 (bridged 56)
+    >= 4.34: recall=0.775 wrong=0.003 FA=60 (bridged 46)
+    >= 4.99: recall=0.679 wrong=0.001 FA=41 (bridged 32)
+    >= 5.64: recall=0.515 wrong=0.000 FA=17 (bridged 11)
+    >= 6.29: recall=0.265 wrong=0.000 FA=5 (bridged 2)
+    >= 6.94: recall=0.004 wrong=0.000 FA=0 (bridged 0)
+  statistic lift0.25:
+    >= -0.03: recall=0.970 wrong=0.015 FA=309 (bridged 95)
+    >= 0.07: recall=0.969 wrong=0.014 FA=263 (bridged 95)
+    >= 0.17: recall=0.969 wrong=0.011 FA=179 (bridged 90)
+    >= 0.27: recall=0.966 wrong=0.007 FA=130 (bridged 79)
+    >= 0.37: recall=0.961 wrong=0.006 FA=94 (bridged 62)
+    >= 0.47: recall=0.950 wrong=0.004 FA=65 (bridged 45)
+    >= 0.57: recall=0.935 wrong=0.003 FA=38 (bridged 24)
+    >= 0.67: recall=0.911 wrong=0.003 FA=22 (bridged 12)
+    >= 0.77: recall=0.866 wrong=0.002 FA=16 (bridged 8)
+    >= 0.87: recall=0.786 wrong=0.001 FA=12 (bridged 4)
+    >= 0.97: recall=0.609 wrong=0.000 FA=7 (bridged 2)
+    >= 1.07: recall=0.267 wrong=0.000 FA=3 (bridged 0)
+    >= 1.17: recall=0.001 wrong=0.000 FA=0 (bridged 0)
+  statistic lift0.5:
+    >= -0.11: recall=0.970 wrong=0.015 FA=308 (bridged 95)
+    >= 0.02: recall=0.969 wrong=0.014 FA=273 (bridged 94)
+    >= 0.14: recall=0.969 wrong=0.012 FA=202 (bridged 91)
+    >= 0.26: recall=0.968 wrong=0.009 FA=153 (bridged 85)
+    >= 0.38: recall=0.964 wrong=0.007 FA=120 (bridged 76)
+    >= 0.50: recall=0.955 wrong=0.004 FA=93 (bridged 64)
+    >= 0.62: recall=0.940 wrong=0.004 FA=60 (bridged 44)
+    >= 0.74: recall=0.917 wrong=0.003 FA=32 (bridged 22)
+    >= 0.86: recall=0.875 wrong=0.002 FA=18 (bridged 10)
+    >= 0.98: recall=0.802 wrong=0.001 FA=14 (bridged 6)
+    >= 1.10: recall=0.660 wrong=0.000 FA=7 (bridged 2)
+    >= 1.22: recall=0.372 wrong=0.000 FA=3 (bridged 0)
+    >= 1.34: recall=0.034 wrong=0.000 FA=0 (bridged 0)
+  statistic lift1.0:
+    >= -0.29: recall=0.970 wrong=0.015 FA=309 (bridged 95)
+    >= -0.08: recall=0.970 wrong=0.014 FA=276 (bridged 93)
+    >= 0.10: recall=0.969 wrong=0.012 FA=220 (bridged 90)
+    >= 0.27: recall=0.967 wrong=0.010 FA=165 (bridged 88)
+    >= 0.44: recall=0.963 wrong=0.007 FA=130 (bridged 77)
+    >= 0.61: recall=0.953 wrong=0.006 FA=112 (bridged 73)
+    >= 0.78: recall=0.937 wrong=0.004 FA=81 (bridged 59)
+    >= 0.95: recall=0.903 wrong=0.002 FA=49 (bridged 39)
+    >= 1.12: recall=0.853 wrong=0.002 FA=26 (bridged 18)
+    >= 1.29: recall=0.758 wrong=0.001 FA=14 (bridged 7)
+    >= 1.46: recall=0.586 wrong=0.000 FA=8 (bridged 2)
+    >= 1.63: recall=0.285 wrong=0.000 FA=2 (bridged 0)
+    >= 1.80: recall=0.003 wrong=0.000 FA=0 (bridged 0)
+
+=== step 4: matched comparison (raw metric) ===
+  statistic sum:
+    rank-1 at 0.34: recall 0.960 FA 82  |  path scorer at FA<=82: recall 0.845 FA 82 (>=3.64)  |  at recall>=rank-1: FA 182 (>=0.50)
+    rank-1 at 0.42: recall 0.948 FA 43  |  path scorer at FA<=43: recall 0.679 FA 41 (>=4.99)  |  at recall>=rank-1: FA 147 (>=1.24)
+    rank-1 at 0.50: recall 0.930 FA 27  |  path scorer at FA<=27: recall 0.586 FA 27 (>=5.39)  |  at recall>=rank-1: FA 126 (>=2.01)
+  statistic lift0.25:
+    rank-1 at 0.34: recall 0.960 FA 82  |  path scorer at FA<=82: recall 0.956 FA 82 (>=0.41)  |  at recall>=rank-1: FA 94 (>=0.37)
+    rank-1 at 0.42: recall 0.948 FA 43  |  path scorer at FA<=43: recall 0.938 FA 41 (>=0.55)  |  at recall>=rank-1: FA 65 (>=0.47)
+    rank-1 at 0.50: recall 0.930 FA 27  |  path scorer at FA<=27: recall 0.927 FA 27 (>=0.61)  |  at recall>=rank-1: FA 32 (>=0.59)
+  statistic lift0.5:
+    rank-1 at 0.34: recall 0.960 FA 82  |  path scorer at FA<=82: recall 0.951 FA 81 (>=0.54)  |  at recall>=rank-1: FA 109 (>=0.43)
+    rank-1 at 0.42: recall 0.948 FA 43  |  path scorer at FA<=43: recall 0.929 FA 43 (>=0.69)  |  at recall>=rank-1: FA 77 (>=0.55)
+    rank-1 at 0.50: recall 0.930 FA 27  |  path scorer at FA<=27: recall 0.905 FA 24 (>=0.78)  |  at recall>=rank-1: FA 44 (>=0.68)
+  statistic lift1.0:
+    rank-1 at 0.34: recall 0.960 FA 82  |  path scorer at FA<=82: recall 0.937 FA 81 (>=0.78)  |  at recall>=rank-1: FA 122 (>=0.50)
+    rank-1 at 0.42: recall 0.948 FA 43  |  path scorer at FA<=43: recall 0.894 FA 43 (>=0.98)  |  at recall>=rank-1: FA 105 (>=0.66)
+    rank-1 at 0.50: recall 0.930 FA 27  |  path scorer at FA<=27: recall 0.857 FA 27 (>=1.11)  |  at recall>=rank-1: FA 76 (>=0.81)
+
+wrote C:\Users\Andrew\Desktop\clean_version\optimization_test\phases\tests_AE\experiments\tier0\C_track_before_detect\results.json and C:\Users\Andrew\Desktop\clean_version\optimization_test\phases\tests_AE\experiments\tier0\C_track_before_detect\per_frame.csv

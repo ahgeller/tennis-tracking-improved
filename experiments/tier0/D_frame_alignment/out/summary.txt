@@ -1,0 +1,37 @@
+
+=== baseline: per source and the grid clips ===
+custom@0.42    vis=3569 recall=0.963 wrong=0.004 miss=0.030 | invis=207 falseAlarm=0.106 (22/207: bridged=7 false=15) | med=0.6px p90=1.5px
+grid@0.42      vis=1592 recall=0.897 wrong=0.016 miss=0.070 | invis=149 falseAlarm=0.047 (7/149: bridged=3 false=4) | med=0.9px p90=3.5px
+prof@0.42      vis=3354 recall=0.957 wrong=0.001 miss=0.039 | invis=162 falseAlarm=0.086 (14/162: bridged=12 false=2) | med=0.9px p90=2.4px
+grid_match8@0.42 vis= 528 recall=0.930 wrong=0.009 miss=0.051 | invis= 22 falseAlarm=0.136 (3/22: bridged=3 false=0) | med=1.0px p90=3.3px
+grid_match16@0.42 vis= 442 recall=0.851 wrong=0.043 miss=0.106 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=1.8px
+grid_match22@0.42 vis= 622 recall=0.902 wrong=0.003 miss=0.059 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.3px
+ALL@0.42       vis=8515 recall=0.948 wrong=0.005 miss=0.041 | invis=518 falseAlarm=0.083 (43/518: bridged=22 false=21) | med=0.7px p90=2.1px
+custom@0.40    vis=3569 recall=0.966 wrong=0.004 miss=0.028 | invis=207 falseAlarm=0.130 (27/207: bridged=12 false=15) | med=0.6px p90=1.5px
+grid@0.40      vis=1592 recall=0.901 wrong=0.016 miss=0.064 | invis=149 falseAlarm=0.060 (9/149: bridged=5 false=4) | med=0.9px p90=3.5px
+prof@0.40      vis=3354 recall=0.963 wrong=0.001 miss=0.033 | invis=162 falseAlarm=0.117 (19/162: bridged=14 false=5) | med=0.9px p90=2.4px
+grid_match8@0.40 vis= 528 recall=0.936 wrong=0.009 miss=0.045 | invis= 22 falseAlarm=0.227 (5/22: bridged=5 false=0) | med=1.0px p90=3.3px
+grid_match16@0.40 vis= 442 recall=0.857 wrong=0.043 miss=0.100 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=2.0px
+grid_match22@0.40 vis= 622 recall=0.904 wrong=0.003 miss=0.055 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.5px
+ALL@0.40       vis=8515 recall=0.952 wrong=0.005 miss=0.037 | invis=518 falseAlarm=0.106 (55/518: bridged=31 false=24) | med=0.7px p90=2.1px
+
+=== aligned3: per source and the grid clips ===
+custom@0.42    vis=3569 recall=0.963 wrong=0.004 miss=0.030 | invis=207 falseAlarm=0.106 (22/207: bridged=7 false=15) | med=0.6px p90=1.5px
+grid@0.42      vis=1592 recall=0.903 wrong=0.016 miss=0.064 | invis=149 falseAlarm=0.047 (7/149: bridged=3 false=4) | med=0.9px p90=3.5px
+prof@0.42      vis=3354 recall=0.957 wrong=0.001 miss=0.039 | invis=162 falseAlarm=0.086 (14/162: bridged=12 false=2) | med=0.9px p90=2.4px
+grid_match8@0.42 vis= 528 recall=0.947 wrong=0.009 miss=0.034 | invis= 22 falseAlarm=0.136 (3/22: bridged=3 false=0) | med=1.1px p90=3.6px
+grid_match16@0.42 vis= 442 recall=0.851 wrong=0.043 miss=0.106 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=1.8px
+grid_match22@0.42 vis= 622 recall=0.902 wrong=0.003 miss=0.059 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.3px
+ALL@0.42       vis=8515 recall=0.949 wrong=0.005 miss=0.040 | invis=518 falseAlarm=0.083 (43/518: bridged=22 false=21) | med=0.7px p90=2.1px
+custom@0.40    vis=3569 recall=0.966 wrong=0.004 miss=0.028 | invis=207 falseAlarm=0.130 (27/207: bridged=12 false=15) | med=0.6px p90=1.5px
+grid@0.40      vis=1592 recall=0.907 wrong=0.016 miss=0.058 | invis=149 falseAlarm=0.067 (10/149: bridged=6 false=4) | med=0.9px p90=3.5px
+prof@0.40      vis=3354 recall=0.963 wrong=0.001 miss=0.033 | invis=162 falseAlarm=0.117 (19/162: bridged=14 false=5) | med=0.9px p90=2.4px
+grid_match8@0.40 vis= 528 recall=0.953 wrong=0.009 miss=0.028 | invis= 22 falseAlarm=0.273 (6/22: bridged=6 false=0) | med=1.1px p90=3.6px
+grid_match16@0.40 vis= 442 recall=0.857 wrong=0.043 miss=0.100 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=2.0px
+grid_match22@0.40 vis= 622 recall=0.904 wrong=0.003 miss=0.055 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.5px
+ALL@0.40       vis=8515 recall=0.953 wrong=0.005 miss=0.035 | invis=518 falseAlarm=0.108 (56/518: bridged=32 false=24) | med=0.8px p90=2.1px
+
+paired at 0.42: aligned gained 9 hits, lost 0; labelled frames whose confidence moved: 119
+paired at 0.40: aligned gained 9 hits, lost 0; labelled frames whose confidence moved: 119
+
+CPU cost per transition: exhaustive integer search radius 3 at 768x432 (torch, 12 threads) 3.8 ms; OpenCV phaseCorrelate at 96x54 0.099 ms (plus the downscale)

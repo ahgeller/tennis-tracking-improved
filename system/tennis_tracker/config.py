@@ -61,6 +61,11 @@ class Config:
     # unit like any other. The units are the same and their answers agree to FP16 rounding
     # (audit/records/opt_stream_prepass.md on the optimization branch).
     ball_prepass_streaming: bool = True
+    # Experiment (tier 0, test D): above 0, a streaming network's transition has its previous frame
+    # moved by the integer camera translation found within this many 768x432 px before the difference
+    # is taken (ball_gpu.estimate_shift, aligned_previous), cancelling a pan. 0 (the default) leaves
+    # the transition as the network was trained on it.
+    ball_transition_align_px: int = 0
     ball_engine_dir: str = str(MODELS / "engine_cache")
     # The prepass decodes with NVDEC (PyNvVideoCodec) where it opens the clip, and its frames stay on
     # the GPU; else cv2 decodes into pinned memory. Both give the same bytes (video_decode.py).

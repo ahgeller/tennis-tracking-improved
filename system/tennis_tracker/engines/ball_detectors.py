@@ -522,7 +522,8 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         batch_units = static.batch if static is not None else _UNITS_PER_INFERENCE
         transitions = None
         if halves is not None:
-            transitions = TransitionRing(halves, transition_slots(batch_units, window_step, source_stride), source_stride)
+            transitions = TransitionRing(halves, transition_slots(batch_units, window_step, source_stride), source_stride,
+                                         align_radius=int(self.cfg.ball_transition_align_px))
         averaging = window_step != 5
         # The frames summed in the ring and not yet decoded.
         covered: Set[int] = set()

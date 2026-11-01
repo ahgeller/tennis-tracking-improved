@@ -1,0 +1,56 @@
+[E] 24 clips of mixed_v1; weights stream_s4_e60.pt; variants ['bn300_p1']
+[detector] stream_s4 FP16, 192x108 grid (confidence=0.00, device=cuda:0, a unit every 1 frame(s))
+[detector] NVDEC's colour conversion does not reproduce OpenCV's pixels for C:\Users\Andrew\Desktop\clean_version\optimization_test\phases\tests_AE\finetune\videos\grid_match8.mp4; the prepass decodes on the CPU
+[detector] GridTrackNet prepass: 1103 source frames, 1103 detections, 274 batched calls across 2 phase(s) in 6.9s (158.8 source fps, opencv decode)
+[detector] GridTrackNet prepass: the container reported 1325 frames, 1103 decoded; the decoded count is used
+[E] bn300_p1   grid_match8    1325 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 14.6s
+[detector] NVDEC's colour conversion does not reproduce OpenCV's pixels for C:\Users\Andrew\Desktop\clean_version\optimization_test\phases\tests_AE\finetune\videos\grid_match16.mp4; the prepass decodes on the CPU
+[detector] GridTrackNet prepass: 916 source frames, 916 detections, 227 batched calls across 2 phase(s) in 3.8s (238.7 source fps, opencv decode)
+[detector] GridTrackNet prepass: the container reported 1217 frames, 916 decoded; the decoded count is used
+[E] bn300_p1   grid_match16   1217 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 7.6s
+[detector] GridTrackNet prepass: 794 source frames, 794 detections, 198 batched calls across 1 phase(s) in 2.8s (287.4 source fps, nvdec decode)
+[detector] GridTrackNet prepass: the container reported 795 frames, 794 decoded; the decoded count is used
+[E] bn300_p1   grid_match22   795 frames, adapted on 296 units (37 batches, first 300 frames, prior 1), 5.7s
+[detector] GridTrackNet prepass: 689 source frames, 689 detections, 171 batched calls across 2 phase(s) in 2.0s (345.0 source fps, nvdec decode)
+[E] bn300_p1   video1         689 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 5.3s
+[detector] GridTrackNet prepass: 802 source frames, 802 detections, 199 batched calls across 2 phase(s) in 2.4s (337.1 source fps, nvdec decode)
+[E] bn300_p1   video2         802 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 5.3s
+[detector] GridTrackNet prepass: 867 source frames, 867 detections, 215 batched calls across 2 phase(s) in 2.5s (343.1 source fps, nvdec decode)
+[E] bn300_p1   video3         867 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 5.5s
+[detector] GridTrackNet prepass: 998 source frames, 998 detections, 248 batched calls across 2 phase(s) in 3.0s (331.0 source fps, nvdec decode)
+[E] bn300_p1   video4         998 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 6.2s
+[detector] GridTrackNet prepass: 357 source frames, 357 detections, 88 batched calls across 2 phase(s) in 1.5s (237.7 source fps, nvdec decode)
+[E] bn300_p1   video5         357 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 5.4s
+[detector] GridTrackNet prepass: 956 source frames, 956 detections, 237 batched calls across 2 phase(s) in 2.7s (358.3 source fps, nvdec decode)
+[E] bn300_p1   video6         956 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 5.9s
+[detector] GridTrackNet prepass: 773 source frames, 773 detections, 192 batched calls across 2 phase(s) in 2.1s (367.8 source fps, nvdec decode)
+[E] bn300_p1   video7         773 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 4.9s
+[detector] GridTrackNet prepass: 513 source frames, 513 detections, 128 batched calls across 1 phase(s) in 1.5s (352.5 source fps, nvdec decode)
+[E] bn300_p1   video8         513 frames, adapted on 296 units (37 batches, first 300 frames, prior 1), 4.4s
+[detector] GridTrackNet prepass: 627 source frames, 627 detections, 155 batched calls across 2 phase(s) in 1.7s (376.1 source fps, nvdec decode)
+[E] bn300_p1   video9         627 frames, adapted on 292 units (37 batches, first 300 frames, prior 1), 4.3s
+[detector] GridTrackNet prepass: 226 source frames, 226 detections, 56 batched calls across 1 phase(s) in 0.6s (380.9 source fps, nvdec decode)
+[detector] GridTrackNet prepass: the container reported 227 frames, 226 decoded; the decoded count is used
+[E] bn300_p1   video10        227 frames, adapted on 222 units (28 batches, first 300 frames, prior 1), 4.0s
+[detector] GridTrackNet prepass: 598 source frames, 598 detections, 149 batched calls across 1 phase(s) in 1.7s (350.1 source fps, nvdec decode)
+[E] bn300_p1   video17        598 frames, adapted on 296 units (37 batches, first 300 frames, prior 1), 4.0s
+[detector] GridTrackNet prepass: 485 source frames, 485 detections, 121 batched calls across 1 phase(s) in 1.8s (263.9 source fps, nvdec decode)
+[E] bn300_p1   video18        485 frames, adapted on 296 units (37 batches, first 300 frames, prior 1), 5.1s
+[detector] GridTrackNet prepass: 112 source frames, 112 detections, 27 batched calls across 1 phase(s) in 0.5s (236.4 source fps, nvdec decode)
+[E] bn300_p1   video19        112 frames, adapted on 108 units (14 batches, first 300 frames, prior 1), 2.0s
+[detector] GridTrackNet prepass: 102 source frames, 102 detections, 25 batched calls across 1 phase(s) in 0.3s (336.0 source fps, nvdec decode)
+[E] bn300_p1   video20        102 frames, adapted on 98 units (13 batches, first 300 frames, prior 1), 2.4s
+[detector] GridTrackNet prepass: 225 source frames, 225 detections, 56 batched calls across 1 phase(s) in 1.1s (208.7 source fps, nvdec decode)
+[E] bn300_p1   video21        225 frames, adapted on 221 units (28 batches, first 300 frames, prior 1), 4.9s
+[detector] GridTrackNet prepass: 233 source frames, 233 detections, 58 batched calls across 1 phase(s) in 1.0s (233.6 source fps, nvdec decode)
+[E] bn300_p1   video22        233 frames, adapted on 229 units (29 batches, first 300 frames, prior 1), 3.6s
+[detector] GridTrackNet prepass: 483 source frames, 483 detections, 120 batched calls across 1 phase(s) in 1.9s (253.8 source fps, nvdec decode)
+[E] bn300_p1   video23        483 frames, adapted on 296 units (37 batches, first 300 frames, prior 1), 5.1s
+[detector] GridTrackNet prepass: 128 source frames, 128 detections, 31 batched calls across 1 phase(s) in 0.5s (264.8 source fps, nvdec decode)
+[E] bn300_p1   video43        128 frames, adapted on 124 units (16 batches, first 300 frames, prior 1), 2.0s
+[detector] GridTrackNet prepass: 202 source frames, 202 detections, 50 batched calls across 1 phase(s) in 0.7s (284.7 source fps, nvdec decode)
+[E] bn300_p1   video44        202 frames, adapted on 198 units (25 batches, first 300 frames, prior 1), 2.8s
+[detector] GridTrackNet prepass: 47 source frames, 47 detections, 11 batched calls across 1 phase(s) in 0.2s (192.6 source fps, nvdec decode)
+[E] bn300_p1   video45        47 frames, adapted on 43 units (6 batches, first 300 frames, prior 1), 1.8s
+[detector] GridTrackNet prepass: 901 source frames, 901 detections, 225 batched calls across 1 phase(s) in 2.5s (355.2 source fps, nvdec decode)
+[E] bn300_p1   video46        901 frames, adapted on 296 units (37 batches, first 300 frames, prior 1), 5.5s
