@@ -23,7 +23,7 @@ from finetune.training.clips import ClipSelection, find_clips
 from finetune.training.dataset import (TRANSLATE_PX, Augmenter, UnitDataset, compress, make_target, reverse, translate,
                                        translate_limits)
 from finetune.training.frame_cache import DATA_VERSION, TrainingUnit, prepare_clip, training_targets
-from finetune.training.loop import evaluate_loss, fresh_model, save_weights, train_epoch
+from finetune.training.loop import Validation, evaluate_loss, fresh_model, save_weights, train_epoch
 from finetune.training.metrics import promotion_improves
 from tennis_tracker.ball_models import model_class
 from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
@@ -287,7 +287,8 @@ def test_a_heatmap_run_writes_every_file_with_the_pt_suffix(tmp_path, capsys):
     args.run_dir.mkdir()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     scaler = torch.amp.GradScaler("cuda", enabled=False)
-    with patch.object(training, "train_epoch", side_effect=[0.5, 0.4]), patch.object(training, "evaluate_loss", side_effect=[0.3, 0.2]):
+    with patch.object(training, "train_epoch", side_effect=[0.5, 0.4]), \
+            patch.object(training, "evaluate", side_effect=[Validation(0.3), Validation(0.2)]):
         selection = training.fit(args, model, None, object(), optimizer, scaler, torch.device("cpu"),
                                  lambda weights: training.metrics_of(0.8 if weights.suffix == ".pt" else -1.0, 0.0))
     assert selection.best_path == args.run_dir / "best.pt" and selection.best_metrics.recall == 0.8
@@ -682,7 +683,7 @@ def scripted_run(tmp_path, argv, train_losses, val_losses, scored, scoring=True,
         optimizer.step()
         return train_losses[int(model.convs[0].bias[0]) - 1]
     with patch.object(training, "train_epoch", side_effect=train_epoch), \
-            patch.object(training, "evaluate_loss", side_effect=val_losses):
+            patch.object(training, "evaluate", side_effect=[Validation(loss) for loss in val_losses]):
         selection = training.fit(args, model, None, object() if validate else None, optimizer, scaler, torch.device("cpu"),
                                  score if scoring else None, progress)
     return args, selection, calls

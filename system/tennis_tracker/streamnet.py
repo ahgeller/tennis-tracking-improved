@@ -40,11 +40,27 @@ heat biases start at HeatmapNet's ``HEAT_PRIOR``. It holds no state between unit
 ``memory_s4`` removed on 2026-10-26 lost to its own control, and this keeps the five-frame window.
 ``reparameterize`` (``repvgg.fuse_for_inference``) fuses the deployed network to plain 3x3
 convolutions; the ``.pt`` record is the trainable form (``heatmapnet.save_model``/``read_record``).
+
+The visibility head (optional, ``vis_head``). The selector cannot tell a frame the network looked
+at and saw no ball from one it missed, and fills the gap either way (the research of 2026-10-31:
+at e60 the interpolated rows earned 7 hits against 33 false alarms). A frame-level answer to "is
+a ball visible here" is the signal it lacks, and the heat map does not give it: a peak's height
+is a cell's confidence, not the frame's. ``vis`` is a global average pool of the fused stride-16
+features (``fuse16``'s output, ``DECODER_CHANNELS[0]`` channels at 48x27 for the full input) and
+one linear layer to ``VIS_LOGITS`` logits per unit, one per frame of the unit (under 0.01 GMAC;
+the fused features already carry the four transitions, so frame 0 is answered through the first
+transition's difference fields like everything else). It is an extra output, not a change to the
+contract: ``forward(value, return_vis=True)`` returns ``(grids, logits)`` and the default call the
+tracker, ``decode_predictions``, the ONNX export and the TensorRT engine make returns the 15
+channels alone, so a record with the head loads and runs wherever one without it does. The
+trainer trains it with ``loop.visibility_loss`` (BCE against the labels' visible and absent
+frames) and ``save_model`` stores it in the record, from which ``load_model`` rebuilds it
+(``has_vis_head``). A bounce and a hit logit belong here too, once the trainer reads their labels.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import List, Mapping, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import nn
@@ -62,9 +78,17 @@ PAIRS_PER_UNIT = FRAMES_PER_UNIT - 1      # a unit's transitions: (frame 1 | fra
 TRANSITION_CHANNELS = 9                   # RGB, the positive and the negative difference fields
 ENCODER_CHANNELS = (16, 32, 64, 128)      # at strides 2, 4, 8 and 16
 DECODER_CHANNELS = (128, 64, 48)          # at strides 16, 8 and 4
+VIS_LOGITS = FRAMES_PER_UNIT              # the visibility head's outputs: "a ball is visible" per frame of the unit
+VIS_PREFIX = "vis."                       # the head's keys in the state dict, how load_model knows a record has one
 
 # One transition's features as the encoder hands them on: strides 4, 8 and 16.
 PairFeatures = Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+Output = Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]      # the grids, or (grids, visibility logits)
+
+
+def has_vis_head(state_dict: Mapping[str, torch.Tensor]) -> bool:
+    """Whether a StreamNet state dict carries the visibility head (any key under ``VIS_PREFIX``)."""
+    return any(key.startswith(VIS_PREFIX) for key in state_dict)
 
 
 def transition(frame: torch.Tensor, previous: torch.Tensor) -> torch.Tensor:
@@ -80,7 +104,9 @@ class StreamNet(nn.Module):
     ``INPUT_CHANNELS`` and ``FRAMES_PER_UNIT`` are the contract it shares with ``HeatmapNet``
     (``ball_models``). ``forward`` takes the 15-channel unit; ``encode_frame`` and ``decode`` are
     the same computation split so a caller can encode every transition once and decode each unit
-    from the four it cached (``forward`` is exactly ``decode`` of the four ``encode_frame``)."""
+    from the four it cached (``forward`` is exactly ``decode`` of the four ``encode_frame``).
+    With `vis_head` (or after ``enable_vis_head``) the network also carries the visibility head
+    (module docstring), answered only when a call asks for it with ``return_vis``."""
 
     ARCH = ARCH
     GRID_COLS = GRID_COLS
@@ -88,8 +114,9 @@ class StreamNet(nn.Module):
     INPUT_CHANNELS = INPUT_CHANNELS
     FRAMES_PER_UNIT = FRAMES_PER_UNIT
     PAIRS_PER_UNIT = PAIRS_PER_UNIT
+    VIS_LOGITS = VIS_LOGITS
 
-    def __init__(self) -> None:
+    def __init__(self, vis_head: bool = False) -> None:
         super().__init__()
         e2, e4, e8, e16 = ENCODER_CHANNELS
         d16, d8, d4 = DECODER_CHANNELS
@@ -102,7 +129,31 @@ class StreamNet(nn.Module):
         self.fuse8 = nn.Sequential(repvgg.conv_bn_relu(pairs * e8 + d16, d8, 1), repvgg.RepVGGBlock(d8, d8))
         self.fuse4 = nn.Sequential(repvgg.conv_bn_relu(pairs * e4 + d8, d4, 1), repvgg.RepVGGBlock(d4, d4))
         self.head = nn.Conv2d(d4, FRAMES_PER_UNIT * 3, 3, padding=1)
+        self.vis: Optional[nn.Linear] = None
         self.reset_parameters()
+        if vis_head:
+            self.enable_vis_head()
+
+    @property
+    def has_vis_head(self) -> bool:
+        return self.vis is not None
+
+    def enable_vis_head(self) -> "StreamNet":
+        """Give the network the visibility head (a fresh one, on the parameters' device and dtype)
+        when it has none: a fine-tune of a record without one starts it here. Returns `self`."""
+        if self.vis is None:
+            reference = self.head.weight
+            self.vis = nn.Linear(DECODER_CHANNELS[0], VIS_LOGITS).to(reference.device, reference.dtype)
+            self.reset_vis_head()
+        return self
+
+    def reset_vis_head(self) -> None:
+        """The visibility head at its prior: CenterNet's small weights and a bias answering 0.5
+        (a logit of 0), so a fresh head neither disturbs the heat loss nor claims anything."""
+        assert self.vis is not None
+        with torch.no_grad():
+            nn.init.normal_(self.vis.weight, std=repvgg.HEAD_STD)
+            nn.init.zeros_(self.vis.bias)
 
     def reset_parameters(self) -> None:
         """Kaiming-normal convolutions (fan in, the norm ``loop.hold_conv_scale`` holds) with zero
@@ -113,6 +164,8 @@ class StreamNet(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
         repvgg.reset_head(self.head)
+        if self.vis is not None:
+            self.reset_vis_head()
 
     def encode_frame(self, frame: torch.Tensor, previous: torch.Tensor) -> PairFeatures:
         """The features of the step from `previous` to `frame` (``(N, 3, H, W)`` RGB in [0, 1],
@@ -125,26 +178,34 @@ class StreamNet(nn.Module):
         eighth = self.down8(quarter)
         return quarter, eighth, self.down16(eighth)
 
-    def decode(self, pairs: Sequence[PairFeatures]) -> torch.Tensor:
+    def decode(self, pairs: Sequence[PairFeatures], return_vis: bool = False) -> Output:
         """The 15-channel sigmoid output at stride 4 of one unit from its ``PAIRS_PER_UNIT``
         transitions' features, oldest first (``encode_frame`` of frames 1 to 4 of the unit, each
-        with the frame before it)."""
+        with the frame before it); with `return_vis`, ``(grids, visibility logits)``."""
         if len(pairs) != PAIRS_PER_UNIT:
             raise ValueError(f"a unit is decoded from {PAIRS_PER_UNIT} transitions, not {len(pairs)}")
         quarter, eighth, bottom = (torch.cat([pair[level] for pair in pairs], dim=1) for level in range(3))
-        return self._decode(quarter, eighth, bottom)
+        return self._decode(quarter, eighth, bottom, return_vis)
 
-    def _decode(self, quarter: torch.Tensor, eighth: torch.Tensor, bottom: torch.Tensor) -> torch.Tensor:
-        up = self.fuse16(bottom)
-        up = nn.functional.interpolate(up, scale_factor=2, mode="nearest")
+    def _decode(self, quarter: torch.Tensor, eighth: torch.Tensor, bottom: torch.Tensor,
+                return_vis: bool = False) -> Output:
+        fused = self.fuse16(bottom)
+        up = nn.functional.interpolate(fused, scale_factor=2, mode="nearest")
         up = self.fuse8(torch.cat([eighth, up], dim=1))
         up = nn.functional.interpolate(up, scale_factor=2, mode="nearest")
         up = self.fuse4(torch.cat([quarter, up], dim=1))
-        return torch.sigmoid(self.head(up))
+        grids = torch.sigmoid(self.head(up))
+        if not return_vis:
+            return grids
+        if self.vis is None:
+            raise ValueError(f"this {type(self).__name__} has no visibility head (enable_vis_head adds one)")
+        return grids, self.vis(fused.mean(dim=(2, 3)))
 
-    def forward(self, value: torch.Tensor) -> torch.Tensor:
+    def forward(self, value: torch.Tensor, return_vis: bool = False) -> Output:
         """The unit's output: its four transitions encoded as one batch of ``4N`` (the same
-        weights for each), their features regrouped per unit in temporal order, decoded."""
+        weights for each), their features regrouped per unit in temporal order, decoded. The
+        default is the 15-channel contract alone; `return_vis` adds the visibility logits,
+        ``(N, VIS_LOGITS)``, as a second tensor (a network without the head is a ValueError)."""
         batch, _, height, width = value.shape
         frames = value.reshape(batch, FRAMES_PER_UNIT, 3, height, width)
         current = frames[:, 1:].reshape(batch * PAIRS_PER_UNIT, 3, height, width)
@@ -152,7 +213,7 @@ class StreamNet(nn.Module):
         features = self.encode_frame(current, previous)
         quarter, eighth, bottom = (level.reshape(batch, PAIRS_PER_UNIT * level.shape[1], *level.shape[2:])
                                    for level in features)
-        return self._decode(quarter, eighth, bottom)
+        return self._decode(quarter, eighth, bottom, return_vis)
 
     def reparameterize(self) -> "StreamNet":
         """The deployed network, in place and in eval mode: RepVGG branches and BatchNorm folded
@@ -172,13 +233,17 @@ def stream_units(model: StreamNet, frames: Sequence[torch.Tensor]) -> List[torch
     for index in range(1, len(frames)):
         cached.append(model.encode_frame(frames[index], frames[index - 1]))
         if len(cached) >= PAIRS_PER_UNIT:
-            outputs.append(model.decode(cached[-PAIRS_PER_UNIT:]))
+            grids = model.decode(cached[-PAIRS_PER_UNIT:])
+            assert isinstance(grids, torch.Tensor)
+            outputs.append(grids)
     return outputs
 
 
 def load_model(weights: Path, device: torch.device) -> StreamNet:
     """The FP16 eval network from the ``.pt`` record ``heatmapnet.save_model`` wrote, in its
-    trainable form (the trainer fine-tunes from it); ``reparameterize`` gives the deployed one."""
-    model = StreamNet()
-    model.load_state_dict(read_record(Path(weights), ARCH)["state_dict"])
+    trainable form (the trainer fine-tunes from it), with the visibility head when the record
+    carries one (``has_vis_head``); ``reparameterize`` gives the deployed one."""
+    state_dict = read_record(Path(weights), ARCH)["state_dict"]
+    model = StreamNet(vis_head=has_vis_head(state_dict))
+    model.load_state_dict(state_dict)
     return model.eval().to(device).half()

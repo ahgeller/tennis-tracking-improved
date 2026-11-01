@@ -42,8 +42,11 @@ last epoch.
 | `HOLDOUT` | `mixed_v1` | The held-out set the epochs are scored on. |
 | `SELECTION_RUN` | empty | Set it to a finished run's `TAG` for the all-clips run that makes the deployable weights. |
 | `LR` | 1.0 | Adadelta. It may be lowered on a resume (for example to 0.3); the trainer records the schedule. |
+| `EMA`, `EMA_DECAY` | on, 0.999 | An exponential moving average of the weights, written every epoch (`last_ema.pt`) and scored beside the live weights on every scored epoch (`best_ema.pt`, the `ema_*` columns of `results.csv`). The winner stays the live network's; the run compares the two. Scoring takes twice as long. |
+| `VIS_HEAD`, `VIS_WEIGHT` | off, 0.1 | `stream_s4` only: trains the per-frame visibility head ("a ball is visible") at this weight of the heat loss, against the visible and absent labels. `results.csv` gains its held-out AUC (`vis_auc`) and balanced accuracy (`vis_bacc`). The 15-channel output is unchanged. |
 
-The evidence for each default is in `audit/records/opt_training.md`.
+The evidence for each default is in `audit/records/opt_training.md`; `EMA` and `VIS_HEAD` are the experiments F and G of
+the stream_s4 research of 2026-10-31 (`finetune/training/loop.py` has the reasoning), first run in `TAG` `s4_fg1`.
 
 ## 4. Optional: pseudo-labelled data
 
@@ -78,5 +81,7 @@ Two public sources (also in `finetune/DATASETS.md` section 2.5):
 
 Download `best.pt` from `MyDrive/tennis_finetune/runs/<TAG>/` and score it on the PC:
 `evaluate_archive.py --archive finetune --mode raw --holdout mixed_v1 --gridtracknet-weights best.pt`.
+With `EMA`, `best_ema.pt` sits beside it and `winner.json` sets its metrics against the live best epoch's (`ema.beats_live`);
+a record with the visibility head loads and scores like any other (the head is ignored by the tracker).
 For the deployable weights, set `SELECTION_RUN` to that `TAG` with a new `TAG` and `EPOCHS` 0, then Run all.
 `python finetune/ft.py promote --weights winner.pt` makes the winner the tracker's model (with a backup).
