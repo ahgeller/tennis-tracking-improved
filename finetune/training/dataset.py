@@ -28,8 +28,13 @@ the frames (``UnitDataset.apply``); the draws for the newer augmentations are ma
 older ones, so a run that does not ask for them draws exactly what it always did.
 
 An example is ``(images, target)``; a dataset whose units carry ``valid`` (pseudo-labelled clips)
-or that reads cached teacher maps (`teacher_maps`, ``distill.TeacherMaps``) answers ``(images,
-target, valid)`` or ``(images, target, valid, teacher)`` for every unit instead (``loop.unpack``).
+or ``gap`` (``frame_cache.gap_frames``: a hand-labelled clip with a short occlusion), or that
+reads cached teacher maps (`teacher_maps`, ``distill.TeacherMaps``), answers ``(images, target,
+valid)`` or ``(images, target, valid, teacher)`` for every unit instead (``loop.unpack``). The
+``valid`` tensor holds one frame code per frame (``frame_codes``): ``FRAME_NONE`` for a frame
+without a label, ``FRAME_LABEL`` for a labelled frame and ``FRAME_GAP`` for an absent label inside
+a rally; every loss reads it as the 0/1 mask it always was, and the visibility loss alone may
+weight the gap frames (``loop.visibility_loss``).
 The cached maps follow the flip, the shift and the time reversal (``distill.flip_maps`` and its
 neighbours), so with them a shift is held to whole cells of the model's grid; a pasted ball is
 written into them as into the target.
@@ -54,6 +59,7 @@ from finetune.training import copy_paste, distill
 from finetune.training.frame_cache import Target, TrainingUnit
 
 AUGMENTATIONS = ("basic", "strong", "translate", "reverse", "compress", "copypaste")
+FRAME_NONE, FRAME_LABEL, FRAME_GAP = 0.0, 1.0, 2.0     # a frame's code in the ``valid`` tensor (module docstring)
 HEAT_SIGMA_CELLS = 1.0         # the Gaussian heat target's sigma, in cells of the model's grid
 HEAT_RADIUS_SIGMAS = 3         # ... and how far it reaches before it is cut to zero
 TRANSLATE_PX = 20              # the largest shift, in cache pixels (at 768x432), either way on each axis
@@ -261,6 +267,16 @@ def shifted_points(points: Sequence[Target], dx: int, dy: int, width: int, heigh
     return moved
 
 
+def frame_codes(valid: Sequence[bool], gap: Optional[Sequence[bool]]) -> torch.Tensor:
+    """The ``valid`` tensor of one unit: ``FRAME_NONE`` where `valid` is False, ``FRAME_GAP`` where
+    `gap` is set (a labelled, absent frame inside a rally), ``FRAME_LABEL`` elsewhere."""
+    codes = [FRAME_LABEL if counts else FRAME_NONE for counts in valid]
+    for index, flagged in enumerate(gap or ()):
+        if flagged and codes[index] == FRAME_LABEL:
+            codes[index] = FRAME_GAP
+    return torch.tensor(codes, dtype=torch.float32)
+
+
 class UnitDataset(Dataset):
     """The cached units as (images, target) pairs: the five frames as one (15, H, W) float tensor
     and ``make_target`` on `arch`'s grid, with the augmentations in `augmentations` drawn when
@@ -282,7 +298,7 @@ class UnitDataset(Dataset):
         self.banks_path, self.teacher_root = banks, teacher_maps
         self.banks: Optional[copy_paste.Banks] = None          # loaded in the process that reads
         self.teacher: Optional[distill.TeacherMaps] = None
-        self.with_valid = teacher_maps is not None or any("valid" in sample for sample in samples)
+        self.with_valid = teacher_maps is not None or any("valid" in sample or "gap" in sample for sample in samples)
         # The cached teacher maps move with a shift only by whole cells of the model's grid.
         self.cell_px = WIDTH // model_class(arch).GRID_COLS if teacher_maps is not None else 1
         self.rng: Optional[Augmenter] = None     # made in the process that reads, see Augmenter
@@ -374,6 +390,7 @@ class UnitDataset(Dataset):
         images = self.read_frames(sample, augmentation.flip)
         points = flipped(sample["points"], width) if augmentation.flip else sample["points"]
         valid = list(sample.get("valid", [True] * FRAMES_PER_UNIT))
+        gap = list(sample.get("gap", [False] * FRAMES_PER_UNIT))
         extra: Optional[List[Target]] = None
         if augmentation.paste is not None:
             images = copy_paste.apply_paste(np.ascontiguousarray(images), self.load_banks(), augmentation.paste)
@@ -388,7 +405,7 @@ class UnitDataset(Dataset):
                 extra = shifted_points(extra, *augmentation.shift, width, height)
         if augmentation.reverse:
             images, points = reverse(images, points)
-            valid = valid[::-1]
+            valid, gap = valid[::-1], gap[::-1]
             if extra is not None:
                 extra = extra[::-1]
         if augmentation.compress is not None:
@@ -399,7 +416,7 @@ class UnitDataset(Dataset):
                                               make_target(points, width, height, self.arch, extra))
         if not self.with_valid:
             return example
-        example += (torch.tensor(valid, dtype=torch.float32),)
+        example += (frame_codes(valid, gap),)
         if self.teacher_root is not None:
             pasted = None if extra is None else make_target([None] * FRAMES_PER_UNIT, width, height, self.arch, extra)
             example += (self.teacher_answer(sample, augmentation, pasted),)

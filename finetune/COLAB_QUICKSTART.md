@@ -44,6 +44,7 @@ last epoch.
 | `LR` | 1.0 | Adadelta. It may be lowered on a resume (for example to 0.3); the trainer records the schedule. |
 | `EMA`, `EMA_DECAY` | on, 0.999 | An exponential moving average of the weights, written every epoch (`last_ema.pt`) and scored beside the live weights on every scored epoch (`best_ema.pt`, the `ema_*` columns of `results.csv`). The winner stays the live network's; the run compares the two. Scoring takes twice as long. |
 | `VIS_HEAD`, `VIS_WEIGHT` | off, 0.1 | `stream_s4` only: trains the per-frame visibility head ("a ball is visible") at this weight of the heat loss, against the visible and absent labels. `results.csv` gains its held-out AUC (`vis_auc`) and balanced accuracy (`vis_bacc`). The 15-channel output is unchanged. |
+| `VIS_POOL`, `VIS_GAP_WEIGHT` | `global`, 1.0 | With `VIS_HEAD`: the head's variant (`global`, the s4_fg1 head, a mean over the whole unit; `peak`, a per-frame answer read at each frame's own heat peak, `streamnet.PeakHead`) and the loss weight of the gap frames, the absent labels inside a rally (runs of at most 3 flanked by visible labels) that the selector bridges; 1 is off. `results.csv` gains `vis_gap_auc`, the head's AUC on those frames alone, the number that must move off 0.5 for the gate to work. |
 
 The evidence for each default is in `audit/records/opt_training.md`; `EMA` and `VIS_HEAD` are the experiments F and G of
 the stream_s4 research of 2026-10-31 (`finetune/training/loop.py` has the reasoning), first run in `TAG` `s4_fg1`.

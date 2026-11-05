@@ -89,6 +89,12 @@ def test_the_first_cells_unpack_the_zip_from_drive_check_the_code_and_build_the_
     exec(compile(headed.replace("EMA = True", "EMA = False"), "settings", "exec"), namespace)
     with_head = build_parser().parse_args(namespace["cmd"][4:])
     assert with_head.arch == "stream_s4" and with_head.vis_head and with_head.vis_weight == pytest.approx(0.1) and not with_head.ema
+    assert with_head.vis_pool == "global" and with_head.vis_gap_weight == pytest.approx(1.0)      # the first head, gap weight off
+    assert "--vis-pool" not in cmd                                                                # nothing of the head without VIS_HEAD
+    peak = headed.replace('VIS_POOL = "global"', 'VIS_POOL = "peak"').replace("VIS_GAP_WEIGHT = 1.0", "VIS_GAP_WEIGHT = 4.0")
+    exec(compile(peak, "settings", "exec"), namespace)
+    with_peak = build_parser().parse_args(namespace["cmd"][4:])
+    assert with_peak.vis_head and with_peak.vis_pool == "peak" and with_peak.vis_gap_weight == pytest.approx(4.0)
     with pytest.raises(SystemExit, match="VIS_HEAD needs a network with the visibility head"):    # heatmap_s4 has none
         exec(compile(runnable(settings).replace("VIS_HEAD = False", "VIS_HEAD = True"), "settings", "exec"), namespace)
     for choice, share in (("both", 0.3), ("model", 1.0)):

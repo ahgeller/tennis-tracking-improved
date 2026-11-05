@@ -42,7 +42,7 @@ def ema_run(tmp_path: Path, argv, scored_live, scored_ema, resume=False, vis=Fal
         return training.metrics_of(answers[len(calls[kind]) - 1], 0.0)
 
     def train_epoch(model, loader, optimizer, scaler, device, epoch, epochs, max_steps, distiller=None, ema=None,
-                    vis_weight=0.0):
+                    vis_weight=0.0, vis_gap_weight=1.0):
         with torch.no_grad():
             model.convs[0].bias += 1.0
         if ema is not None:
@@ -154,7 +154,7 @@ def test_config_json_records_the_average_and_the_head_and_same_run_refuses_switc
                                              "--vis-head", "--vis-weight", "0.2"])
     plain, flagged = training.run_config(off, [], [], {}), training.run_config(on, [], [], {})
     assert plain["ema"] is None and plain["vis_head"] is None
-    assert flagged["ema"] == {"decay": 0.99} and flagged["vis_head"] == {"weight": 0.2}
+    assert flagged["ema"] == {"decay": 0.99} and flagged["vis_head"] == {"weight": 0.2, "pool": "global", "gap_weight": 1.0}
     assert {"ema", "vis_head"} <= set(training.RECIPE_FIELDS)
     training.same_run(flagged, flagged)
     older = {key: value for key, value in plain.items() if key not in ("ema", "vis_head")}      # recorded before the fields

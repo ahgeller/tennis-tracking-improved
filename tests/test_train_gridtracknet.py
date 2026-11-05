@@ -414,7 +414,8 @@ def test_prepare_clip_caches_the_needed_frames_and_describes_the_units(tmp_path)
                                                   for start in (0, 2, 4, 6)]
     assert units[0]["points"] == [[10.0, 20.0], [11.0, 20.0], [12.0, 20.0], None, [14.0, 20.0]]
     assert units[0] == TrainingUnit(clip="c", source="custom", indices=[0, 1, 2, 3, 4], frames=units[0]["frames"],
-                                    points=units[0]["points"], size=list(SIZE))
+                                    points=units[0]["points"], size=list(SIZE), gap=[False, False, False, True, False])
+    assert "gap" not in units[3]                                      # frames 6 to 10: no absent label, no flag
     assert record["visible"] == sum(point is not None for unit in units for point in unit["points"])
     cached = sorted(p.name for p in (data / "frames" / "c").iterdir())
     assert cached == [f"{i:06d}.png" for i in range(11)]            # the last unit is 6..10; frame 11 is in none

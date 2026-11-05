@@ -101,7 +101,13 @@ And two the stream_s4 Colab run of 2026-11 tests (``loop.py``'s docstring has th
 - ``--vis-head``: the network's visibility head (``streamnet.StreamNet``), trained with
   ``loop.visibility_loss`` at ``--vis-weight`` of the heat loss against the labels' visible and
   absent frames; ``results.csv`` gains the head's held-out AUC and balanced accuracy
-  (``vis_auc``, ``vis_bacc``, and ``ema_vis_*`` for the average). Recorded as ``vis_head``.
+  (``vis_auc``, ``vis_bacc``, and ``ema_vis_*`` for the average). ``--vis-pool`` picks the head's
+  variant (``streamnet.VIS_POOLS``: ``global``, the first head, or ``peak``, the per-frame answer
+  read at each frame's own heat peak), and ``--vis-gap-weight`` weights the loss terms of the gap
+  frames, the absent labels inside a rally (``frame_cache.gap_frames``) that the selector bridges;
+  ``vis_gap_auc`` (and ``ema_vis_gap_auc``) is the head's AUC on those frames alone. Recorded as
+  ``vis_head`` (``weight``, ``pool``, ``gap_weight``; a run recorded with ``weight`` alone was the
+  global head at gap weight 1, ``vis_head_of_config``).
 """
 
 from __future__ import annotations
@@ -126,6 +132,7 @@ if __name__ == "__main__":          # run as a script: make the repository root 
 
 from tennis_tracker import heatmapnet
 from tennis_tracker.ball_models import ARCHITECTURES, GRIDTRACKNET, HEATMAP_S4, arch_of, load_ball_model, weights_suffix
+from tennis_tracker.streamnet import VIS_POOLS
 from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH
 from finetune.data.detector_metrics import DetectorMetrics
 from finetune.data.fileio import atomic_binary, atomic_csv, copy_atomic, write_atomic
@@ -147,7 +154,10 @@ DEFAULT_EPOCHS = 10
 LEGACY_RESULTS_COLUMNS = ("epoch", "train_loss", "val_loss", "seconds", "score_seconds", *DetectorMetrics._fields)
 EMA_PREFIX = "ema_"        # the averaged network's columns in results.csv: its metric fields under this prefix
 EMA_COLUMNS = tuple(EMA_PREFIX + field for field in DetectorMetrics._fields)
-RESULTS_COLUMNS = (*LEGACY_RESULTS_COLUMNS, "vis_auc", "vis_bacc", "ema_val_loss", "ema_vis_auc", "ema_vis_bacc", *EMA_COLUMNS)
+RESULTS_COLUMNS = (*LEGACY_RESULTS_COLUMNS, "vis_auc", "vis_bacc", "ema_val_loss", "ema_vis_auc", "ema_vis_bacc", *EMA_COLUMNS,
+                   "vis_gap_auc", "ema_vis_gap_auc")      # the gap columns last: rows written before them pad (whole_row)
+GAP_COLUMNS = 2            # ... how many
+VIS_POOL_DEFAULT, VIS_GAP_WEIGHT_DEFAULT = "global", 1.0   # what a vis_head record without the fields meant
 CHECKPOINT = "checkpoint.pt"
 EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz (or .pt), unless --no-keep-epochs
 EMA_SUFFIX = "_ema"        # the averaged weights' files: last_ema.pt, best_ema.pt, epochs/epoch_NNN_ema.pt
@@ -189,7 +199,8 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
             "distill": None if distilled is None else distilled.record(),
             "pseudo": None if not args.pseudo else {"dir": str(args.pseudo), "share": args.pseudo_share},
             "ema": None if not args.ema else {"decay": args.ema_decay},
-            "vis_head": None if not args.vis_head else {"weight": args.vis_weight},
+            "vis_head": None if not args.vis_head else {"weight": args.vis_weight, "pool": args.vis_pool,
+                                                       "gap_weight": args.vis_gap_weight},
             "clips": names,
             "validation_clips": val_clips, "holdout": args.holdout,
             "val_clips": args.val_clips,
@@ -201,6 +212,16 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
             "lr_schedule": lr_schedule or [{"epoch": 1, "lr": args.lr}],
             "seed": args.seed, "score_every": args.score_every,
             "from_scratch": args.from_scratch, "weights": str(args.weights)}
+
+
+def vis_head_of_config(config: dict) -> Optional[dict]:
+    """The visibility head a run's ``config.json`` records (``vis_head``), None without one; a run
+    recorded before ``pool`` and ``gap_weight`` existed trained the global head at gap weight 1."""
+    recorded = config.get("vis_head")
+    if recorded is None:
+        return None
+    return {"weight": recorded.get("weight"), "pool": recorded.get("pool", VIS_POOL_DEFAULT),
+            "gap_weight": recorded.get("gap_weight", VIS_GAP_WEIGHT_DEFAULT)}
 
 
 def distill_config(args: argparse.Namespace) -> Optional[DistillConfig]:
@@ -374,7 +395,8 @@ def same_run(saved: dict, current: dict, lr_drop: bool = False) -> None:
     for field in current:
         if field in RUN_OUTCOMES or field in RATE_FIELDS:
             continue
-        recorded = arch_of_config(saved) if field == "arch" else saved.get(field)
+        recorded = (arch_of_config(saved) if field == "arch" else vis_head_of_config(saved) if field == "vis_head"
+                    else saved.get(field))
         if recorded != current[field]:
             raise ValueError(f"--resume would continue a different run: config.json has {field}={recorded!r}, "
                              f"this run {field}={current[field]!r}")
@@ -417,16 +439,16 @@ def results_row(epoch: int, train_loss: float, val_loss: Optional[float], second
     ema_loss, ema_auc, ema_bacc = ((None, None, None) if ema_validation is None
                                    else (ema_validation.loss, ema_validation.vis_auc, ema_validation.vis_balanced_accuracy))
     row += [cell(ema_loss, 8), cell(ema_auc), cell(ema_bacc)]
-    return row + metric_cells(ema_metrics)
+    row += metric_cells(ema_metrics)
+    return row + [cell(None if validation is None else validation.vis_gap_auc),
+                  cell(None if ema_validation is None else ema_validation.vis_gap_auc)]
 
 
 def whole_row(row: List[str]) -> Optional[List[str]]:
-    """`row` padded to ``RESULTS_COLUMNS`` when it is a whole results row: this layout's, or the
-    layout before the EMA and visibility columns (a run begun under the older trainer resumes
-    with its rows kept, the new columns empty); None for a fragment."""
-    if len(row) == len(RESULTS_COLUMNS):
-        return row
-    if len(row) == len(LEGACY_RESULTS_COLUMNS):
+    """`row` padded to ``RESULTS_COLUMNS`` when it is a whole results row: this layout's, the
+    layout before the gap columns, or the one before the EMA and visibility columns (a run begun
+    under an older trainer resumes with its rows kept, the new columns empty); None for a fragment."""
+    if len(row) in (len(RESULTS_COLUMNS), len(LEGACY_RESULTS_COLUMNS), len(RESULTS_COLUMNS) - GAP_COLUMNS):
         return row + [""] * (len(RESULTS_COLUMNS) - len(row))
     return None
 
@@ -545,7 +567,7 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
         started = time.perf_counter()
         torch.manual_seed(args.seed + epoch)
         train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch, args.epochs, args.max_train_steps,
-                                 distiller, ema, args.vis_weight if visibility else 0.0)
+                                 distiller, ema, args.vis_weight if visibility else 0.0, args.vis_gap_weight)
         check_finite(model)
         name, variance = largest_running_variance(model)
         if variance > HALF_MAX * VARIANCE_WARNING_SHARE:
@@ -588,6 +610,8 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
         validated = "" if val_loss is None else f" val={val_loss:.6f}"
         if validation is not None and validation.vis_auc is not None:
             validated += f" visAUC={validation.vis_auc:.3f}"
+            if validation.vis_gap_auc is not None:
+                validated += f" gapAUC={validation.vis_gap_auc:.3f}"
         scored = (f" | held-out recall={metrics.recall:.3f} wrong={metrics.wrong:.3f} falseAlarm={metrics.false_alarm:.3f}"
                   f" score={epoch_score(metrics):+.3f} ({score_seconds / 60:.1f} min) | best epoch {best_epoch}"
                   if metrics is not None else "")
@@ -596,6 +620,8 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
                        f"falseAlarm={ema_metrics.false_alarm:.3f} score={epoch_score(ema_metrics):+.3f}"
                        + (f" visAUC={ema_validation.vis_auc:.3f}"
                           if ema_validation is not None and ema_validation.vis_auc is not None else "")
+                       + (f" gapAUC={ema_validation.vis_gap_auc:.3f}"
+                          if ema_validation is not None and ema_validation.vis_gap_auc is not None else "")
                        + f" | best EMA epoch {best_ema_epoch}")
         print(f"[train] epoch {epoch}: train={train_loss:.6f}{validated} ({seconds / 60:.1f} min){scored}", flush=True)
     if score is None:
@@ -774,16 +800,17 @@ def train(args: argparse.Namespace) -> None:
         UnitDataset(args.data_dir, manifest["val"], augment=False, arch=args.arch), batch_size=args.batch_size,
         num_workers=args.workers, pin_memory=device.type == "cuda")
     if args.from_scratch:
-        model = fresh_model(device, args.arch, args.vis_head)
+        model = fresh_model(device, args.arch, args.vis_head, args.vis_pool)
         print(f"[train] fresh {args.arch} (random init, {model.GRID_COLS}x{model.GRID_ROWS} grid)")
     else:
         model = load_ball_model(args.weights, device).float()
         if args.vis_head:
-            with_vis_head(model)
+            with_vis_head(model, args.vis_pool)
         print(f"[train] fine-tuning {args.arch} from {args.weights}")
     model.train()
     if args.vis_head:
-        print(f"[train] visibility head on: BCE x{args.vis_weight:g} beside the heat loss, held-out AUC in results.csv")
+        print(f"[train] visibility head on ({args.vis_pool}): BCE x{args.vis_weight:g} beside the heat loss, the gap "
+              f"frames x{args.vis_gap_weight:g}; held-out AUC (vis_auc) and gap-frame AUC (vis_gap_auc) in results.csv")
     ema = EMA(model, args.ema_decay) if args.ema else None      # before the distiller puts its taps on the model
     if ema is not None:
         print(f"[train] weight average on: decay {args.ema_decay:g} per step, scored beside the live weights "
@@ -963,6 +990,13 @@ def build_parser() -> argparse.ArgumentParser:
                                  "vis_bacc). The 15-channel output the tracker reads is unchanged")
     visibility.add_argument("--vis-weight", type=float, default=VIS_LOSS_WEIGHT, metavar="W",
                             help=f"The visibility loss's weight beside the heat loss (default {VIS_LOSS_WEIGHT})")
+    visibility.add_argument("--vis-pool", choices=VIS_POOLS, default=VIS_POOL_DEFAULT,
+                            help="The head's variant: global (the default: a global average of the fused stride-16 "
+                                 "features, one linear layer) or peak (per frame, the stride-4 features at that frame's "
+                                 "own heat peak with its top heat values, a small MLP; streamnet.PeakHead)")
+    visibility.add_argument("--vis-gap-weight", type=float, default=VIS_GAP_WEIGHT_DEFAULT, metavar="W",
+                            help="Weight of the visibility loss on the gap frames, the absent labels in a run of at most "
+                                 "3 flanked by visible labels (the occlusions the selector bridges; default 1: off)")
     parser.add_argument("--oversample", nargs="*", metavar="SOURCE=WEIGHT",
                         help="Relative sampling weight per source, e.g. custom=6 grid=1 tracknetv2=0.5 (0 drops it from training)")
     parser.add_argument("--oversample-absent", type=float, default=1.0, metavar="K",
@@ -1015,6 +1049,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     if args.lr_drop and not args.resume:
         print("[error] --lr-drop goes with --resume: it lowers the learning rate of the run being continued", file=sys.stderr)
+        return 1
+    if args.vis_gap_weight <= 0:
+        print(f"[error] --vis-gap-weight must be above 0 (1 leaves the gap frames at the other frames' weight), "
+              f"not {args.vis_gap_weight:g}", file=sys.stderr)
         return 1
     try:
         train(args)
