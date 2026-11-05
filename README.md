@@ -219,7 +219,8 @@ wanted, `arch_of` can go back to the suffix alone.
 The winner's weights are promoted by copying them over the workspace's model in
 `system/tennis_tracker/paths.py` (`HEATMAP_WEIGHTS`, `system/models/ball_detector.pt`), which
 `ft.py promote` does with a backup. Since 2026-10-30 the tracker's default (`BALL_WEIGHTS`, what
-`Config.model_path` defaults to) is stream_s4, `system/models/candidates/stream_s4_e60.pt`; the
+`Config.model_path` defaults to) is stream_s4, `system/models/candidates/stream_s4_fg1_e46.pt`
+(since 2026-11-05; `stream_s4_e60.pt` before it); the
 promoted file runs with `--weights`, at the threshold `system/tennis_tracker/ball_weights.py`
 gives its path. On
 2026-10-26 that file became the heat-map control run's winner (ctrl1, the ledger

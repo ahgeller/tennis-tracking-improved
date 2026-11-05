@@ -56,7 +56,7 @@ pip install -r requirements.txt
 FilterPy is not needed: the selector's Kalman filter is plain NumPy.
 
 The model files are not in the repository: `models/README.md` lists the ones a run needs
-(the default ball detector `models/candidates/stream_s4_e60.pt`, `models/ball_detector.pt`,
+(the default ball detector `models/candidates/stream_s4_fg1_e46.pt`, `models/ball_detector.pt`,
 the CatBoost bounce model and the TensorRT engines) and where they come from, and a run
 without the default ball weights says so. TensorRT engines are platform-specific and may
 need to be rebuilt for a different GPU or TensorRT version.
@@ -82,7 +82,8 @@ python clean_tracker.py --input path\to\match.mp4 --tracking-json output\trackin
 ```
 
 Use another CUDA device or detector threshold (without `--conf` a run takes the threshold
-the weights were gated at: 0.42 for the default stream_s4, 0.40 for `models/ball_detector.pt`):
+the weights were gated at: 0.38 for the default stream_s4, 0.42 for the previous default
+`models/candidates/stream_s4_e60.pt`, 0.40 for `models/ball_detector.pt`):
 
 ```powershell
 python clean_tracker.py --device 1 --conf 0.55
@@ -115,7 +116,7 @@ changes: same video, same JSON, same selector.
 
 | weights file | network | status |
 |---|---|---|
-| `.pt` naming `stream_s4` (default: `models/candidates/stream_s4_e60.pt`, at 0.42) | StreamNet, each frame's transition encoded once (`tennis_tracker/streamnet.py`) | the default; its prepass runs in a child process beside pass 1 |
+| `.pt` naming `stream_s4` (default: `models/candidates/stream_s4_fg1_e46.pt`, at 0.38; `stream_s4_e60.pt`, the default before it, at 0.42) | StreamNet, each frame's transition encoded once (`tennis_tracker/streamnet.py`) | the default; its prepass runs in a child process beside pass 1 |
 | `.pt` naming `heatmap_s4` (`models/ball_detector.pt`, at 0.40) | HeatmapNet, 192x108 heat map (`tennis_tracker/heatmapnet.py`) | the previous default, run with `--weights` |
 | `.npz` (`models/legacy/gridtracknet_finetuned.npz`) | GridTrackNet, 48x27 grid (`tennis_tracker/gridtracknet.py`) | the one before, run with `--weights` |
 
@@ -272,7 +273,8 @@ tennis_tracker/render/                   Drawing for pass 2:
   motion_trails.py                         Motion-debug video's raw-motion trails
   summaries.py                             Console summaries printed at the end of a run
 ball_in_play_selector/                   Track construction, scoring, and recovery
-models/candidates/stream_s4_e60.pt      The ball detector the tracker runs (stream_s4)
+models/candidates/stream_s4_fg1_e46.pt  The ball detector the tracker runs (stream_s4)
+models/candidates/stream_s4_e60.pt      The previous default stream_s4 file (--weights)
 models/ball_detector.pt                  The heat-map ball detector (heatmap_s4, --weights)
 models/legacy/                           GridTrackNet .npz files and the old YOLO ball.engine (--weights)
 models/ctb_regr_bounce.cbm               CatBoost bounce model (--court)

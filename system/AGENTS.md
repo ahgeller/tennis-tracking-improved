@@ -4,8 +4,9 @@
 
 This is an offline GPU tennis-video tracker. `clean_tracker.py` runs detection,
 selection and optional rendering (`--weights` points it at other ball-detector
-weights, `.npz` or `.pt`; the default, `models/candidates/stream_s4_e60.pt`, is the
-`stream_s4` network at 0.42, `models/ball_detector.pt` the heat-map network's
+weights, `.npz` or `.pt`; the default, `models/candidates/stream_s4_fg1_e46.pt`, is the
+`stream_s4` network at 0.38 (`candidates/stream_s4_e60.pt`, the default before
+2026-11-05, runs at 0.42), `models/ball_detector.pt` the heat-map network's
 control run of 2026-10-26, run at 0.40, and `models/legacy/` keeps the GridTrackNet
 `.npz` files and the old YOLO `ball.engine`; without `--conf` the threshold is the
 one `tennis_tracker/ball_weights.py` records for the weights). Outputs are an annotated MP4 and

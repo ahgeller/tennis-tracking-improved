@@ -10,9 +10,10 @@ link_worktree_data = importlib.util.module_from_spec(_SPEC)
 sys.modules["link_worktree_data"] = link_worktree_data
 _SPEC.loader.exec_module(link_worktree_data)
 
-ENCODER = "system/models/engine_cache/stream_s4_e60-stream_s4-encoder-b4-d3a601afe5634cc0.engine"
+ENCODER = "system/models/engine_cache/stream_s4_fg1_e46-stream_s4-encoder-b4-bfe4069fc4f7a0fe.engine"
 SHARED_ENGINE = "system/models/engine_cache/ball_detector-heatmap_s4-b4-bec16c318bac1aad.engine"
-CANDIDATE = "system/models/candidates/stream_s4_e60.pt"
+CANDIDATE = "system/models/candidates/stream_s4_fg1_e46.pt"            # the default ball detector
+PREVIOUS_CANDIDATE = "system/models/candidates/stream_s4_e60.pt"        # the default before it, still gated
 
 
 def _write(root: Path, rel: str, data: bytes) -> None:
@@ -36,6 +37,7 @@ def _trees(tmp_path):
     _write(reference, SHARED_ENGINE, b"reference build")
     _write(reference, ENCODER, b"reference encoder")
     _write(reference, CANDIDATE, b"stream_s4")
+    _write(reference, PREVIOUS_CANDIDATE, b"stream_s4 e60")
     here.mkdir()
     return main, reference, here
 
@@ -47,10 +49,11 @@ def test_a_new_worktree_gets_the_reference_candidates_and_engines_as_copies(tmp_
     main, reference, here = _trees(tmp_path)
     link_worktree_data.copy_data(here, main, reference)
     assert (here / CANDIDATE).read_bytes() == b"stream_s4"
+    assert (here / PREVIOUS_CANDIDATE).read_bytes() == b"stream_s4 e60"
     assert (here / ENCODER).read_bytes() == b"reference encoder"
     assert (here / SHARED_ENGINE).read_bytes() == b"reference build"
     assert (here / "system/models/ball_detector.pt").read_bytes() == b"weights"
-    for rel in (*link_worktree_data.REFERENCE_DIRS, CANDIDATE, ENCODER):
+    for rel in (*link_worktree_data.REFERENCE_DIRS, CANDIDATE, PREVIOUS_CANDIDATE, ENCODER):
         assert not _is_link(here / rel), rel
     (here / ENCODER).write_bytes(b"changed in the new tree")
     assert (reference / ENCODER).read_bytes() == b"reference encoder"

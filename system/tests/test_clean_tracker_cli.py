@@ -6,7 +6,7 @@ import pytest
 
 import clean_tracker
 from clean_tracker import resolve_output_paths
-from tennis_tracker.ball_weights import HEATMAP_S4_WEIGHTS, STREAM_S4_WEIGHTS, UNKNOWN_CONF
+from tennis_tracker.ball_weights import HEATMAP_S4_WEIGHTS, STREAM_S4_E60_WEIGHTS, STREAM_S4_WEIGHTS, UNKNOWN_CONF
 from tennis_tracker.config import Config
 from tennis_tracker.paths import BALL_WEIGHTS, STREAM_WEIGHTS
 
@@ -31,7 +31,7 @@ def test_cli_paths_reach_the_config_and_the_output_folder_is_made(tmp_path):
     assert status == 0                                             # no --annotations: nothing to validate
     assert cfg.input_video == str((tmp_path / "in.mp4").resolve())
     assert cfg.tracking_json == str((tmp_path / "t.json").resolve())
-    assert cfg.model_path.endswith("stream_s4_e60.pt")
+    assert cfg.model_path.endswith("stream_s4_fg1_e46.pt")
     assert (tmp_path / "out").is_dir()
 
 
@@ -48,7 +48,8 @@ def test_weights_default_to_stream_s4_and_another_path_reaches_the_config_as_giv
 
 @pytest.mark.parametrize("argv, conf", [
     ([], STREAM_CONF),                                                      # the default, stream_s4
-    (["--weights", "models/candidates/stream_s4_e60.pt"], STREAM_CONF),     # named, relative to system/
+    (["--weights", "models/candidates/stream_s4_fg1_e46.pt"], STREAM_CONF),         # named, relative to system/
+    (["--weights", "models/candidates/stream_s4_e60.pt"], STREAM_S4_E60_WEIGHTS.conf),  # the previous default, at its own threshold
     (["--weights", "models/ball_detector.pt"], HEATMAP_CONF),               # the heat-map network
     (["--weights", "runs/h1/best.pt"], UNKNOWN_CONF),                       # weights the table does not know
     (["--weights", "models/ball_detector.pt", "--conf", "0.40"], 0.40),     # explicit

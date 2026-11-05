@@ -20,7 +20,10 @@ FP16 tactics, so their detections differ in the fourth decimal: outputs compare
 across worktrees only on the same engine file (audit/records/opt_speed_motion.md).
 They are copied, not junctioned, so a worktree that builds an engine for weights of
 its own keeps it to itself. An engine a worktree has already built is kept; delete
-it to take the reference's.
+it to take the reference's. The default ball detector is one of the candidates
+(`system/tennis_tracker/paths.py`, `STREAM_WEIGHTS`), so a reference that lacks it
+leaves the new worktree without one until the file is copied by hand; the first run
+says so.
 """
 
 from __future__ import annotations

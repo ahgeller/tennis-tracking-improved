@@ -10,10 +10,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / "models"
-# The ball detectors: the stream_s4 record (epoch 60), which the tracker runs by default, and the
-# heatmap_s4 record, the default before it and the training workspace's model. Their thresholds and
-# where the files come from are in ball_weights.py.
-STREAM_WEIGHTS = MODELS / "candidates" / "stream_s4_e60.pt"
+# The ball detectors: the stream_s4 record of run s4_fg1 (epoch 46), which the tracker runs by default
+# since 2026-11-05; the stream_s4 record of epoch 60, the default before it (2026-10-30 to 2026-11-05);
+# and the heatmap_s4 record, the default before both and the training workspace's model. Their
+# thresholds and where the files come from are in ball_weights.py.
+STREAM_WEIGHTS = MODELS / "candidates" / "stream_s4_fg1_e46.pt"
+STREAM_E60_WEIGHTS = MODELS / "candidates" / "stream_s4_e60.pt"
 HEATMAP_WEIGHTS = MODELS / "ball_detector.pt"
 BALL_WEIGHTS = STREAM_WEIGHTS                                      # the ball detector the tracker runs by default
 PLAYER_ENGINE = MODELS / "player.engine"                           # TensorRT player detector

@@ -26,7 +26,8 @@ class Config:
     ball_class_name: Optional[str] = None
     # The default detector's gated threshold (ball_weights.py; a caller naming other weights passes theirs,
     # ball_weights.operating_conf). heatmap_s4 runs at 0.40 (0.50 until 2026-10-27: on mixed_v1 0.40 gave +92
-    # hits for +2 false alarms), stream_s4 at 0.42.
+    # hits for +2 false alarms), stream_s4 at 0.38 (the s4_fg1 epoch-46 file; the epoch-60 file before it ran
+    # at 0.42: on mixed_v1 the new file at 0.38 keeps its 95 false alarms with recall 0.957 against 0.953).
     conf: float = DEFAULT_CONF
     device: str = "auto"
     # Shift applied to GridTrackNet points, in px at 1080p (positive = down).

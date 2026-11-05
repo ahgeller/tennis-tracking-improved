@@ -301,3 +301,46 @@ Verified at 6fcb568 (the stream_s4 engine is `phases/ABplus`'s build):
 - Suites: `system/` 694 passed (`tennis-opt`), 683 passed and 11 skipped (`tennis-analysis`); root
   1420 passed, 11 skipped; mypy clean in both; `pytest tests/test_player_detector.py
   tests/test_engine_io.py` passes in that order.
+
+## New default weights: stream_s4_fg1_e46 at 0.38 (2026-11-05)
+
+`paths.STREAM_WEIGHTS` is now `models/candidates/stream_s4_fg1_e46.pt`, gated at 0.38
+(`ball_weights.STREAM_S4_WEIGHTS`); `stream_s4_e60.pt`, the default since bb07ecb, keeps its own
+entry (`STREAM_S4_E60_WEIGHTS`, 0.42), so `--weights models/candidates/stream_s4_e60.pt` still runs
+at its gated threshold without `--conf`. `UNKNOWN_CONF` stays 0.40.
+
+Provenance: epoch 46 of run `s4_fg1` (stream_s4 from scratch, `TRAIN_DATA` both with 30%
+pseudo-labelled clips, distillation `qfl` from `ball_detector.pt`, EMA 0.999 and a visibility head
+trained beside it; LR 1.0 to epoch 35, 0.3 to 50, 0.1 to 60; started on Colab to epoch 17, finished
+on the PC on 2026-11-05 in `phases/colab_prep`, branch `phase-colab-fg`, trainer commit da3938e). The
+copy here has the visibility head's two tensors (`vis.weight`, `vis.bias`) stripped so this tree's
+`streamnet` (no head) loads it; the heat/offset output is identical. The EMA weights of the same
+epoch (`stream_s4_fg1_e46_ema.pt`, also in `candidates/`) scored 0.952 / 90 at 0.38 and were not
+chosen.
+
+Gate (`evaluate_archive.py --archive finetune --mode pipeline --holdout mixed_v1`, 24 clips, 8515
+visible / 518 absent labels; FA counts false alarms of the 518 as total (bridged / false); recall by
+group grid_match / video1-10 / video17+):
+
+| weights | conf | recall | FA (bridged / false) | grid / own / prof |
+|---|---|---|---|---|
+| stream_s4_e60.pt (old default) | 0.42 | 0.953 | 95 (79 / 16) | .913 / .971 / .952 |
+| stream_s4_e60.pt | 0.38 | 0.953 | 106 | - |
+| stream_s4_e60.pt | 0.34 | 0.959 | 113 | - |
+| stream_s4_fg1_e46.pt | 0.42 | 0.951 | 80 (68 / 12) | .912 / .968 / .950 |
+| **stream_s4_fg1_e46.pt (new default)** | **0.38** | **0.957** | **95** (77 / 18) | **.924 / .974 / .955** |
+| stream_s4_fg1_e46.pt | 0.34 | 0.960 | 98 (77 / 21) | .928 / .976 / .958 |
+
+The new file's median is 1.0 px, p90 4.0 px and wrong-object 0.001 at every point. It dominates e60
+at every threshold (equal FA with +0.004 recall, or equal recall with 15 fewer FA); 0.38 is the
+operating point because it keeps the old default's 95 false alarms and takes the recall (0.957,
+grid .924). Its encoder and decoder engines (`stream_s4_fg1_e46-stream_s4-encoder-b4-bfe4069fc4f7a0fe`,
+`-decoder-b4-447f033dac8e213c`) are already in this tree's `engine_cache` from the gate runs, so the
+first default run does not rebuild them.
+
+Files: `system/tennis_tracker/` `paths.py`, `ball_weights.py`, `config.py` (comment);
+`system/tests/test_ball_weights.py`, `system/tests/test_clean_tracker_cli.py`,
+`tests/test_link_worktree_data.py`; `tools/link_worktree_data.py` (docstring: the reference,
+`phases/ABplus`, holds only e60, so a new worktree still has to be given the new file),
+`tools/stream_prepass_parity.py` (usage line); `README.md`, `system/README.md`, `system/AGENTS.md`,
+`system/models/README.md`; this record.

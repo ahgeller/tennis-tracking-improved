@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple, Optional, Union
 
-from .paths import BALL_WEIGHTS, HEATMAP_WEIGHTS, ROOT, STREAM_WEIGHTS
+from .paths import BALL_WEIGHTS, HEATMAP_WEIGHTS, ROOT, STREAM_E60_WEIGHTS, STREAM_WEIGHTS
 
 PathLike = Union[str, Path]
 
@@ -31,13 +31,19 @@ class KnownWeights(NamedTuple):
 
 
 STREAM_S4_WEIGHTS = KnownWeights(
-    STREAM_WEIGHTS, 0.42,
-    "the stream_s4 ball detector (epoch 60), trained on the train branch "
-    "(finetune/train_gridtracknet.py --arch stream_s4); like every weights file it is not in the repository")
+    STREAM_WEIGHTS, 0.38,
+    "the stream_s4 ball detector (run s4_fg1, epoch 46: trained from scratch on both label sets with 30% "
+    "pseudo-labelled clips, distilled from ball_detector.pt, its visibility head stripped), trained on the "
+    "phase-colab-fg branch (finetune/train_gridtracknet.py --arch stream_s4); like every weights file it "
+    "is not in the repository")
+STREAM_S4_E60_WEIGHTS = KnownWeights(
+    STREAM_E60_WEIGHTS, 0.42,
+    "the stream_s4 ball detector of epoch 60, the default before 2026-11-05, trained on the train branch "
+    "(finetune/train_gridtracknet.py --arch stream_s4); not in the repository")
 HEATMAP_S4_WEIGHTS = KnownWeights(
     HEATMAP_WEIGHTS, 0.40,
     "the heatmap_s4 ball detector, trained on the train branch (models/README.md); not in the repository")
-KNOWN = (STREAM_S4_WEIGHTS, HEATMAP_S4_WEIGHTS)
+KNOWN = (STREAM_S4_WEIGHTS, STREAM_S4_E60_WEIGHTS, HEATMAP_S4_WEIGHTS)
 UNKNOWN_CONF = HEATMAP_S4_WEIGHTS.conf
 
 

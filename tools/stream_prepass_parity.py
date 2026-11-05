@@ -1,7 +1,7 @@
 """Compare the streamed prepass of a streaming ball model (``stream_s4``) with the windowed one, unit
 by unit and frame by frame, on a real clip.
 
-    python tools/stream_prepass_parity.py --weights system/models/candidates/stream_s4_e60.pt --out output/stream_parity
+    python tools/stream_prepass_parity.py --weights system/models/candidates/stream_s4_fg1_e46.pt --out output/stream_parity
 
 Four prepasses run over the clip at confidence 0, so every covered frame reports its peak, and
 every unit's 15-channel output is recorded as the prepass hands it to the heat ring:
