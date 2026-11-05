@@ -90,7 +90,8 @@ def test_pipeline_mode_forwards_the_court_flag_the_weights_and_the_window_step_t
     assert archive.main([*common, "--court"]) == 0
     assert archive.main(common) == 0
     assert archive.main([*common, "--gridtracknet-weights", str(tmp_path / "best.pt"), "--window-step", "5"]) == 0
-    (with_court, without, other_weights) = seen
+    assert archive.main([*common, "--visibility-gate", "0.3"]) == 0
+    (with_court, without, other_weights, gated) = seen
     assert with_court[0] == video and with_court[1]["court_events"] is True
     assert with_court[1]["tracking_json"] == tmp_path / "out" / "video1_gridtracknet.json"
     assert without[1]["court_events"] is False
@@ -98,6 +99,7 @@ def test_pipeline_mode_forwards_the_court_flag_the_weights_and_the_window_step_t
     assert other_weights[1]["model_path"] == tmp_path / "best.pt"
     assert with_court[1]["window_step"] is None and without[1]["window_step"] is None
     assert other_weights[1]["window_step"] == 5
+    assert gated[1]["visibility_gate"] == 0.3 and with_court[1]["visibility_gate"] == 0.0     # --visibility-gate, off without it
     assert "=== pipeline [gridtracknet] per clip ===" in capsys.readouterr().out
 
 

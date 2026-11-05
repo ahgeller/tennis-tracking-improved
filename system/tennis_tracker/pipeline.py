@@ -224,13 +224,17 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
 
     print("[selector] Running ball-in-play selection...")
     select_t0 = timing.start()
+    # The visibility gate: the prepass's per-frame scores, read only when the gate is on (the
+    # detector refused a model without the head at start-up).
+    visibility = ctx.detector.visibility_scores() if cfg.ball_visibility_gate else None
     per_frame, chosen_track, all_tracks = select_ball_in_play(
         pass1.detections, video.fps, video.width, video.height,
         court_polygon=court_polygon,
         boost_masks=pass1.boost_masks,
         raw_motions=pass1.raw_motions,
         player_boxes_by_frame=pass1.player_boxes,
-        debug=cfg.print_selector_tracks)
+        debug=cfg.print_selector_tracks,
+        visibility=visibility, visibility_gate=cfg.ball_visibility_gate)
     timing.add("selector_select", select_t0)
 
     print(f"[selector] {len(all_tracks)} total tracks")
@@ -256,7 +260,7 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
             display_path[fi] = (res.cx, res.cy, res.source in ("det", "motion"))
     timing.add("selector_post", post_t0)
     timing.add("selector_total", selector_t0)
-    return Selection(per_frame, chosen_track, all_tracks, court_polygon, last_kps, display_path)
+    return Selection(per_frame, chosen_track, all_tracks, court_polygon, last_kps, display_path, visibility)
 
 
 def _court_events(ctx: RunContext, pass1: Pass1Result, selection: Selection) -> CourtEvents:
@@ -305,6 +309,7 @@ def _finish(ctx: RunContext, pass1: Pass1Result, selection: Selection, events: C
         pass2_frames_rendered=rendered,
         outputs=_written_outputs(cfg),
         court_events=events,
+        visibility=selection.visibility,
     )
     if cfg.tracking_json:
         write_tracking_json(ctx, pass1, result)

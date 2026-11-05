@@ -45,6 +45,15 @@ class Config:
     # The prepass decodes with NVDEC (PyNvVideoCodec) where it opens the clip, and its frames stay on
     # the GPU; else cv2 decodes into pinned memory. Both give the same bytes (video_decode.py).
     ball_prepass_gpu_decode: bool = True
+    # The visibility gate on the selector's fills: 0 (off) or a probability in (0, 1). On, the
+    # prepass also reads the stream_s4 visibility head (streamnet.StreamNet, ``return_vis``): one
+    # "a ball is visible here" logit per frame, averaged over the units covering the frame as the
+    # heat grids are, and the sigmoid of that mean is the frame's score. The selector refuses an
+    # interpolated or motion fill on a frame whose score is below the gate (a detection is never
+    # refused), and the tracking JSON records the score per frame (``visibility``). The weights
+    # must carry the head (streamnet.has_vis_head); a plain model with the gate on is an error at
+    # start-up. The engine is built with the head as a second output (its own cache entry).
+    ball_visibility_gate: float = 0.0
 
     # TensorRT
     trt_async_execute: bool = True

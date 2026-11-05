@@ -56,7 +56,7 @@ def test_an_engine_is_built_once_and_found_after(tmp_path, fake_platform, capsys
         rebuilt = ball_trt.ensure_ball_engine(weights, model, 8, tmp_path / "cache", CUDA)
     assert path == again and path.read_bytes() == b"plan" and rebuilt != path and rebuilt.is_file()
     assert export.call_count == build.call_count == 2
-    export.assert_called_with(model, 8, CUDA)
+    export.assert_called_with(model, 8, CUDA, visibility=False)
     build.assert_called_with(b"onnx")
     assert "building the TensorRT engine for ball.pt" in capsys.readouterr().out
     assert not list((tmp_path / "cache").glob("*.tmp"))

@@ -50,6 +50,9 @@ _MAX_CANDIDATES_PER_FRAME = 5
 # ``selection``, ``in_timeline``) and the summary lists the timeline's ``timeline_track_ids``.
 # Tracking version 5: ``tracks`` holds the single-detection tracks too (the association used to
 # drop them), so every detection the selector saw is in some track; they are never selected.
+# Still version 5 (2026-11-04): with ``Config.ball_visibility_gate`` on, a frame row also carries
+# ``visibility``, the detector's probability that a ball is visible on it; the key is absent with
+# the gate off (the default), so a version-5 reader sees the table it always saw.
 _TRACKING_SCHEMA_VERSION = 5
 _MOTION_DIAGNOSTICS_SCHEMA_VERSION = 2
 
@@ -141,6 +144,8 @@ class RunResult:
     pass2_frames_rendered: int
     outputs: Dict[str, Path]                         # files written, by role: tracking_json, tracking_video, ...
     court_events: CourtEvents = field(default_factory=CourtEvents)   # what the court-event stages found, if run
+    # The detector's visibility score per frame (``Config.ball_visibility_gate``), None when the gate was off.
+    visibility: Optional[List[Optional[float]]] = None
 
     @property
     def filled_frames(self) -> int:
@@ -155,6 +160,8 @@ class RunResult:
                 row["court_keypoints"] = json_safe(self.court_keypoints[i])
             if i < len(self.player_boxes):
                 row["player_boxes"] = json_safe(self.player_boxes[i])
+            if self.visibility is not None and i < len(self.visibility) and self.visibility[i] is not None:
+                row["visibility"] = float(self.visibility[i])
             rows.append(row)
         return rows
 

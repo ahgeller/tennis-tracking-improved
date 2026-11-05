@@ -102,6 +102,8 @@ class Selection:
     court_polygon: Optional[np.ndarray]    # cv2 contour of the court, or None
     last_court_keypoints: Optional[List[float]]
     display_path: Dict[int, PathPoint]     # chosen track's path for the track-debug video
+    # The detector's visibility score per frame when ``Config.ball_visibility_gate`` is on, else None.
+    visibility: Optional[List[Optional[float]]] = None
 
     @property
     def filled_frames(self) -> int:

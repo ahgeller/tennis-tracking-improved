@@ -17,12 +17,13 @@ from .tracking_schema import TrackingFrames
 
 def headless_config(video: Path, *, model_path: Path, conf: float, device: str, tracking_json: Path,
                     output_video: Optional[Path] = None, court_events: bool = False,
-                    window_step: Optional[int] = None) -> Config:
+                    window_step: Optional[int] = None, visibility_gate: float = 0.0) -> Config:
     """The tracker's configuration for a run that writes the tracking JSON and no video: the
     bundled player and court engines, the selector's table silenced. ``output_video`` only names
     the video the run would have written (its debug outputs are derived from it); ``court_events``
     also computes and exports the court events, with the bundled bounce model; ``window_step`` is
-    ``Config.gridtracknet_window_step``, the prepass's frames between unit starts (None, its default)."""
+    ``Config.gridtracknet_window_step``, the prepass's frames between unit starts (None, its
+    default); ``visibility_gate`` is ``Config.ball_visibility_gate`` (0, its default, off)."""
     config = Config(
         input_video=str(video),
         output_video=str(output_video or tracking_json.with_suffix(".mp4")),
@@ -36,18 +37,20 @@ def headless_config(video: Path, *, model_path: Path, conf: float, device: str, 
         save_tracking_video=False,
         court_events=court_events,
         print_selector_tracks=False,
+        ball_visibility_gate=float(visibility_gate),
     )
     return config if window_step is None else replace(config, gridtracknet_window_step=window_step)
 
 
 def run_headless(video: Path, *, model_path: Path, conf: float, device: str, tracking_json: Path,
                  output_video: Optional[Path] = None, court_events: bool = False,
-                 window_step: Optional[int] = None) -> RunResult:
+                 window_step: Optional[int] = None, visibility_gate: float = 0.0) -> RunResult:
     """Track ``video`` with ``headless_config``'s settings and return what was found."""
     from .pipeline import run     # the pipeline imports CUDA, TensorRT and the renderers: only when a run is wanted
 
     return run(headless_config(video, model_path=model_path, conf=conf, device=device, tracking_json=tracking_json,
-                               output_video=output_video, court_events=court_events, window_step=window_step))
+                               output_video=output_video, court_events=court_events, window_step=window_step,
+                               visibility_gate=visibility_gate))
 
 
 def tracking_payload(result: RunResult) -> TrackingFrames:

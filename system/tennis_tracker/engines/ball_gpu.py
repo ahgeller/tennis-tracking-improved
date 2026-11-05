@@ -254,6 +254,37 @@ class HeatRing:
         return grid_peaks(means)
 
 
+class LogitRing:
+    """``HeatRing`` for the visibility head: the running sum of the logits each frame of the clip
+    gets from the units holding it (one logit per frame of a unit), in slots indexed by source
+    frame, and ``take`` the frames' mean logits, clearing their slots. Kept beside the heat ring,
+    with the same slot count, so the frames it holds are exactly the ones the heat ring holds."""
+
+    def __init__(self, slots: int, device: torch.device):
+        self.slots = int(slots)
+        self.device = device
+        self.sums = torch.zeros((self.slots,), dtype=torch.float32, device=device)
+        self.counts = torch.zeros((self.slots,), dtype=torch.float32, device=device)
+
+    def add(self, logits: torch.Tensor, units: Sequence[Sequence[int]]) -> None:
+        """Add the first ``len(units)`` units' logits in `logits` (``(batch, FRAMES_PER_UNIT)``) to
+        the frames each covers."""
+        count = len(units)
+        slots = torch.tensor([index % self.slots for unit in units for index in unit], dtype=torch.long)
+        slots = slots.to(self.device, non_blocking=True)
+        self.sums.index_add_(0, slots, logits[:count].reshape(-1).float())
+        self.counts.index_add_(0, slots, torch.ones(slots.numel(), dtype=torch.float32, device=self.device))
+
+    def take(self, indices: Sequence[int]) -> torch.Tensor:
+        """The mean logits of the frames at `indices` (a float32 tensor of their count), whose slots
+        are cleared."""
+        slots = torch.tensor([index % self.slots for index in indices], dtype=torch.long).to(self.device, non_blocking=True)
+        means = self.sums.index_select(0, slots) / self.counts.index_select(0, slots)
+        self.sums.index_fill_(0, slots, 0.0)
+        self.counts.index_fill_(0, slots, 0.0)
+        return means
+
+
 class Readback:
     """Small device results copied to the host without stopping the device: ``start`` queues a copy
     into pinned memory and records an event after it; ``ready`` says whether it has landed and

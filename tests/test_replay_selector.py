@@ -71,6 +71,26 @@ def test_the_chain_fills_the_hole_the_raw_variant_leaves_and_the_union_keeps_eve
     assert replay_variant("raw", payload)["tracks"] == [] and replay_variant("union", payload)["chosen_track"] is None
 
 
+def test_the_replay_reads_the_visibility_gate_and_the_scores_off_the_json_and_takes_an_override():
+    """A run made with ``Config.ball_visibility_gate`` on wrote the gate into its ``config`` and a
+    ``visibility`` score into every frame row; the chain replay applies the same gate to the same
+    scores, so the gate can be re-scored from the JSON, and ``visibility_gate`` overrides it (0 off)."""
+    payload = _payload([_track(0, BALL)], BALL)
+    for row in payload["frames"]:
+        row["visibility"] = 0.1 if row["frame"] == 12 else 0.9          # the head calls frame 12 empty
+    plain = {row["frame"] for row in replay_variant("chain", payload)["frames"] if row["present"]}
+    assert plain == set(BALL) | {12, 13}                                  # no gate in the config: filled
+    payload["config"] = {"ball_visibility_gate": 0.3}
+    gated = {row["frame"] for row in replay_variant("chain", payload)["frames"] if row["present"]}
+    assert gated == set(BALL) | {13}
+    off = {row["frame"] for row in replay_variant("chain", payload, visibility_gate=0.0)["frames"] if row["present"]}
+    assert off == set(BALL) | {12, 13}
+    stricter = {row["frame"] for row in replay_variant("chain", payload, visibility_gate=0.95)["frames"] if row["present"]}
+    assert stricter == set(BALL)
+    assert ReplayScene.of(payload).visibility_gate == 0.3 and ReplayScene.of(payload).visibility[12] == 0.1
+    assert ReplayScene.of(payload, visibility_gate=0.5).visibility_gate == 0.5
+
+
 def test_report_scores_every_variant_against_the_labels_per_source_and_pooled(tmp_path, capsys):
     run_dir = tmp_path / "pipeline"
     run_dir.mkdir()

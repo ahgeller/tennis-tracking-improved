@@ -294,12 +294,14 @@ def run_raw(models: List[str], clips: List[ClipPair], thresholds: List[float], d
 
 def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float], device: str,
                  out_dir: Path, reuse_json: bool = False, court_events: bool = False,
-                 weights: Optional[Dict[str, Path]] = None, window_step: Optional[int] = None) -> None:
+                 weights: Optional[Dict[str, Path]] = None, window_step: Optional[int] = None,
+                 visibility_gate: float = 0.0) -> None:
     """Track every clip (``headless.run_headless``) and score the per-frame output; with
     ``court_events`` each clip's tracking JSON also carries its court events, which
     ``score_court_events.py`` reads. `weights` (model name -> file) replaces a model's bundled
     weights, and `window_step` is the prepass's ``Config.gridtracknet_window_step`` (None, the
-    Config default), as both are in ``run_raw``."""
+    Config default), as both are in ``run_raw``; `visibility_gate` is ``Config.ball_visibility_gate``
+    (0, off), the selector's fill gate on the stream_s4 visibility head."""
     from tennis_tracker.headless import run_headless, tracking_payload   # the pipeline: CUDA and TensorRT, only here
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -317,7 +319,8 @@ def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, float
                 result = run_headless(video_path, model_path=(weights or {}).get(name) or MODELS[name],
                                       conf=conf[name], device=device,
                                       tracking_json=json_path, output_video=out_dir / f"{video_path.stem}_{name}.mp4",
-                                      court_events=court_events, window_step=window_step)
+                                      court_events=court_events, window_step=window_step,
+                                      visibility_gate=visibility_gate)
                 payload = tracking_payload(result)
             results.append((video_path.stem, score_pipeline_clip(labels, payload, meta.width)))
         print(f"\n=== pipeline [{name}] per clip ===")
@@ -369,6 +372,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="Frames of a phase between the prepass's unit starts, in both modes (default: the "
                              "tracker's Config.gridtracknet_window_step); below 5 a frame's overlapping units are "
                              "averaged before it is decoded (1 = a unit at every frame, 5 = one unit per frame)")
+    parser.add_argument("--visibility-gate", type=float, default=0.0,
+                        help="Pipeline mode: Config.ball_visibility_gate, the probability below which the selector "
+                             "refuses a fill on a frame the stream_s4 visibility head calls empty (0 = off; the "
+                             "weights must carry the head)")
     args = parser.parse_args(argv)
 
     archive = Path(args.archive) if args.archive else default_archive()
@@ -388,7 +395,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.models, clips,
             {"gridtracknet": args.gridtracknet_conf},
             args.device, Path(args.out_dir), reuse_json=bool(args.reuse_json), court_events=bool(args.court),
-            weights=weights, window_step=args.window_step,
+            weights=weights, window_step=args.window_step, visibility_gate=args.visibility_gate,
         )
     return 0
 
