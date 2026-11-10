@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from finetune.labeling.label_draw import (FILTERS, LANDING, ZOOM_STEP, draw_badge, draw_ticks, draw_tile_mark, enhance,
-                                          fit_text, hit, landing_badge, mark_plan)
+from finetune.labeling.label_draw import (FILTERS, LANDING, ZOOM_STEP, HudItem, draw_badge, draw_ticks, draw_tile_mark,
+                                          enhance, fit_text, hit, hud_text, landing_badge, mark_plan, middle_ellipsis)
+from finetune.labeling.label_timeline import Timeline
+from finetune.labeling.label_view import View
 from finetune.labeling.label_window import KEYS_CONFIRM, KEYS_ZOOM_IN, KEYS_ZOOM_OUT
 from finetune.refiner.refine import Point, Suggestion
 
@@ -27,17 +29,26 @@ GRID_SIZES = (8, 16)
 Tile = Tuple[int, Tuple[int, int, int, int], float, float, float]   # row index, box, ox, oy, scale
 
 
-class GridView:
+class GridView(View):
     """A page of GRID_SIZES tiles, each a label frame enlarged about its ball, all of one clip.
 
     Holds which rows are on the page, where each tile was drawn (so a click lands on the right
     frame), the page size and the tiles' zoom, and the last canvas with the state it was drawn
     from, so an unchanged page costs nothing to show again."""
 
+    help_title = "GRID"
+    help = (
+        ("SPACE / ENTER / c", "confirm every tile: next page"), ("click", "the ball is here"),
+        ("right click", "that frame, full size"), ("1-9  , / .", "select a tile"), ("y", "take the hint"),
+        ("x", "keep the draft"), ("v", "no ball"), ("i j k l", "nudge 1 px (SHIFT 0.25 px)"), ("u", "undo"),
+        ("/", "a landing"), ("a / d, arrows", "previous / next page"), ("+ -", "zoom the tiles"), ("z", "tiles per page"),
+        ("TAB", "back to the single frame"), ("w", "the trajectory sheet"),
+        ("SHIFT+TAB", "back to the players or court view, if one was open"),
+    ("t", "trail"), ("g", "auto-centre on / off"), ("h", "picture filter"), ("o", "inset"),
+    ("m", "full screen"), ("s", "save"), ("q / ESC", "save and quit"), ("? / F1", "these keys"))
+
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
-        self.session = session
-        self.tool = tool
-        self.active = False
+        super().__init__(session, tool)
         self.indices: List[int] = []            # the rows on this page, in order
         self.centers: Dict[int, Point] = {}     # row index -> the frame point its tile is centred on
         self.tiles: List[Tile] = []             # what the last render drew, for clicks and confirm_page
@@ -45,6 +56,7 @@ class GridView:
         self.cache_key: Optional[tuple] = None
         self.zoom = 1.0
         self.size = GRID_SIZES[0]
+        self.timeline = Timeline(session)       # the clip's timeline along the top of the HUD
 
     def invalidate(self) -> None:
         """The next render draws afresh (the picture filter changed)."""
@@ -55,12 +67,9 @@ class GridView:
         """The rows a page is filled from: the walk when there is one, else every row."""
         return self.session.walk if self.session.walk else list(range(len(self.session.rows)))
 
-    def toggle(self) -> None:
-        self.tool.sheet_view.active = False
-        self.active = not self.active
-        if self.active:
-            self.prepare(self.session.cursor)
-        self.tool.follow_ball()
+    def open(self) -> None:
+        super().open()
+        self.prepare(self.session.cursor)
 
     def prepare(self, start: int) -> None:
         """Fill the page from `start`: the next rows of the walk (or of every row) within the clip."""
@@ -128,7 +137,8 @@ class GridView:
     def render(self) -> np.ndarray:
         session = self.session
         rows = session.rows
-        key = (session.view_w, session.view_h, self.zoom, self.size, session.cursor, session.dirty, session.hints.version,
+        key = (session.view_w, session.view_h, session.hud_h, self.zoom, self.size, session.cursor, session.dirty,
+               session.hints.version, session.marks_revision,
                tuple((i, rows[i].x, rows[i].y, rows[i].visible, rows[i].reviewed, rows[i].edited, session.landing_for(i))
                      for i in self.indices))
         if key == self.cache_key:
@@ -158,16 +168,18 @@ class GridView:
                         color, max(1, int(ui)))
             cv2.rectangle(canvas, (left, top), (right-1, bottom-1), (255, 180, 50) if index == session.cursor else (65, 65, 65), 2)
             tiles.append((index, (left, y0, right-1, bottom-1), ox, oy, scale))
-        caption =(f"{session.source.clip} | click=center  right click=full frame  SPACE=confirm these {len(tiles)}"
-                   f"{' (orange crosses are hints on offer)' if offers else ''}  a/d=page  TAB=single")
-        thin = max(1, int(ui))
-        cv2.putText(canvas, fit_text(caption, session.view_w - 12, .48 * ui, thin),
-                    (6, session.view_h + int(round(21 * ui))), cv2.FONT_HERSHEY_SIMPLEX, .48 * ui, (255, 255, 255), thin)
-        keys = ("1-9 or ,/. select | y: take hint | x: keep draft | i/j/k/l: 1px (SHIFT 0.25px) | u: undo | "
-                f"v: absent | /: landing | +/- zoom | z: {GRID_SIZES[(GRID_SIZES.index(self.size) + 1) % len(GRID_SIZES)]} tiles"
-                " | q: save/quit")
-        cv2.putText(canvas, fit_text(keys, session.view_w - 12, .42 * ui, thin),
-                    (6, session.view_h + int(round(44 * ui))), cv2.FONT_HERSHEY_SIMPLEX, .42 * ui, (200, 200, 200), thin)
+        hud_top = session.view_h + session.timeline_h
+        self.timeline.draw(canvas[session.view_h:hud_top], session.view_h)
+        reviewed = sum(rows[index].reviewed for index, *_ in tiles)
+        line1: List[HudItem] = [(1, middle_ellipsis(session.source.clip)), (0, f"GRID {len(tiles)} frames"),
+                                (2, f"reviewed {reviewed}/{len(tiles)}"),
+                                (3, "orange crosses: hints on offer" if offers else "")]
+        line2: List[HudItem] = [(0, f"SPACE=confirm these {len(tiles)}"), (0, "click=place ball"), (1, "right click=full frame"),
+                                (1, "1-9 or ,/.=select"), (1, "y=take hint"), (2, "x=keep draft"), (1, "v=no ball"),
+                                (2, "ijkl=nudge (SHIFT fine)"), (2, "u=undo"), (2, "/=landing"), (1, "a/d=page"),
+                                (3, "+/-=zoom"), (3, f"z={GRID_SIZES[(GRID_SIZES.index(self.size) + 1) % len(GRID_SIZES)]} tiles"),
+                                (1, "TAB=single frame"), (0, "?=keys")]
+        hud_text(canvas[hud_top:], line1, line2, ui, unsaved=session.dirty)
         self.tiles = tiles
         session.shown_offers = offers
         self.cache_key, self.cache = key, canvas
@@ -218,7 +230,7 @@ class GridView:
         return title
 
     # ---------------------------------------------------------------- the hand
-    def on_mouse(self, event: int, x: int, y: int) -> None:
+    def on_mouse(self, event: int, x: int, y: int, flags: int = 0) -> None:
         if event not in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_LBUTTONDBLCLK, cv2.EVENT_RBUTTONDOWN):
             return
         session = self.session
@@ -226,8 +238,7 @@ class GridView:
             if hit(box, x, y):
                 session.set_cursor(index)
                 if event == cv2.EVENT_RBUTTONDOWN:
-                    self.active = False
-                    self.tool.follow_ball()
+                    self.close()
                 else:                 # +0.5: highgui floors the pointer to a pixel; aim at its middle
                     fx, fy = ox + (x + 0.5 - box[0]) / scale, oy + (y + 0.5 - box[1]) / scale
                     if 0 <= fx < session.width and 0 <= fy < session.height:
@@ -237,7 +248,12 @@ class GridView:
                             self.centers[index] = (session.rows[index].x, session.rows[index].y)
                 return
 
-    def handle_key(self, code: int, direction: int) -> bool:
+    def handle_key(self, code: int, direction: int) -> None:
+        """A key on a grid page: its own (grid_key), else as the single frame reads it."""
+        if not self.grid_key(code, direction):
+            self.tool.keys.common_key(code)
+
+    def grid_key(self, code: int, direction: int) -> bool:
         """What a key does on a grid page; False for a key the grid reads like the single frame."""
         if self.edit_key(code):
             return True

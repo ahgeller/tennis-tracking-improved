@@ -15,10 +15,16 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Set, Tuple
 import cv2
 import numpy as np
 
-from finetune.labeling.label_store import Landings, Row, apply_flags, apply_review, load_landings, load_rows
+from finetune.labeling.label_candidates import ClipCandidates, load_candidates
+from finetune.labeling.label_saving import fingerprint
+from finetune.labeling.label_store import (CourtFrames, Hits, Landings, Rejected, Row, apply_flags, apply_review,
+                                           load_event_review, load_hits, load_landings, load_rallies, load_rows)
 from finetune.data.labels import LabelFormatError
-from finetune.data.workspace import (bounce_csv, clip_of, draft_csv, draft_files, find_video, label_csv, label_files,
-                                     natural_key, review_json, suspect_json, video_meta)
+from finetune.data.player_labels import PlayerBoxLabel
+from finetune.data.workspace import (bounce_csv, clip_of, court_csv, draft_csv, draft_files, events_review_json,
+                                     find_video, hits_csv, label_csv, label_files, natural_key, players_csv,
+                                     rallies_csv, review_json, suspect_json, video_meta)
+from finetune.scoring.tracker_events import RUN_MODEL, run_json
 
 CACHE_BYTES = 400_000_000  # decoded frames kept in memory, as a budget: 1080p frames are 6 MB each
 CACHE_FRAMES_MAX = 96      # ... and never more than this many, nor fewer than CACHE_FRAMES_MIN
@@ -84,16 +90,31 @@ def walk_to(source: "Source", index: int) -> bool:
 
 
 class Source:
-    """One clip in a run: its video, its rows, its landings, and the files its work goes back to."""
+    """One clip in a run: its video, its rows, its landings, hits and rallies, the tracker's
+    candidates for them, its player and court labels once a view has loaded them, and the files
+    its work goes back to (all beside the ball labels, in `review`'s folder)."""
 
     def __init__(self, clip: str, video: Path, rows: List[Row], width: int, height: int,
                  out_csv: Path, review: Path, suspects: Optional[Path] = None, bounces: Optional[Path] = None):
         self.clip, self.video, self.rows = clip, video, rows
         self.width, self.height = width, height
         self.out_csv, self.review = out_csv, review
-        self.suspects = suspect_json(clip, review.parent) if suspects is None else suspects
-        self.bounces = bounce_csv(clip, review.parent) if bounces is None else bounces
+        labels = review.parent
+        self.suspects = suspect_json(clip, labels) if suspects is None else suspects
+        self.bounces = bounce_csv(clip, labels) if bounces is None else bounces
+        self.hits_path, self.rallies_path = hits_csv(clip, labels), rallies_csv(clip, labels)
+        self.events_review = events_review_json(clip, labels)
+        self.players_path, self.court_path = players_csv(clip, labels), court_csv(clip, labels)
         self.landings: Landings = {}  # the frames where the ball hit the ground (label_store.load_landings)
+        self.hits: Hits = {}          # the frames a racket hit it, keyed as the landings are, with who hit it
+        self.rally_starts: Set[int] = set()   # the frames rallies start and end on (label_store.load_rallies)
+        self.rally_ends: Set[int] = set()
+        self.rejected: Rejected = {}  # the candidates rejected, by kind (label_store.load_event_review)
+        self.candidates: Optional[ClipCandidates] = None   # the tracker's events on offer (label_candidates)
+        self.run: Optional[Path] = None   # the pipeline run's tracking JSON for the clip, when one was given:
+                                          # its tracks and court keypoints feed the player and court views
+        self.players: Optional[List[PlayerBoxLabel]] = None   # loaded by the player view; None: never read,
+        self.court: Optional[CourtFrames] = None              # so never written; the same for the court view's
         for row in rows:
             row.clip = clip
         self.capture = cv2.VideoCapture(str(video))
@@ -102,7 +123,9 @@ class Source:
         self.position = 0             # next frame the capture will decode, so stepping can avoid seeks
         self.sig_of: Dict[int, bytes] = {}     # ... and back again, to check a frame is the one wanted
         self.warned_seek = False
-        self.dirty = False
+        self.changed: Set[str] = set()        # the kinds of label edited and not yet saved (label_saving.KINDS)
+        self.conflicted: Set[str] = set()     # ... of which those whose file another session changed meanwhile
+        self.disk: Dict[Path, Optional[str]] = {}   # each label file's fingerprint as last read or written
         self.cursor = 0               # where you were in this clip, for the review file
         self.saved_cursor = 0         # ... and what the review file last said, so a plain move is kept
         self.start = 0                # where its rows begin in the run's flat row list
@@ -111,6 +134,16 @@ class Source:
         self.missing: Set[int] = set()    # frames that could not be decoded; drawn black, never labelled
         self.label_frames = {row.frame for row in rows}   # the frames worth keeping when passed
         self.flagged = 0              # how many rows the last audit flagged, from apply_flags
+
+    @property
+    def dirty(self) -> bool:
+        """Some edit to this clip is not saved yet."""
+        return bool(self.changed)
+
+    def remember(self, path: Path) -> None:
+        """Note what `path` holds now, just before it is read: a save refuses to write over it once
+        somebody else has changed it (label_saving.save_kind)."""
+        self.disk[path] = fingerprint(path)
 
     def release(self) -> None:
         """Let go of the decoder and the cache: each open capture holds 75-140 MB once it has
@@ -312,8 +345,10 @@ def expand_clip_ranges(names: List[str], labels: Path) -> List[str]:
     return unique
 
 
-def build_source(clip: str, videos: Path, labels: Path) -> Optional[Source]:
-    """Everything one clip needs, or None with a message if it is not ready."""
+def build_source(clip: str, videos: Path, labels: Path, candidates: Optional[Path] = None,
+                 model: str = RUN_MODEL) -> Optional[Source]:
+    """Everything one clip needs, or None with a message if it is not ready. `candidates` is a
+    pipeline run folder whose events for the clip are offered as candidates (label_candidates)."""
     video = find_video(clip, videos)
     if video is None:
         print(f"[skip] {clip}: no video in {videos}")
@@ -328,6 +363,7 @@ def build_source(clip: str, videos: Path, labels: Path) -> Optional[Source]:
     if not from_file.is_file():
         print(f"[skip] {clip}: no labels; run  python finetune/training/pretrack.py --clips {clip}")
         return None
+    read_as = fingerprint(final)      # before it is read: a change after this is somebody else's
     try:
         rows = load_rows(from_file, width, height, "det" if draft.is_file() else "csv")
     except (OSError, LabelFormatError) as error:
@@ -338,10 +374,16 @@ def build_source(clip: str, videos: Path, labels: Path) -> Optional[Source]:
         return None
     review = review_json(clip, labels)
     source = Source(clip, video, rows, width, height, final, review, suspect_json(clip, labels), bounce_csv(clip, labels))
+    source.disk[final] = read_as
+    for path in (review, source.bounces, source.hits_path, source.rallies_path, source.events_review):
+        source.remember(path)
     try:
         source.flagged = apply_flags(source.suspects, rows)
         state = apply_review(review, rows)
         source.landings = load_landings(source.bounces)
+        source.hits = load_hits(source.hits_path)
+        source.rally_starts, source.rally_ends = load_rallies(source.rallies_path)
+        source.rejected = load_event_review(source.events_review)
     except LabelFormatError as error:
         # Somebody's record of what they checked, or of where the ball landed: never started
         # afresh, never written over.
@@ -349,6 +391,11 @@ def build_source(clip: str, videos: Path, labels: Path) -> Optional[Source]:
         return None
     if state is not None:
         resume_from(source, state)
+    if candidates is not None:
+        source.run = run_json(candidates, clip, model)
+        source.candidates = load_candidates(candidates, clip, model)
+        if source.candidates is not None:
+            source.candidates.place([row.frame for row in rows])
     return source
 
 

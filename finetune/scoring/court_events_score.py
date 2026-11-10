@@ -3,19 +3,20 @@
     python score_court_events.py --archive finetune --out-dir output/<run>/pipeline [--tier confirmed]
         [--tolerance-s 0.1] [--compare before.log] [--recompute]
 
-For every clip that may be scored (``finetune.scoring.archive.list_clips``: reviewed, not excluded) and has
-a landing label file (``labels/<clip>_bounces.csv``, ``finetune.data.bounce_labels``), the run's tracking
-JSON ``<out-dir>/<clip>_<model>.json`` is read; it must have been written with ``--court``, so that its
+For every clip with a landing label file (``labels/<clip>_bounces.csv``, ``finetune.data.bounce_labels``)
+that may be scored, by the rule every label scorer shares (``label_scoring``: the label home's labels
+unless ``--archive`` says otherwise, not excluded; unreviewed ball labels lend no point), the run's
+tracking JSON ``<out-dir>/<clip>_<model>.json`` is read; it must have been written with ``--court``, so that its
 ``court_events`` block is filled. The block's landings at the chosen tier are matched one to one to the
 labelled landings within the tolerance (greedy, closest pair first), a whole number of frames
 (``seconds_to_frames``: 3 at 30 FPS, 6 at 60). A label may sit halfway between two frames
 (``frame_412.5``, a ball that landed between them): a landing on either frame is half a frame from
 it, well within the tolerance, and its timing error is that half frame. Per clip and pooled (``ALL``):
 labels, landings found, hits, precision, recall, the median and p90 timing error of the hits, and the
-median pixel error at 1080p scale where the label has a point (``resolve_points`` takes it from the ball
-labels when the row left it blank). The unmatched labels and landings are listed under each clip.
+median pixel error at 1080p scale where the label has a point (``resolve_points`` takes it from the
+reviewed ball labels when the row left it blank). The unmatched labels and landings are listed under each clip.
 
-Tiers: ``confirmed`` (the bounce model's confirmed landings, the default), ``placed`` (those plus the
+Tiers (``tracker_events.landings_at_tier``): ``confirmed`` (the bounce model's confirmed landings, the default), ``placed`` (those plus the
 candidates and kinematic bounces not within ``EVENT_MERGE_S`` of a confirmed one: what the leg
 assembly places, before its court-plane test; ``rally_legs.inferred_landings``) and ``all`` (every
 landing of every list, the confirmed ones first, those within ``EVENT_MERGE_S`` of one already kept
@@ -38,21 +39,21 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from finetune.data import workspace as ws
-from finetune.data.bounce_labels import BounceLabel, landing_text, read_bounce_labels, resolve_points
+from finetune.data.bounce_labels import BounceLabel, read_bounce_labels, resolve_points
 from finetune.data.detector_metrics import scale_for_width
-from finetune.data.labels import read_labels
-from finetune.scoring.archive import archive_folders, default_archive, list_clips
+from finetune.data.event_rows import event_text
+from finetune.scoring.label_scoring import LabelledClip, ball_labels, run_scorer
+from finetune.scoring.tracker_events import TIERS, landings_at_tier
 from tennis_tracker.court.bounce_events import infer_kinematic_bounces, predict_bounce_events
 from tennis_tracker.court.contact_events import detect_player_contacts
-from tennis_tracker.court.court_scene import EVENT_MERGE_S, BounceEvent, CourtScene, PlayerBoxes, seconds_to_frames
-from tennis_tracker.court.rally_legs import assemble_rally_legs, inferred_landings
+from tennis_tracker.court.court_scene import BounceEvent, CourtScene, PlayerBoxes, seconds_to_frames
+from tennis_tracker.court.rally_legs import assemble_rally_legs
 from tennis_tracker.export import court_events_to_json, frame_row_to_result
 from tennis_tracker.paths import BOUNCE_MODEL
 from tennis_tracker.run_context import CourtEvents
-from tennis_tracker.tracking_schema import BounceEventJson, CourtEventsJson, FrameRow, TrackingJson
+from tennis_tracker.tracking_schema import CourtEventsJson, FrameRow, TrackingJson
 
 TOLERANCE_S = 0.1          # a landing this close in time to a label is that label's landing
-TIERS = ("confirmed", "placed", "all")
 ALL = "ALL"                # the pooled line's name
 
 LINE = re.compile(
@@ -60,40 +61,6 @@ LINE = re.compile(
     r"precision=(?P<precision>[\d.]+) recall=(?P<recall>[\d.]+) \| "
     r"dt med=\s*(?P<dt_med>[\d.]+)ms p90=\s*(?P<dt_p90>[\d.]+)ms \| px med=\s*(?P<px_med>[\d.]+px|n/a)"
 )
-
-
-# --------------------------------------------------------------------------- the landings of a JSON
-
-def bounce_from_json(row: BounceEventJson) -> BounceEvent:
-    return BounceEvent(int(row["frame"]), float(row["x"]), float(row["y"]), float(row["score"]),
-                       row["origin"], row["position"])
-
-
-def _without_repeats(events: Sequence[BounceEvent], fps: float) -> List[BounceEvent]:
-    """``events`` in the order given, dropping each one within ``EVENT_MERGE_S`` of one already kept."""
-    merge = seconds_to_frames(EVENT_MERGE_S, fps)
-    kept: List[BounceEvent] = []
-    for event in events:
-        if not any(abs(event.frame - other.frame) <= merge for other in kept):
-            kept.append(event)
-    return kept
-
-
-def landings_at_tier(block: CourtEventsJson, tier: str, fps: float) -> List[BounceEvent]:
-    """The block's landings the tier admits, in frame order (see the module docstring)."""
-    confirmed = [bounce_from_json(row) for row in block.get("bounces", [])]
-    candidates = [bounce_from_json(row) for row in block.get("bounce_candidates", [])]
-    kinematic = [bounce_from_json(row) for row in block.get("kinematic_bounces", [])]
-    if tier == "confirmed":
-        landings = list(confirmed)
-    elif tier == "placed":
-        landings = confirmed + inferred_landings(confirmed, candidates, kinematic, fps)
-    elif tier == "all":
-        inferred = sorted(candidates + kinematic, key=lambda event: -event.score)
-        landings = _without_repeats(confirmed + inferred, fps)
-    else:
-        raise ValueError(f"unknown tier {tier!r}; expected one of {', '.join(TIERS)}")
-    return sorted(landings, key=lambda event: event.frame)
 
 
 # --------------------------------------------------------------------------- matching and scoring
@@ -195,7 +162,7 @@ def unmatched_lines(score: ClipLandingScore, fps: float) -> List[str]:
     lines = []
     if score.unmatched_labels:
         lines.append("    unmatched labels:   " + ", ".join(
-            f"{landing_text(label.frame)} ({label.frame / fps:.2f}s)" for label in score.unmatched_labels))
+            f"{event_text(label.frame)} ({label.frame / fps:.2f}s)" for label in score.unmatched_labels))
     if score.unmatched_events:
         lines.append("    unmatched landings: " + ", ".join(
             f"{event.frame} ({event.frame / fps:.2f}s, {event.origin}, score {event.score:.2f})"
@@ -303,18 +270,7 @@ def recompute_block(payload: TrackingJson, bounce_model: Path) -> CourtEventsJso
 
 # --------------------------------------------------------------------------- the command
 
-def _labelled_clips(names: Optional[List[str]], archive: Path, include_excluded: bool) -> List[Tuple[str, Path, Path]]:
-    """(clip, ball label csv, landing label csv) for every scorable clip that has landing labels."""
-    label_dir, _ = archive_folders(archive)
-    found = []
-    for video, csv_path in list_clips(names, archive, include_excluded):
-        bounce_path = ws.bounce_csv(video.stem, label_dir)
-        if bounce_path.is_file():
-            found.append((video.stem, csv_path, bounce_path))
-    return found
-
-
-def score_run(clips: Sequence[Tuple[str, Path, Path]], out_dir: Path, model: str, tier: str, tolerance_s: float,
+def score_run(clips: Sequence[LabelledClip], out_dir: Path, model: str, tier: str, tolerance_s: float,
               recompute: Optional[Path]) -> List[str]:
     """The report lines for one model's run; raises FileNotFoundError or ValueError naming the
     JSON that is missing or holds no court events."""
@@ -333,7 +289,7 @@ def score_run(clips: Sequence[Tuple[str, Path, Path]], out_dir: Path, model: str
                              "(evaluate_archive.py --mode pipeline --court)")
         video = payload["video"]
         fps, width, height = float(video["fps"]), int(video["width"]), int(video["height"])
-        labels = resolve_points(read_bounce_labels(bounce_path), read_labels(csv_path, width, height))
+        labels = resolve_points(read_bounce_labels(bounce_path), ball_labels(csv_path, width, height))
         events = landings_at_tier(block, tier, fps)
         score = score_clip(clip, labels, events, fps, tolerance_s, scale_for_width(width))
         scores.append(score)
@@ -343,49 +299,35 @@ def score_run(clips: Sequence[Tuple[str, Path, Path]], out_dir: Path, model: str
     return lines
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--out-dir", type=Path, required=True,
-                        help="the pipeline run's folder of <clip>_<model>.json files (evaluate_archive.py --out-dir)")
-    parser.add_argument("--models", nargs="+", default=["gridtracknet"])
-    parser.add_argument("--clips", nargs="*", default=None, help="Clip stems or globs, e.g. video6 'grid_match*'")
-    parser.add_argument("--archive", default=None,
-                        help="Label set: a finetune-style folder with videos/ and labels/ (default: $TENNIS_ARCHIVE, else finetune/)")
-    parser.add_argument("--include-excluded", action="store_true",
-                        help="Score every clip with landing labels, including those the review policy holds back")
+def add_landing_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tier", choices=TIERS, default="confirmed")
     parser.add_argument("--tolerance-s", type=float, default=TOLERANCE_S,
                         help=f"a landing within this many seconds of a label matches it (default {TOLERANCE_S})")
-    parser.add_argument("--compare", type=Path, default=None, help="an earlier log of this script to print deltas against")
     parser.add_argument("--recompute", action="store_true",
                         help="rerun the court-event stages on each JSON's frames with the current code instead of "
                              "reading its court_events block")
     parser.add_argument("--bounce-model", type=Path, default=BOUNCE_MODEL, help="the CatBoost bounce model --recompute runs")
-    args = parser.parse_args(argv)
 
-    archive = Path(args.archive) if args.archive else default_archive()
-    clips = _labelled_clips(args.clips, archive, args.include_excluded)
-    if not clips:
-        print(f"No clip in {archive} has a landing label file (labels/<clip>_bounces.csv)")
-        return 1
-    print(f"[archive] {archive}  ({len(clips)} clips with landing labels: {', '.join(clip for clip, _, _ in clips)})")
-    lines: List[str] = []
-    try:
-        for model in args.models:
-            lines.extend(score_run(clips, args.out_dir, model, args.tier, args.tolerance_s,
-                                   args.bounce_model if args.recompute else None))
-    except (FileNotFoundError, ValueError) as error:
-        print(error, file=sys.stderr)
-        return 1
+
+def report(lines: List[str], args: argparse.Namespace) -> int:
+    """The lines, and with --compare this scorer's own table against the earlier log."""
     print("\n".join(lines))
-    if args.compare is not None:
-        before = read_scores(args.compare.read_text(encoding="utf-8"))
-        if not before:
-            print(f"no landing metric lines found in {args.compare}", file=sys.stderr)
-            return 1
-        print(f"\n=== against {args.compare} ===")
-        print(compare(before, read_scores("\n".join(lines))))
+    if args.compare is None:
+        return 0
+    before = read_scores(args.compare.read_text(encoding="utf-8"))
+    if not before:
+        print(f"no landing metric lines found in {args.compare}", file=sys.stderr)
+        return 1
+    print(f"\n=== against {args.compare} ===")
+    print(compare(before, read_scores("\n".join(lines))))
     return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    return run_scorer(argv, __doc__ or "", "landing", ws.bounce_csv,
+                      lambda clips, out_dir, model, args: score_run(
+                          clips, out_dir, model, args.tier, args.tolerance_s, args.bounce_model if args.recompute else None),
+                      add_arguments=add_landing_arguments, report=report)
 
 
 if __name__ == "__main__":

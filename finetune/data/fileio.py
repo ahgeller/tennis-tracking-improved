@@ -3,7 +3,8 @@
 Every label CSV, sidecar JSON, manifest and settings file in the workspace, and every weights
 file the tracker runs, goes through here: the content is written to a temporary file beside the
 target, flushed to disk, and then moved over the target, so the target is always either the old
-file or the complete new one. Windows refuses the move while another program (Excel, an editor,
+file or the complete new one. The temporary is unique to each write (``temporary_for``), so two
+writers of one file at once each finish their own. Windows refuses the move while another program (Excel, an editor,
 a virus scan) has the target open, so the move is retried for a moment before the error is
 raised.
 """
@@ -14,6 +15,7 @@ import datetime as dt
 import os
 import shutil
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, BinaryIO, Iterator, TextIO
@@ -38,7 +40,10 @@ def replace_file(temporary: Path, path: Path) -> None:
 
 
 def temporary_for(path: Path) -> Path:
-    return path.with_name(path.name + ".tmp")
+    """A temporary file beside `path`, unique to this call: two writers of one file at once (two
+    label tool sessions saving the same clip) never share one, so neither truncates the other's
+    half-written file nor moves it over the target."""
+    return path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
 
 
 @contextmanager

@@ -30,11 +30,13 @@ colab-zip in ``finetune/colab_zip.py``; the menu, the launchers and the script c
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 if __name__ == "__main__":          # run as a script: make the repository root importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -174,7 +176,40 @@ def cmd_prelabel(args: argparse.Namespace) -> int:
     return run_script("training/pretrack.py", args.rest)
 
 
+@contextmanager
+def in_label_home() -> Iterator[None]:
+    """Work in the workspace of the label home (``workspace.label_home``) while this lasts: from a
+    git worktree, the main checkout's ``finetune/``, the label tool's own default. Everything around
+    a labelling session (the pre-labelling, the review and flags read before and after it, the
+    re-timing and audit offered after it) then reads and writes the files the session does, here
+    and in the scripts it runs (``TENNIS_WORKSPACE``), instead of the worktree's copy of them. A
+    LabelHomeMissing passes through."""
+    home = ws.label_home()
+    if home == ws.current().labels:
+        yield
+        return
+    previous = os.environ.get(ws.WORKSPACE_VARIABLE)
+    os.environ[ws.WORKSPACE_VARIABLE] = str(home.parent)
+    print(f"[label] this is a worktree: labelling in the main checkout's workspace, {home.parent}")
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(ws.WORKSPACE_VARIABLE, None)
+        else:
+            os.environ[ws.WORKSPACE_VARIABLE] = previous
+
+
 def cmd_label(args: argparse.Namespace) -> int:
+    try:
+        with in_label_home():
+            return label_clips(args)
+    except ws.LabelHomeMissing as error:
+        print(f"[error] {error}")
+        return 2
+
+
+def label_clips(args: argparse.Namespace) -> int:
     clips = args.clip if isinstance(args.clip, list) else [args.clip]
     # Every label_tool option is declared on this subcommand, so a bare word left over is a clip
     # that came after an option (label video10 --zoom 3 video11), not an option's value.

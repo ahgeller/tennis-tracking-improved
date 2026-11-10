@@ -33,9 +33,9 @@ def test_guarded_is_a_pure_test_of_calibrating_the_overview_and_a_lagging_view()
     assert pointer.guarded(cv2.EVENT_LBUTTONDOWN) and pointer.guarded(cv2.EVENT_MOUSEWHEEL)
     assert not pointer.guarded(cv2.EVENT_MOUSEMOVE)                          # moves are what calibration reads
     tool.mouse.calibrating = False
-    tool.grid_view.active = True                                                         # the overview: no wheel, clicks are its own
+    tool.view = tool.grid_view                                                           # the overview: no wheel, clicks are its own
     assert pointer.guarded(cv2.EVENT_MOUSEWHEEL) and not pointer.guarded(cv2.EVENT_LBUTTONDOWN)
-    tool.grid_view.active = False
+    tool.view = tool.frame_view
     tool.session.cursor = 3                                                          # the view lags the cursor
     assert pointer.guarded(cv2.EVENT_LBUTTONDOWN) and not pointer.guarded(cv2.EVENT_MOUSEMOVE)
 

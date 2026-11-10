@@ -7,10 +7,29 @@ python finetune/labeling/label_tool.py <clip>                        # videos/<c
 python finetune/labeling/label_tool.py video22..video53             # a whole run, one clip after another
 python finetune/labeling/label_tool.py video22..video53 --uncertain # only the frames worth a look
 python finetune/labeling/label_tool.py <clip> --grid                # start on the grid of crops
+python finetune/labeling/label_tool.py <clip> --players             # who each tracked person is
+python finetune/labeling/label_tool.py <clip> --court               # the court's keypoints
 ```
 
 `ft.py label <clip>` runs the same thing with the paths filled in, and pre-labels
 first when there is no draft yet.
+
+Besides the ball, the tool labels everything the court-event stages are scored
+on: landings (`/`), racket hits (`.`), rallies (`[` and `]`), who each player is
+(`--players`) and the court (`--court`). A pipeline run's own answers are offered
+as candidates to confirm or reject (see *Candidates*), and every label type has a
+scorecard (see *Scorecards*).
+
+## Where the labels go
+
+`--labels` defaults to the *label home* (`workspace.label_home()`): the main
+checkout's `finetune/labels`, even when the tool is run from a git worktree
+(`phases/<name>`, whose `finetune/labels` is only a copy made by
+`tools/link_worktree_data.py`). An edit made in a copy would never reach the labels
+everything else reads, so a worktree's tool writes past its copy to the real ones.
+The tool prints the folder it uses as `[labels] <path>` when it starts. With the
+workspace relocated (`TENNIS_WORKSPACE`) the label home is that workspace's
+`labels/`; `--labels <folder>` overrides it either way.
 
 Several clips run as one session: the last frame of one leads straight into the
 first of the next, `n` and `p` cross the join, zoom carries over, and every edit is
@@ -49,19 +68,27 @@ you do click.
 | `f` / `b` | jump to the next / previous unreviewed uncertain frame, and to any frame an audit (`ft.py check --audit --mark`) has flagged, drawn in magenta, even one you had reviewed before the audit. SPACE answers a flag as well as a click does (it is good where it is), and a later audit does not raise it again unless the label moves |
 | `e` / SHIFT+`e` | jump to the next / previous frame whose label the suggestion disagrees with ("hint differs" on the bar), reviewed or not |
 | `i` / `j` / `k` / `l` | nudge the point one pixel up / left / down / right (stays on the frame); with SHIFT held, a quarter of a pixel |
-| `u` | undo the last change on this frame's label (not a landing mark: `/` again removes one) |
+| `u` | undo the last change on this frame's label (not a landing, hit or rally mark: their keys take them off again) |
 | `/` | this frame is a landing: the ball is on the ground here. Pressed again, it is not. The frame wears a LANDING badge (its grid tile too) and the bar counts the clip's landings. Pressed on the frame after (or before) one already marked, the ball bounced between the two: the two marks become one landing between them and both frames wear LANDING 1/2. When the landing has no ball label under it (one between two frames, or one on a frame labelled "no ball") the bar asks for a click where the ball touched the ground. Saved with the labels to `labels/<clip>_bounces.csv` (see *Landings*) |
+| `.` | this frame is a racket hit (serves included), exactly as `/` is a landing: pressed again it is not; on the frame after (or before) one already marked, the contact was between the two (HIT 1/2); with no ball label under it the bar asks for a click where the racket met the ball. Saved to `labels/<clip>_hits.csv` (see *Hits*) |
+| `,` | who hit this frame's hit: near (the player on the half nearer the camera), far, not said, round again. Never filled in from the tracker |
+| `[` / `]` | a rally starts / ends on this frame; pressed again, it does not. A frame is never both. Saved to `labels/<clip>_rallies.csv` (see *Rallies*) |
+| `;` / SHIFT+`;` (or `:`) | go to the next / previous frame wearing a candidate nobody has answered yet (see *Candidates*) |
+| backslash | the candidates on this frame are wrong: reject them and go to the next one. On a frame whose candidates are all answered, it reopens the ones rejected there |
+| click on the timeline | go to that frame (the strip along the top of the bar, see *The timeline*) |
 | mouse wheel, `+` / `-` | smooth zoom in / out about the mouse / the ball (kept across frames) |
 | right click | re-centre the view here |
 | `g` / click the badge | auto-centre on / off. On (the default) every frame puts the mark in the middle of the screen with the mouse on it; off leaves the view and the mouse alone, for looking round a frame |
 | `h` / click the badge | cycle the view filter: OFF, DIM WHITE (court lines, white kit and sky pulled down to a dull blue-grey so a yellow ball stops hiding on them), BALL POP (only tennis-ball yellows keep their colour), MOTION (what moved since the previous label frame lights up magenta). Remembered between sessions in `labels/label_tool.settings.json` |
 | `o` / click the badge | overview inset on / off: while zoomed in, a small copy of the whole frame sits bottom-right with the part on screen boxed and the ball dotted. Click anywhere in it to bring that spot into the zoomed view, the quick way to reach a ball the detector put somewhere else entirely |
 | TAB | toggle the grid: a page of crops around each ball (see *The grid*) |
+| SHIFT+TAB | back to the player or court view, when the frames were reached from one |
 | `w` | the trajectory sheet (see *The trajectory sheet*) |
 | `m` | full screen on / off (the window also maximises normally) |
 | `t` | toggle the trail of the previous labels |
 | `s` | save |
 | `q` / ESC | save and quit |
+| `?` / F1 | the view's keys, listed over the picture; any key closes the list |
 
 ## The grid
 
@@ -71,7 +98,8 @@ full frame; `1`-`9` or `,` / `.` pick the tile the keys act on; `y` takes its
 suggestion and moves on, `x` keeps its draft instead; `v` marks it absent; `i` / `j`
 / `k` / `l` nudge it; `/` marks it as a landing; SPACE confirms the displayed page,
 hints on offer (orange crosses) included; `a` / `d` change pages; `+` / `-` zoom the
-crops.
+crops. Hits, rallies and candidates are marked in the single-frame view only (`,`
+and `.` pick tiles here).
 
 ## The trajectory sheet
 
@@ -145,6 +173,177 @@ on a frame without a ball label, or the one of them there is (`resolve_points` i
 `finetune/data/bounce_labels.py`). From the grid, `/` marks and joins the same way
 but asks for no click.
 
+## Hits
+
+The racket hits are labelled as the landings are. Step to the frame where the
+racket meets the ball and press `.`: the frame wears a HIT badge and the bar counts
+the clip's hits. When the contact falls between two frames (the ball still coming in
+on one, already going out on the next), press `.` on both: one hit between them, HIT
+1/2 on both, saved as `frame_0412.5`. A hit with no ball label under it (between two
+frames, or on a frame labelled "no ball") waits for a click where the racket met the
+ball, drawn as a small violet cross; any other key leaves it without a point and the
+scorer takes the ball labels either side, as for a landing. Mark serves and every
+stroke of the rally. `,` says who hit it: `near`, `far` or not said, shown on the
+badge as HIT NEAR or HIT FAR. Only `,` says it: a hit is never given the tracker's
+hitter, since the hit scorer measures the tracker's hitter against yours. A hit that
+becomes one between two frames keeps the hitter it had.
+
+## Rallies
+
+`[` marks the frame a rally starts on: the server's toss leaving the hand (for a
+serve with no toss in view, the serve's hit). `]` marks the frame it is over: the
+ball is dead (its second bounce, the net, the fence, or the frame it leaves play for
+good). A fault is a rally of its own: it ends where the faulted serve is dead, and
+the second serve starts the next one, as the tracker counts them (every serve
+starts a rally). Each start pairs with the next end; the bar says which rally a
+frame is in (`rally 2/5`), counts the clip's rallies by their starts (`rallies 5`),
+and the timeline draws each rally as a bar, dimmer while one end is still missing. The scorer leaves a rally missing an end out, and does
+not count what the tracker found over it against it.
+
+## Candidates
+
+With a pipeline run for the clip (`evaluate_archive.py --archive finetune --mode
+pipeline --court --out-dir <run folder>`; the tool reads `--candidates <run
+folder>`, by default `output/label_candidates`), the run's own landings, hits and
+rally starts and ends are offered on the label frames nearest them: an outlined
+badge (`LANDING?`, `HIT? FAR`, `RALLY START?`, `RALLY END?`) and, for a landing or a
+hit, a dashed ring where the tracker put it. The bar says what is asked
+(`LANDING? /=yes  \=no  ;=next`) and counts the candidates left.
+
+A candidate is only a suggestion: nothing about it is saved as a label, and the
+scorers never read it. To confirm one, mark the event with its own key (`/`, `.`,
+`[` or `]`): the label answers it. A landing or hit candidate that falls between two
+label frames (on a 60 FPS clip labelled every other frame, the unlabelled frame
+between them) comes up, when `;` brings you to it, waiting for the click where it
+happened, and a band across the top of the picture in the event's colour says so:
+the click places the landing (or the hit) between the two frames with that point,
+exactly as `/` (or `.`) on both frames and a click would. Any other key, and the
+click is the ball label's again. `/` and `.` themselves work on such a frame as they
+always do. A backslash rejects the candidates on the frame (kept in
+`labels/<clip>_events.review.json`, so a rerun of the tracker that moves an event by
+a frame or two does not bring it back) and goes to the next, but never waits for a
+click there: on a candidate between two frames the bar offers `;` to answer it, and
+only then does a click place it. An event the tracker missed is marked with its key
+like any other.
+
+`;` walks the candidates nobody has answered (with a label of its kind within 0.1 s,
+within a few seconds for a rally mark, or rejected), across the clips of a run.
+
+## The timeline
+
+Every view (the single frame, the grid, the trajectory sheet, the player and court
+views) has a strip along the top of its bar: the clip from its first label frame at
+the left to its last at the right, the rallies as bars, landings (light blue) and
+hits (violet) as solid ticks the strip's full height, the candidates still open as
+hollow ticks in their kind's colour, and the frame on screen as a white caret above
+the strip. A click on it in the single-frame view goes to that frame.
+
+## The bar
+
+The bar under the picture has two lines: what the frame is (clip, frame, label,
+state, counts) and what to press now. When the window is too narrow, the least
+important items are dropped whole, never cut mid-word; a long clip name is shortened
+in its middle. `*unsaved*` at the right of the first line says there are changes not
+yet written. `?` (or F1) lists every key of the view showing over the picture; any
+key closes the list.
+
+## Player identity (`--players`)
+
+`--players` opens the player view on the first clip given: the tracker's person
+tracks from the run folder (`--candidates`), cut into *segments*, one track id until
+it drops out for over half a second. Each segment is a row of crops taken evenly
+through it, as many as fit across the window, under the whole frame with every
+tracked box drawn (the selected segment's thick, the others thin, each with a tag of
+its track id and identity). Every crop is shown whole in a cell of one size, and only
+from frames where the box shows the person whole (not half off the picture's side);
+with fewer segments than rows, the whole frame takes the room. Say who it is and the next segment comes up:
+
+| key | what it does |
+|---|---|
+| `1` - `4` | the segment is player P1 - P4 (number the clip's players however you like, the same way all through the clip) |
+| `0` / `v` | the segment is not a player (a spectator, a ball kid, someone on the next court, the umpire) |
+| SPACE / ENTER / `c` | take the suggestion on the bar: the identity whose segments look most like this one, among those not on court at the same time, with a small preference for the same half; the first identity not yet used when nothing looks alike |
+| `u` | take back what was said about this segment |
+| `d` / `a` (or `n` / `p`) / arrows, a click on a row | the next / previous segment, or that one |
+| `f` | the next segment nobody has said anything about |
+| right click on a crop | split the segment there: the track jumped from one person to another |
+| SHIFT+`n` | the next clip of the run |
+| TAB | the single-frame view of the clip; SHIFT+TAB from there (or the grid) comes back |
+| `m` | full screen |
+| `s` | save |
+| `q` / ESC | save and quit |
+
+The crops are cut by reading the clip straight through in the background; the bar
+counts them in. What is said is saved per frame and box to
+`labels/<clip>_players.csv`, so it outlives the run it was made on; reopened, the
+segments are cut again and split wherever the labels change identity. A label no box
+of the run overlaps any more (the run was redone and lost that person) is kept as it
+is and written back untouched.
+
+## The court (`--court`)
+
+`--court` opens the court view: five frames spread over the clip (and any already
+labelled), each with the run's court keypoints drawn on it with the court's lines,
+so only the wrong ones need moving. The loupe in a top corner (the one away from the
+point) shows the selected point enlarged, with a crosshair on the exact pixel it
+names. Points are named one way everywhere: their number and a short name (`3 near
+right`). The keys that throw work away (`x`, `r`, `u`) take SHIFT; pressed alone they
+only say so.
+
+| key | what it does |
+|---|---|
+| drag a point | move it (and select it) |
+| click elsewhere | put the selected point there: how the two net posts, which the model does not give, are placed |
+| `,` / `.` | select the previous / next point (0 - 13 the engine's, 14 / 15 the left / right net post tops) |
+| `i` / `j` / `k` / `l` | nudge the selected point a pixel; with SHIFT, a quarter |
+| `v` | the selected point cannot be seen on this frame: listed under `hidden`, apart from the points `not placed` |
+| SPACE / ENTER / `c` | the frame is right: its points become its label, and the next frame not yet labelled comes up |
+| `y` | copy the points of the nearest labelled frame before this one, else after it (a still camera's court does not move) |
+| SHIFT+`r` | back to the model's points |
+| SHIFT+`x` | unlabel this frame |
+| SHIFT+`u` | undo the last change on this frame |
+| `d` / `a` (or `n` / `p`) / arrows | the next / previous frame, without confirming |
+| SHIFT+`n` | the next clip of the run |
+| TAB | the single-frame view of the clip; SHIFT+TAB from there (or the grid) comes back |
+| `m` | full screen |
+| `s` | save |
+| `q` / ESC | save and quit |
+
+Only what SPACE confirms is a label; a point outside the picture is never written.
+Leaving a frame (for another, the frames, or the next clip) with changes SPACE has
+not confirmed is held back once with a warning; the same key again leaves them.
+Saved to `labels/<clip>_court.csv`.
+
+## Scorecards
+
+```powershell
+python score_labels.py --out-dir output/label_candidates                    # every type, every labelled clip
+python score_labels.py --out-dir output/label_candidates --holdout mixed_v1 # the held-out set only
+python -m finetune.scoring.hits_score --out-dir <run> --compare before.log  # one type, against an earlier log
+```
+
+`score_labels.py` runs the landing (`score_court_events.py`), hit
+(`finetune.scoring.hits_score`), rally (`rallies_score`), player identity
+(`players_score`) and court (`court_score`) scorers on one pipeline run folder, each
+on the clips with labels of its type, and says so for a type nobody has labelled
+yet. Every scorer takes `--clips`, `--holdout`, `--include-excluded`, `--models` and
+`--compare`, and reads its labels by one rule (`finetune/scoring/label_scoring.py`):
+the label home unless `--archive` says otherwise, every clip with that type's file
+except those in `exclude.txt`. Whether a clip's ball labels have been reviewed only
+decides whether a landing or hit without its own point may take one from them (it
+is still scored for its timing); it never holds the clip's other labels back.
+
+- hits: precision, recall, timing error in frames (median and p90), hitter
+  accuracy, contact point error in pixels at 1080p;
+- rallies: mean overlap per labelled rally, recall and precision at an overlap of
+  0.5, start and end error in seconds;
+- player identity: coverage of the labelled player boxes, the share of them on the
+  track given that player (each track one player, each player one track, over the
+  whole clip), identity switches, spectators taken for players;
+- court: keypoint error in pixels at 1080p and on the court plane in metres, the
+  metres only on frames whose labelled points pin the plane down (`no_plane`
+  counts the others, and a note under the clip says why).
+
 ## `--uncertain`
 
 `--uncertain` walks only the frames that want attention (no confident guess, or
@@ -157,8 +356,20 @@ centering errors in every imported label.
 ## Output
 
 `labels/<clip>_ball.csv` (`frame,ball_x,ball_y`). Review progress lives in
-`labels/<clip>_ball.review.json` so you can quit and resume, and the landings in
-`labels/<clip>_bounces.csv` (see *Landings*). Everything is autosaved
+`labels/<clip>_ball.review.json` so you can quit and resume. Beside them, one file
+per label type, each written only when something is marked and removed when the
+last mark is taken off:
+
+| file | columns | what a row is |
+|---|---|---|
+| `<clip>_bounces.csv` | `frame,ball_x,ball_y` | a landing: `frame_###`, or `frame_###.5` between two frames; the point where it touched the ground, blank for the ball label's (see *Landings*) |
+| `<clip>_hits.csv` | `frame,ball_x,ball_y,hitter` | a racket hit, as a landing is, and `near`, `far` or blank (see *Hits*) |
+| `<clip>_rallies.csv` | `start,end` | a rally: `frame_###` cells, either blank while that end is not marked |
+| `<clip>_players.csv` | `frame,player,x1,y1,x2,y2,track` | one tracked box: `P1`-`P4` or `none`, the box in native pixels, the run's track id it came from |
+| `<clip>_court.csv` | `frame,point,x,y` | one court point on a labelled frame: the engine's fourteen in its order (`far_left`, `far_right`, `near_left`, `near_right`, `far_left_singles`, `near_left_singles`, `far_right_singles`, `near_right_singles`, `far_service_left`, `far_service_right`, `near_service_left`, `near_service_right`, `far_centre`, `near_centre`), then `net_post_left`, `net_post_right` |
+| `<clip>_events.review.json` | `{"rejected": {kind: [frames]}}` | the candidates rejected, by kind (`landing`, `hit`, `rally_start`, `rally_end`) |
+
+Everything is autosaved
 every few seconds and on any exit; a frame you already dealt with shows a REVIEWED
 (space) or EDITED (click / `v` / nudge) badge in the top-right corner when you come
 back to it, and the top-left corner counts how many frames are left to do.

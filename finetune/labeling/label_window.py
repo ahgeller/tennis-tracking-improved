@@ -25,6 +25,7 @@ VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN = 37, 38, 39, 40      # what waitKeyEx gives f
 KEYS_NEXT = {VK_RIGHT, 2555904, 83, 0x01000014}         # Win32 / Qt (this build) / GTK / Qt raw
 KEYS_PREV = {VK_LEFT, 2424832, 81, 0x01000012}
 KEY_TAB = 9
+KEY_SAVE = ord("s")
 KEYS_QUIT = (ord("q"), 27)                 # q / ESC
 KEYS_CONFIRM = (ord(" "), 13, ord("c"))    # SPACE / ENTER / c
 KEYS_ZOOM_IN, KEYS_ZOOM_OUT = (ord("+"), ord("=")), (ord("-"), ord("_"))
@@ -153,12 +154,28 @@ def shift_held() -> bool:
     return bool(_user32.GetKeyState(VK_SHIFT) & KEY_DOWN)
 
 
+def next_clip_key(code: int) -> bool:
+    """SHIFT+n: the next clip of a run (--players, --court). Qt hands the letter back in lower case
+    whatever the modifiers (shift_held), so this is an n with SHIFT down, never ord("N")."""
+    return code == ord("n") and shift_held()
+
+
 # Keys with no character of their own come back from this build as their bare virtual-key code,
 # and some of those codes are also printable keys the tool binds: F1..F12 are 112..123, which read
-# as p, q, r, s, t, u, v ...; Insert/Delete are 45/46 ('-', '.'); PgUp/PgDn/End/Home are 33..36.
-# The arrows (37..40) are wanted and handled as arrows. A letter is typed on a different key, so
-# asking the OS whether the virtual key itself is down tells the two apart.
-NON_CHARACTER_KEYS = set(range(0x70, 0x7C)) | {0x2D, 0x2E} | set(range(0x21, 0x25))
+# as p, q, r, s, t, u, v ...; Insert/Delete are 45/46 ('-', '.'); PgUp/PgDn/End/Home are 33..36;
+# Print Screen is 44 (','); the Windows and menu keys are 91..93 ('[', '\', ']'). The arrows
+# (37..40) are wanted and handled as arrows, which is why the tool binds no ' (39, the right
+# arrow's code). A character is typed on a different key, so asking the OS whether the virtual
+# key itself is down tells the two apart.
+NON_CHARACTER_KEYS = set(range(0x70, 0x7C)) | {0x2C, 0x2D, 0x2E} | set(range(0x21, 0x25)) | set(range(0x5B, 0x5E))
+
+
+VK_F1 = 0x70
+
+
+def help_key(code: int) -> bool:
+    """? or F1: the list of the view's keys (F1 comes as p's code; non_character_key tells them apart)."""
+    return code == ord("?") or (code == VK_F1 and non_character_key(code))
 
 
 def non_character_key(code: int) -> bool:

@@ -168,7 +168,7 @@ def test_main_scores_the_clips_with_landing_labels(tmp_path, capsys):
     _write_json(out, _payload([], block={"bounces": [_row(101, x=103.0, y=204.0)], "bounce_candidates": [], "kinematic_bounces": []}))
     assert scorer.main(["--archive", str(archive), "--out-dir", str(out)]) == 0
     text = capsys.readouterr().out
-    assert "(1 clips with landing labels: video1)" in text                # video2 has none, and is not an error
+    assert "(1 clip with landing labels: video1)" in text                # video2 has none, and is not an error
     assert "=== landings [gridtracknet] tier=confirmed tolerance=0.10s ===" in text
     assert "video1         labels=   2 found=   1 hits=   1 precision=1.000 recall=0.500 | dt med=  33ms p90=  33ms | px med=  5.0px" in text
     assert "    unmatched labels:   300.5 (10.02s)" in text               # a landing between frames 300 and 301
@@ -183,8 +183,8 @@ def test_main_refuses_a_run_without_court_events_or_without_the_json(tmp_path, c
     _write_json(out, _payload([]))                                         # written without --court
     assert scorer.main(["--archive", str(archive), "--out-dir", str(out)]) == 1
     assert "has no court events" in capsys.readouterr().err
-    assert scorer.main(["--archive", str(archive), "--out-dir", str(out), "--clips", "video2"]) == 1
-    assert "No clip in" in capsys.readouterr().out
+    assert scorer.main(["--archive", str(archive), "--out-dir", str(out), "--clips", "video2"]) == 0   # nothing to score
+    assert "has landing labels (labels/<clip>_bounces.csv) yet: nothing to score" in capsys.readouterr().out
 
 
 def test_main_compares_against_an_earlier_log(tmp_path, capsys):

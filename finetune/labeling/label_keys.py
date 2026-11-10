@@ -1,5 +1,6 @@
 """What the label tool's keys do: the guards every key passes, q, and the single-frame view's
-keys, with the keys the grid shares. The grid's and the sheet's own keys are in ``label_grid`` and ``label_sheet``.
+keys, with the keys the grid shares. The grid's, the sheet's, the player view's and the court view's
+own keys are in ``label_grid``, ``label_sheet``, ``label_players`` and ``label_court``.
 
 Every key names a tool action (``tool.confirm``, ``tool.move``, ``tool.jump``...) or a view's
 (``grid_view.toggle``, ``sheet_view.page``...): that is the surface the key table in the tests
@@ -19,6 +20,11 @@ if TYPE_CHECKING:
     from finetune.labeling.label_tool import Tool
 
 
+# The court-event keys of the single frame but ; (whose way SHIFT says): key -> (Tool action, its arguments).
+EVENT_KEYS = {ord("."): ("toggle_hit",), ord(","): ("cycle_hitter",), ord("["): ("toggle_rally", "start"),
+              ord("]"): ("toggle_rally", "end"), ord(":"): ("answer_candidate", -1), ord("\\"): ("reject_candidates",)}
+
+
 class KeyHandler:
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
         self.session = session
@@ -26,10 +32,17 @@ class KeyHandler:
 
     def handle(self, key: int) -> bool:
         """One key from waitKeyEx; True when the tool should quit. The guards and q are here; what
-        a key does belongs to the view showing it (SheetView, GridView, plain_key), and the grid and
-        the single frame then share common_key."""
+        a key does belongs to the view showing it (``Tool.view.handle_key``): the single frame's are
+        plain_key, and the grid and the single frame then share common_key."""
         tool = self.tool
         code = key & 0xFF if key < 0x10000 else key
+        if win.help_key(code):
+            tool.help_shown = not tool.help_shown
+            return False
+        if tool.help_shown:
+            tool.help_shown = False   # any key closes the list; only q (and ESC) goes on to act
+            if code not in KEYS_QUIT:
+                return False
         if win.non_character_key(code):
             return False          # F1 is not p, F2 is not q: see NON_CHARACTER_KEYS
         if not tool.overview and not tool.view_ready() and code not in KEYS_QUIT:
@@ -38,13 +51,10 @@ class KeyHandler:
             return self.quit_key()
         if code != ord("/"):
             self.session.awaiting_landing = None   # any other key: the landing keeps no point (Tool.toggle_landing)
-        direction = self.key_direction(key, code)
-        if tool.sheet_view.active:
-            tool.sheet_view.handle_key(code, direction)
-        elif tool.grid_view.active:
-            tool.grid_view.handle_key(code, direction) or self.common_key(code)
-        else:
-            self.plain_key(code, direction) or self.common_key(code)
+        if code != ord("."):
+            self.session.awaiting_hit = None       # ... and the hit (Tool.toggle_hit)
+        self.session.awaiting_candidate = None     # a candidate's click is offered until the next key
+        tool.view.handle_key(code, self.key_direction(key, code))
         return False
 
     @staticmethod
@@ -66,7 +76,7 @@ class KeyHandler:
         if self.session.dirty and not tool.quit_warned:
             tool.quit_warned = True
             print("[warn] some labels could not be saved (see above). Close the file in the other "
-                  "program and press q again; quitting anyway keeps them in <clip>_ball.unsaved.csv")
+                  "program and press q again; quitting anyway keeps them in the .unsaved copies beside them")
             return False
         return True
 
@@ -77,6 +87,8 @@ class KeyHandler:
             return True
         if code == ord("e"):
             tool.seek_disputed()
+        elif self.event_key(code):
+            pass
         elif code in (ord("f"), ord("b")):
             tool.jump(1 if code == ord("f") else -1)
         elif direction:
@@ -113,9 +125,26 @@ class KeyHandler:
             return False
         return True
 
+    def event_key(self, code: int) -> bool:
+        """The single-frame keys for the court events beside the landing's /: . a hit, , its hitter,
+        [ and ] a rally's start and end, ; and SHIFT+; (or :) the next and previous candidate nobody
+        has answered, a backslash not an event. False for any other key."""
+        if code == ord(";"):
+            self.tool.answer_candidate(-1 if win.shift_held() else 1)
+            return True
+        action = EVENT_KEYS.get(code)
+        if action is None:
+            return False
+        name, *arguments = action
+        getattr(self.tool, name)(*arguments)
+        return True
+
     def common_key(self, code: int) -> None:
         """The keys the grid and the single frame read the same way."""
         tool = self.tool
+        if code == KEY_TAB and win.shift_held() and tool.home_view is not None:
+            tool.home_view.open()          # back to the players or court view the frames were reached from
+            return
         toggles = {ord("w"): tool.sheet_view.toggle, KEY_TAB: tool.grid_view.toggle, ord("z"): tool.grid_view.toggle_size,
                    ord("t"): tool.toggle_trail, ord("g"): tool.toggle_follow, ord("h"): tool.cycle_filter,
                    ord("o"): tool.toggle_inset, ord("m"): tool.toggle_fullscreen, ord("s"): tool.save,

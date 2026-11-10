@@ -32,6 +32,20 @@ def test_sheet_centres_its_stretch_on_the_cursor_and_pages_within_the_clip():
     assert sheet.start == 160
 
 
+
+def test_one_view_shows_at_a_time_and_it_alone_takes_the_keys_mouse_and_render():
+    tool = tool_over(source("a", 100))
+    assert tool.view is tool.frame_view and not tool.overview and tool.view.ball_view
+    for view in (tool.grid_view, tool.sheet_view, tool.frame_view, tool.grid_view):
+        view.open()
+        assert tool.view is view and [v.active for v in (tool.frame_view, tool.grid_view, tool.sheet_view,
+                                                          tool.player_view, tool.court_view)].count(True) == 1
+        assert tool.overview == (view is not tool.frame_view)
+    tool.grid_view.close()
+    assert tool.view is tool.frame_view
+    assert not tool.player_view.ball_view and not tool.court_view.ball_view
+
+
 def test_sheet_toggle_leaves_the_grid_and_the_grid_leaves_the_sheet():
     tool = tool_over(source("a", 100))
     tool.grid_view.toggle()
@@ -77,7 +91,7 @@ def test_sheet_click_opens_the_nearest_point_and_keys_only_page_or_leave():
     assert all(row.visible for row in tool.session.rows)             # the sheet edits nothing
     sheet.handle_key(KEY_TAB, 0)
     assert not sheet.active and tool.grid_view.active
-    tool.grid_view.active = False
+    tool.view = tool.frame_view
     sheet.toggle()
     sheet.handle_key(ord("w"), 0)
     assert not sheet.active and not tool.grid_view.active

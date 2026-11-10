@@ -11,6 +11,10 @@ junctions to the main copy, so they cost no disk space and a frame the trainer
 adds to the cache is shared. Small files are copied, so a worktree can change its
 own weights without touching the main copy. Existing files are never overwritten.
 
+The copied `finetune/labels` is a snapshot to train and score on, not a place to
+label: the label tool and the label scorers resolve the main copy's labels
+(`workspace.label_home()`) from a worktree, so what is labelled lands in one place.
+
 The candidate weights (`system/models/candidates`) and the TensorRT engine cache
 (`system/models/engine_cache`) are copied from the reference worktree,
 `phases/ABplus` (`--reference` names another), before the main copy's

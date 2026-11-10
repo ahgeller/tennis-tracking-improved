@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from finetune.data.fileio import backup_copy
 from finetune.data.label_check import matches_any
@@ -28,9 +28,6 @@ from finetune.data import workspace as ws
 from finetune.data.workspace import (VideoMeta, add_exclusion, clip_of, label_csv, label_files, read_manifest, review_json,
                                      suspect_json, video_meta, videos_in, write_manifest)
 from tennis_tracker.frame_rate import phase_stride
-
-if TYPE_CHECKING:
-    from finetune.data.alignment import Evidence, Tracks
 
 AUDIT_MAX_SHIFT = 3000        # temporal shifts (label frames) tried when a clip disagrees: the whole clip
 AUDIT_SUSPECT = 0.60         # below this agreement (with enough detector coverage) a clip is flagged

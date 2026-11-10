@@ -31,18 +31,12 @@ class MouseHandler:
             if event == cv2.EVENT_MOUSEWHEEL:
                 self.settle_wheel(flags)
             return
-        if tool.sheet_view.active:
-            tool.sheet_view.on_mouse(event, x, y)
-            return
         if event == cv2.EVENT_LBUTTONDBLCLK:
             # The second press of a quick double-click comes through as this instead of a press. With
             # the pointer parked on the same screen pixel frame after frame, click-click on two
             # consecutive frames is exactly that, and every second click used to be thrown away.
             event = cv2.EVENT_LBUTTONDOWN
-        if tool.grid_view.active:
-            tool.grid_view.on_mouse(event, x, y)
-            return
-        self.frame_event(event, x, y, flags)
+        tool.view.on_mouse(event, x, y, flags)
 
     def frame_event(self, event: int, x: int, y: int, flags: int) -> None:
         """An event on the single-frame view: the HUD's chips, the inset, a click placing the ball,
@@ -89,7 +83,9 @@ class MouseHandler:
     def place_click(self, x: int, y: int) -> None:
         """A left click on the picture: the ball is there, and the next frame comes up - or, while a
         landing with no ball label under it waits for its point (``Tool.toggle_landing``), the ball
-        touched the ground there, and the frame stays up."""
+        touched the ground there, and the frame stays up; the same for a hit waiting for its point
+        (``Tool.toggle_hit``) and for a candidate between two frames waiting for its confirming
+        click (``Tool.place_candidate``)."""
         session = self.session
         if session.frame_missing():
             return                                  # nothing to see, so nothing to label
@@ -98,6 +94,10 @@ class MouseHandler:
             return                                # a click in the black beyond the frame
         if session.awaiting_landing is not None:
             self.tool.place_landing(fx, fy)
+        elif session.awaiting_hit is not None:
+            self.tool.place_hit(fx, fy)
+        elif session.awaiting_candidate is not None:
+            self.tool.place_candidate(fx, fy)
         elif self.tool.set_point(fx, fy):
             self.tool.move(1)
 

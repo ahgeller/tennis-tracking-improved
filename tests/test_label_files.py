@@ -326,3 +326,17 @@ def test_verified_policy_does_not_clear_grid_matches():
         assert not data_policy.is_verified(name, policy)
     for name in ("video13", "video53", "video100"):
         assert data_policy.is_verified(name, policy)
+
+
+def test_two_writes_of_one_file_at_once_each_get_their_own_temporary(tmp_path):
+    """Two sessions saving the same label file at once must not share a temporary: the second
+    would truncate the first's half-written file and move it over the target."""
+    path = tmp_path / "video6_hits.csv"
+    assert fileio.temporary_for(path) != fileio.temporary_for(path)
+    assert fileio.temporary_for(path).parent == path.parent and fileio.temporary_for(path).name.endswith(".tmp")
+    with fileio.atomic_text(path) as first:
+        first.write("first\n")
+        with fileio.atomic_text(path) as second:
+            second.write("second\n")
+    assert path.read_text(encoding="utf-8") == "first\n"        # the write that finished last
+    assert not list(tmp_path.glob("*.tmp"))

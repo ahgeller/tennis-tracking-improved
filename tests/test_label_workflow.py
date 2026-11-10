@@ -212,7 +212,7 @@ def test_accept_run_marks_each_clip_dirty_including_last_row():
     for row in tool.session.rows:
         row.conf = .9
     assert tool.accept_run() == 4
-    assert a.dirty and b.dirty
+    assert a.changed and b.changed
     assert all(row.reviewed for row in tool.session.rows)
 
 
@@ -260,7 +260,7 @@ def test_idle_render_is_cached_and_every_change_redraws():
         "trail": lambda t: setattr(t.session, "trail", not t.session.trail),
         "follow": lambda t: setattr(t.session, "follow", not t.session.follow),
         "step": lambda t: setattr(t.session, "step", 4),
-        "unsaved": lambda t: setattr(t.session, "dirty", not t.session.dirty),
+        "unsaved": lambda t: t.session.source.changed.symmetric_difference_update({"ball"}),
         "zoom": lambda t: setattr(t.session, "zoom", t.session.zoom * 1.5),
         "pan": lambda t: setattr(t.session, "center", (t.session.center[0] + 7, t.session.center[1])),
         "walk": lambda t: t.session.only_uncertain(),
@@ -402,6 +402,11 @@ def clip_files(clip, folder):
     clip.review = folder / f"{clip.clip}_ball.review.json"
     clip.suspects = folder / f"{clip.clip}_ball.suspect.json"
     clip.bounces = folder / f"{clip.clip}_bounces.csv"
+    clip.hits_path = folder / f"{clip.clip}_hits.csv"
+    clip.rallies_path = folder / f"{clip.clip}_rallies.csv"
+    clip.events_review = folder / f"{clip.clip}_events.review.json"
+    clip.players_path = folder / f"{clip.clip}_players.csv"
+    clip.court_path = folder / f"{clip.clip}_court.csv"
     return clip
 
 
@@ -430,7 +435,7 @@ def test_slash_marks_the_frame_as_a_landing_and_pressing_it_again_unmarks_it():
     row = session.rows[3]
     assert not landing_badge_drawn(tool.render())
     press_slash(tool)
-    assert session.source.landings == {3: None} and session.dirty and session.source.dirty
+    assert session.source.landings == {3: None} and session.dirty and session.source.changed == {"landings"}
     assert session.awaiting_landing is None                          # the ball label is its point: no click asked
     assert "/=landing" in tool.frame_view.hud_lines(row, None, None)[1]
     tool.undo()                                                      # u: the label's history, not a landing
@@ -562,6 +567,7 @@ def test_landings_are_saved_with_the_labels_and_read_back_when_the_clip_is_opene
     from finetune.labeling.label_source import build_source
     clip = clip_files(source("clip", 6), tmp_path)
     tool = make_tool(clip)
+    tool.session.touch("ball")                                       # the label file the clip is opened from
     for index in (4, 1):
         tool.session.cursor = index
         tool.toggle_landing()
@@ -586,6 +592,7 @@ def test_a_between_landing_is_saved_as_a_half_frame_with_its_point_and_read_back
     from finetune.labeling.label_source import build_source
     clip = clip_files(source("clip", 6), tmp_path)
     tool = make_tool(clip)
+    tool.session.touch("ball")                                       # the label file the clip is opened from
     tool.session.cursor = 3
     tool.toggle_landing()
     tool.session.cursor = 4
@@ -606,7 +613,7 @@ def test_a_between_landing_is_saved_as_a_half_frame_with_its_point_and_read_back
 def test_a_damaged_landing_file_keeps_the_clip_out_and_is_never_written_over(tmp_path, capsys):
     from finetune.labeling.label_source import build_source
     clip = clip_files(source("clip", 6), tmp_path)
-    clip.dirty = True
+    clip.changed.add("ball")
     make_tool(clip).save(quiet=True)                                   # the label file the clip is opened from
     write_clip(tmp_path / "clip.avi", 6, size=(1280, 720))
     damaged = "frame,ball_x,ball_y\nframe_002,5,\n"                    # one coordinate without the other
@@ -618,23 +625,24 @@ def test_a_damaged_landing_file_keeps_the_clip_out_and_is_never_written_over(tmp
 
 
 def test_save_survives_a_locked_file_and_keeps_the_edits(tmp_path):
-    import finetune.labeling.label_tool as label_tool
+    import finetune.labeling.label_saving as label_saving
     a, b = source("a", 2), source("b", 2)
     for clip in (a, b):
         clip_files(clip, tmp_path)
     tool = make_tool(a, b)
-    a.dirty = b.dirty = tool.session.dirty = True
-    real = label_tool.save_rows
+    a.changed.add("ball")
+    b.changed.add("ball")
+    real = label_saving.save_rows
 
     def locked(path, *rest):
         if path == a.out_csv:
             raise PermissionError(13, "in use by another program")
         real(path, *rest)
-    with patch.object(label_tool, "save_rows", side_effect=locked):
+    with patch.object(label_saving, "save_rows", side_effect=locked):
         tool.save(quiet=True)
     assert b.out_csv.is_file()     # one stuck clip does not stop the others
-    assert a.dirty and tool.session.dirty  # ... and its edits are kept for the next try
-    assert not b.dirty
+    assert a.changed == {"ball"} and tool.session.dirty  # ... and its edits are kept for the next try
+    assert not b.changed
     tool.rescue_unsaved()
     assert (tmp_path / "a_ball.unsaved.csv").is_file()
 
@@ -1226,10 +1234,12 @@ def test_a_no_ball_draft_with_a_sure_hint_offers_it():
 # grid's and the sheet's are mocked on their views under the names the table has always used.
 TOOL_HANDLERS = ("save", "confirm", "move", "jump", "jump_disputed", "take_suggestion", "mark_invisible", "accept_run",
                  "nudge", "zoom_key", "toggle_fullscreen", "remember_settings", "toggle_follow", "cycle_filter",
-                 "toggle_inset", "follow_ball", "toggle_landing")
-VIEW_HANDLERS = {GridView: {"toggle": "toggle_grid", "toggle_size": "toggle_grid_size", "confirm_page": "confirm_grid",
-                            "page": "grid_page", "step": "grid_step", "select": "grid_select", "prepare": "prepare_grid"},
-                 SheetView: {"toggle": "toggle_sheet", "page": "sheet_page"}}
+                 "toggle_inset", "follow_ball", "toggle_landing", "toggle_hit", "cycle_hitter", "toggle_rally",
+                 "jump_candidate", "reject_candidates")
+VIEW_HANDLERS = {GridView: {"toggle": "toggle_grid", "open": "open_grid", "toggle_size": "toggle_grid_size",
+                            "confirm_page": "confirm_grid", "page": "grid_page", "step": "grid_step", "select": "grid_select",
+                            "prepare": "prepare_grid"},
+                 SheetView: {"toggle": "toggle_sheet", "close": "close_sheet", "page": "sheet_page"}}
 
 
 @contextmanager
@@ -1269,7 +1279,10 @@ PLAIN_BINDINGS = (
     + [(key, [call.move(1)]) for key in FORWARD] + [(key, [call.move(-1)]) for key in BACKWARD]
     + [(key, []) for key in keys("1", "2", "4", "6", "8")]       # the step, checked below
     + [(ord("f"), [call.jump(1)]), (ord("b"), [call.jump(-1)]), (ord("u"), [call.follow_ball()]),
-       (ord("/"), [call.toggle_landing()])]
+       (ord("/"), [call.toggle_landing()]), (ord("."), [call.toggle_hit()]), (ord(","), [call.cycle_hitter()]),
+       (ord("["), [call.toggle_rally("start")]), (ord("]"), [call.toggle_rally("end")]),
+       (ord(";"), [call.jump_candidate(1)]), (ord(":"), [call.jump_candidate(-1)]),
+       (ord("\\"), [call.reject_candidates()])]
     + nudges(1.0) + nudges(.25, "IJKL")
     + [(key, [call.zoom_key(1.0)]) for key in keys("+", "=")] + [(key, [call.zoom_key(-1.0)]) for key in keys("-", "_")]
     + [(ord("m"), [call.toggle_fullscreen()]), (ord("t"), [call.remember_settings()]), (ord("g"), [call.toggle_follow()]),
@@ -1291,6 +1304,7 @@ GRID_BINDINGS = (
        (ord("v"), [call.mark_invisible()]),
        (ord("f"), [call.jump(1), call.prepare_grid(0)]), (ord("b"), [call.jump(-1), call.prepare_grid(0)]),
        (ord("u"), [call.follow_ball()]), (ord("/"), [call.toggle_landing()])]
+    + [(key, []) for key in keys("[", "]", ";", ":", "\\")]       # the single frame's event keys: not here
     + nudges(1.0) + nudges(.25, "IJKL")
     + [(key, []) for key in keys("+", "=", "-", "_")]            # the grid's own zoom, checked below
     + [(ord("m"), [call.toggle_fullscreen()]), (ord("t"), [call.remember_settings()]), (ord("g"), [call.toggle_follow()]),
@@ -1298,10 +1312,10 @@ GRID_BINDINGS = (
 )
 SHEET_BINDINGS = (
     [(key, [call.save()]) for key in keys("q", 27)]
-    + [(ord("w"), [call.toggle_sheet()]), (9, [call.toggle_sheet(), call.toggle_grid()])]
+    + [(ord("w"), [call.close_sheet()]), (9, [call.open_grid()])]
     + [(key, [call.sheet_page(1)]) for key in FORWARD] + [(key, [call.sheet_page(-1)]) for key in BACKWARD]
     + [(key, []) for key in keys(" ", 13, "c", "e", "y", "x", "v", "r", "1", "f", "b", "u", "i", "I", "+", "-",
-                                 "m", "t", "g", "h", "o", "s", "z", ",", ".", "/")]
+                                 "m", "t", "g", "h", "o", "s", "z", ",", ".", "/", "[", "]", ";", "\\")]
 )
 BINDINGS = {"plain": PLAIN_BINDINGS, "grid": GRID_BINDINGS, "sheet": SHEET_BINDINGS}
 
@@ -1314,7 +1328,7 @@ def key_name(key: int) -> str:
 def press(mode, key, returns=None, shift=False, ready=True):
     """(the handler calls the key made, whether the tool wants to quit, the tool)."""
     tool = Tool([source("test")])
-    tool.grid_view.active, tool.sheet_view.active = mode == "grid", mode == "sheet"
+    tool.view = {"grid": tool.grid_view, "sheet": tool.sheet_view}.get(mode, tool.frame_view)
     calls = Mock()
     with every_handler_mocked() as mocks, \
             patch.object(Tool, "view_ready", return_value=ready), patch.object(Row, "undo"), \
@@ -1346,7 +1360,7 @@ def test_q_quits_unless_unsaved_labels_have_not_been_warned_about():
         assert press(mode, ord("q"))[1]
         assert not press(mode, ord("w"))[1]
     tool = Tool([source("test")])
-    tool.session.dirty = True
+    tool.session.touch("ball")
     with every_handler_mocked(), \
             patch.object(win, "non_character_key", return_value=False), patch("builtins.print"):
         assert not tool.keys.handle(ord("q"))            # once: the warning
@@ -1372,7 +1386,7 @@ def test_keys_that_change_state_rather_than_call_a_handler():
         assert press("plain", ord(digit))[2].session.step == int(digit)
     assert not press("plain", ord("t"))[2].session.trail
     tool = press("plain", ord("u"))[2]
-    assert tool.session.dirty and tool.session.source.dirty
+    assert tool.session.dirty and tool.session.source.changed
     for key, factor in ((ord("+"), ZOOM_STEP), (ord("="), ZOOM_STEP), (ord("-"), 1 / ZOOM_STEP), (ord("_"), 1 / ZOOM_STEP)):
         assert press("grid", key)[2].grid_view.zoom == pytest.approx(factor, abs=5e-8)
 

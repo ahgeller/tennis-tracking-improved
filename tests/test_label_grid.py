@@ -127,14 +127,14 @@ def test_grid_keys_select_page_and_zoom():
     tool = tool_over(source("a", 40))
     grid = tool.grid_view
     grid.toggle()
-    assert grid.handle_key(ord("3"), 0) and tool.session.cursor == 2
-    assert grid.handle_key(ord("."), 0) and tool.session.cursor == 3
-    assert grid.handle_key(ord(","), 0) and tool.session.cursor == 2
-    assert grid.handle_key(0, 1) and grid.indices == list(range(8, 16))
-    assert grid.handle_key(ord("+"), 0) and grid.zoom > 1.0
-    assert grid.handle_key(ord("-"), 0) and grid.zoom == pytest.approx(1.0)
-    assert grid.handle_key(ord("v"), 0) and not tool.session.rows[tool.session.cursor].visible
-    assert grid.handle_key(ord("r"), 0)                      # swallowed: no batch accept off-screen
-    assert not grid.handle_key(ord("t"), 0)                  # shared with the single frame
+    assert grid.grid_key(ord("3"), 0) and tool.session.cursor == 2
+    assert grid.grid_key(ord("."), 0) and tool.session.cursor == 3
+    assert grid.grid_key(ord(","), 0) and tool.session.cursor == 2
+    assert grid.grid_key(0, 1) and grid.indices == list(range(8, 16))
+    assert grid.grid_key(ord("+"), 0) and grid.zoom > 1.0
+    assert grid.grid_key(ord("-"), 0) and grid.zoom == pytest.approx(1.0)
+    assert grid.grid_key(ord("v"), 0) and not tool.session.rows[tool.session.cursor].visible
+    assert grid.grid_key(ord("r"), 0)                      # swallowed: no batch accept off-screen
+    assert not grid.grid_key(ord("t"), 0)                  # shared with the single frame
     grid.render()
-    assert grid.handle_key(KEYS_CONFIRM[0], 0) and grid.indices == list(range(16, 24))
+    assert grid.grid_key(KEYS_CONFIRM[0], 0) and grid.indices == list(range(16, 24))

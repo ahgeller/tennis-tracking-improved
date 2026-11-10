@@ -12,8 +12,10 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from finetune.labeling.label_draw import HINT_TRUSTED, HINT_UNSURE, fit_text
+from finetune.labeling.label_draw import HINT_TRUSTED, HINT_UNSURE, HudItem, hud_text, middle_ellipsis
 from finetune.labeling.label_store import Row
+from finetune.labeling.label_timeline import Timeline
+from finetune.labeling.label_view import View
 from finetune.labeling.label_window import KEY_TAB
 
 if TYPE_CHECKING:
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
 SHEET_ROWS = 60           # label frames on one trajectory sheet (w)
 
 
-class SheetView:
+class SheetView(View):
     """The whole frame, dimmed, with every label of a stretch of SHEET_ROWS label frames drawn on
     it, joined in order, and the suggestions as small orange dots. The labels trace the ball's
     flight, so one that is off it - or a run of them following a player - is plain at a glance,
@@ -33,24 +35,26 @@ class SheetView:
     A motion trace was tried as the background and dropped: the players' movement swamped it,
     and the ball's streak is a pixel or two wide at this scale, under the labels anyway."""
 
+    help_title = "TRAJECTORY"
+    help = (
+        ("click a point", "open that frame"), ("a / d, arrows", "the stretch before / after"),
+        ("w / right click", "back to the single frame"), ("TAB", "the grid"), ("q / ESC", "save and quit"),
+        ("? / F1", "these keys"))
+
     def __init__(self, session: "LabelSession", tool: "Tool") -> None:
-        self.session = session
-        self.tool = tool
-        self.active = False
+        super().__init__(session, tool)
         self.start = 0                          # the first row on the sheet
         self.points: List[Tuple[int, int, int]] = []   # (row index, view x, view y) of each label drawn
         self.cache_key: Optional[tuple] = None
         self.cache: Optional[np.ndarray] = None
+        self.timeline = Timeline(session)       # the clip's timeline along the top of the HUD
 
-    def toggle(self) -> None:
+    def open(self) -> None:
         session = self.session
-        self.active = not self.active
-        if self.active:
-            self.tool.grid_view.active = False
-            first, end = session.clip_bounds(session.cursor)
-            self.start = max(first, min(session.cursor - SHEET_ROWS // 2, end - SHEET_ROWS))
-            self.cache_key = None
-        self.tool.follow_ball()
+        first, end = session.clip_bounds(session.cursor)
+        self.start = max(first, min(session.cursor - SHEET_ROWS // 2, end - SHEET_ROWS))
+        self.cache_key = None
+        super().open()
 
     def page(self, direction: int) -> None:
         first, end = self.session.clip_bounds(self.start)
@@ -60,22 +64,21 @@ class SheetView:
             self.session.set_cursor(start)   # leaving the sheet lands in the stretch it shows
             self.tool.follow_ball()
 
-    def on_mouse(self, event: int, x: int, y: int) -> None:
+    def on_mouse(self, event: int, x: int, y: int, flags: int = 0) -> None:
         if event == cv2.EVENT_RBUTTONDOWN:
-            self.toggle()
+            self.close()
         elif event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_LBUTTONDBLCLK) and self.points:
             index, px, py = min(self.points, key=lambda p: (p[1] - x) ** 2 + (p[2] - y) ** 2)
             if math.hypot(px - x, py - y) <= 14 * self.session.ui:
                 self.session.set_cursor(index)
-                self.active = False
-                self.tool.follow_ball()
+                self.close()
 
     def handle_key(self, code: int, direction: int) -> None:
         """The trajectory sheet only finds frames: its own few keys, nothing else."""
-        if code in (ord("w"), KEY_TAB):
-            self.toggle()
-            if code == KEY_TAB:
-                self.tool.grid_view.toggle()
+        if code == KEY_TAB:
+            self.tool.grid_view.open()
+        elif code == ord("w"):
+            self.close()
         elif direction:
             self.page(direction)
 
@@ -85,12 +88,12 @@ class SheetView:
         end = session.clip_bounds(self.start)[1]
         indices = list(range(self.start, min(self.start + SHEET_ROWS, end)))
         key = (tuple(indices), Row.revision, session.hints.version, session.view_w, session.view_h, session.hud_h,
-               session.cursor, session.ui)
+               session.cursor, session.ui, session.marks_revision)
         if key == self.cache_key:
             return self.cache
         selected = session.cursor
         base = session.source.frame(rows[selected].frame)
-        ui, thin = session.ui, max(1, int(round(session.ui)))
+        ui = session.ui
         scale = min(session.view_w / session.width, session.view_h / session.height)
         shown_w, shown_h = max(1, int(round(session.width * scale))), max(1, int(round(session.height * scale)))
         scale = shown_w / session.width                  # what resize really does, for the points
@@ -109,15 +112,14 @@ class SheetView:
         self.points = self.trace(display, indices, to_sheet)
         differs = self.draw_points(display, selected)
         shown = [rows[i] for i in indices]
-        line1 = (f"{rows[indices[0]].clip}  TRAJECTORY  frames {shown[0].frame}-{shown[-1].frame}  "
-                 f"{sum(r.visible for r in shown)} with a ball  reviewed {sum(r.reviewed for r in shown)}/{len(shown)}"
-                 + (f"  hint differs {differs} (red)" if differs else ""))
-        line2 = "click a point: open that frame   a/d: stretch before/after   w or right click: back   q: save/quit"
-        hud = canvas[session.view_h:]
-        cv2.putText(hud, fit_text(line1, session.view_w - int(16 * ui), 0.55 * ui, thin), (int(8 * ui), int(22 * ui)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55 * ui, (255, 255, 255), thin, cv2.LINE_AA)
-        cv2.putText(hud, fit_text(line2, session.view_w - int(16 * ui), 0.48 * ui, thin), (int(8 * ui), int(46 * ui)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48 * ui, (180, 180, 180), thin, cv2.LINE_AA)
+        line1: List[HudItem] = [(1, middle_ellipsis(rows[indices[0]].clip)), (0, "TRAJECTORY"),
+                                (0, f"frames {shown[0].frame}-{shown[-1].frame}"), (2, f"{sum(r.visible for r in shown)} with a ball"),
+                                (2, f"reviewed {sum(r.reviewed for r in shown)}/{len(shown)}"),
+                                (1, f"hint differs {differs} (red)" if differs else "")]
+        line2: List[HudItem] = [(0, "click a point=open that frame"), (1, "a/d=stretch before/after"),
+                                (0, "w or right click=back"), (2, "TAB=grid"), (0, "?=keys")]
+        self.timeline.draw(canvas[session.view_h:session.view_h + session.timeline_h], session.view_h)
+        hud_text(canvas[session.view_h + session.timeline_h:], line1, line2, ui, unsaved=session.dirty)
         self.cache_key, self.cache = key, canvas
         return canvas
 
@@ -145,6 +147,7 @@ class SheetView:
         session = self.session
         ui, thin = session.ui, max(1, int(round(session.ui)))
         differs = 0
+        captions: List[Tuple[int, int, int, int]] = []   # boxes of the frame numbers drawn, never overlapped
         for index, px, py in self.points:
             row = session.rows[index]
             colour = (70, 210, 70) if row.reviewed else (0, 220, 255)
@@ -155,6 +158,12 @@ class SheetView:
             if index == selected:
                 cv2.circle(display, (px, py), int(round(12 * ui)), (255, 255, 255), thin, cv2.LINE_AA)
             if (index - self.start) % 10 == 0:
-                cv2.putText(display, str(row.frame), (px + int(6 * ui), py - int(6 * ui)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.42 * ui, (255, 255, 255), thin, cv2.LINE_AA)
+                text = str(row.frame)
+                (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.42 * ui, thin)
+                x0, y1 = px + int(6 * ui), py - int(6 * ui)
+                box = (x0, y1 - text_h, x0 + text_w, y1)
+                if not any(box[0] < b[2] and b[0] < box[2] and box[1] < b[3] and b[1] < box[3] for b in captions):
+                    captions.append(box)    # where the flight folds back, a caption over another is skipped
+                    cv2.putText(display, text, (x0, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.42 * ui, (255, 255, 255), thin,
+                                cv2.LINE_AA)
         return differs

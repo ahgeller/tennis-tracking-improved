@@ -74,7 +74,7 @@ def test_fit_sizes_the_view_to_the_window_and_says_when_it_changed():
     assert session.fit(1280, 720)
     assert (session.view_w, session.view_h) == (1280, 720 - session.hud_h) and session.ui == 1.0
     assert not session.fit(1280, 720)                                        # the same size: nothing changed
-    assert session.fit(2560, 1440) and session.ui == 2.0 and session.hud_h == 116
+    assert session.fit(2560, 1440) and session.ui == 2.0 and session.hud_h == 156   # 2 x (HUD 58 + TIMELINE 20)
     assert session.to_view(*session.to_frame(10.5, 20.5)) == (10, 20)       # view pixel u covers [u, u + 1)
 
 

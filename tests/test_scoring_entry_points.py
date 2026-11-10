@@ -16,22 +16,26 @@ from tennis_tracker import paths
 def test_root_scripts_front_the_scoring_modules():
     import evaluate_archive
     import score_court_events
+    import score_labels
     import track_breaks
-    from finetune.scoring import archive, court_events_score
+    from finetune.scoring import archive, court_events_score, scorecard
     from finetune.scoring import track_breaks as track_breaks_module
 
     assert track_breaks.main is track_breaks_module.main
     assert evaluate_archive.main is archive.main
     assert score_court_events.main is court_events_score.main
+    assert score_labels.main is scorecard.main
 
 
 def test_every_workspace_main_takes_argv_and_returns_a_status():
     """main(argv=None) -> int everywhere, invoked as raise SystemExit(main()): a test can drive a
     module without patching sys.argv, and the exit status is the return value, never implicit."""
     from finetune.data import import_data, realign
-    from finetune.scoring import archive, court_events_score, track_breaks
+    from finetune.scoring import (archive, court_events_score, court_score, hits_score, players_score, rallies_score,
+                                  scorecard, track_breaks)
     from finetune.training import pretrack, train_gridtracknet
-    for module in (archive, court_events_score, track_breaks, import_data, realign, pretrack, train_gridtracknet):
+    for module in (archive, court_events_score, track_breaks, import_data, realign, pretrack, train_gridtracknet,
+                   hits_score, rallies_score, players_score, court_score, scorecard):
         signature = inspect.signature(module.main)
         assert list(signature.parameters) == ["argv"] and signature.return_annotation in (int, "int"), module.__name__
         source = Path(module.__file__).read_text(encoding="utf-8")
@@ -46,7 +50,7 @@ def test_every_workspace_main_takes_argv_and_returns_a_status():
 
 @pytest.mark.parametrize("cwd", [REPOSITORY, REPOSITORY / "finetune"])
 def test_the_documented_commands_answer_help_from_any_folder(cwd):
-    for script in ("evaluate_archive.py", "score_court_events.py", "track_breaks.py"):
+    for script in ("evaluate_archive.py", "score_court_events.py", "score_labels.py", "track_breaks.py"):
         done = subprocess.run([sys.executable, str(REPOSITORY / script), "--help"], cwd=cwd, capture_output=True, text=True)
         assert done.returncode == 0, done.stderr
         assert "usage:" in done.stdout
