@@ -256,6 +256,9 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
     print("[selector] Running ball-in-play selection...")
     select_t0 = timing.start()
     filtered_before = pass1.boost_masks.filter_seconds
+    # The visibility gate: the prepass's per-frame scores, read only when the gate is on (the
+    # detector refused a model without the head at start-up).
+    visibility = ctx.detector.visibility_scores() if cfg.ball_visibility_gate else None
     per_frame, chosen_track, all_tracks = select_ball_in_play(
         pass1.detections, video.fps, video.width, video.height,
         court_polygon=court_polygon,
@@ -263,7 +266,8 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
         raw_motions=pass1.raw_motions,
         player_boxes_by_frame=pass1.player_boxes,
         debug=cfg.print_selector_tracks,
-        court_keypoints_by_frame=pass1.court_keypoints)
+        court_keypoints_by_frame=pass1.court_keypoints,
+        visibility=visibility, visibility_gate=cfg.ball_visibility_gate)
     timing.add("selector_select", select_t0)
     # The boost masks pass 1 left unfiltered are filtered as the selector first reads them.
     timing.set("selector_boost_cc", pass1.boost_masks.filter_seconds - filtered_before)
@@ -291,7 +295,7 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
             display_path[fi] = (res.cx, res.cy, res.source in ("det", "motion"))
     timing.add("selector_post", post_t0)
     timing.add("selector_total", selector_t0)
-    return Selection(per_frame, chosen_track, all_tracks, court_polygon, last_kps, display_path)
+    return Selection(per_frame, chosen_track, all_tracks, court_polygon, last_kps, display_path, visibility)
 
 
 def compute_court_events(ctx: RunContext, pass1: Pass1Result, selection: Selection) -> CourtEvents:
@@ -357,6 +361,7 @@ def assemble_result(ctx: RunContext, pass1: Pass1Result, selection: Selection, e
         pass2_frames_rendered=rendered,
         outputs=outputs,
         court_events=events,
+        visibility=selection.visibility,
     )
 
 

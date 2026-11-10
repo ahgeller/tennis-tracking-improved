@@ -1,17 +1,20 @@
 """finetune/training/loop.py on its own: the loss of each architecture, a fresh network, an epoch of
 optimisation, the validation loss and the weights written back in the tracker's layouts. Tiny
 synthetic units."""
+import math
+
 import numpy as np
 import pytest
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from finetune.training.dataset import make_target
-from finetune.training.loop import (HEAT_OFFSET_WEIGHT, LOSSES, batch_loss, build_optimizer, check_finite, evaluate_loss,
-                                    fresh_model, gridtracknet_loss, heatmap_loss, hold_conv_scale, FILTER_NORM,
-                                    largest_running_variance, loss_of, normalised_conv_weights, save_weights, train_epoch,
-                                    unit_loss, unpack)
-from tennis_tracker import heatmapnet
+from finetune.training.loop import (EMA, EMA_DECAY, HEAT_OFFSET_WEIGHT, LOSSES, VIS_LOSS_WEIGHT, Validation, batch_loss,
+                                    build_optimizer, check_finite, evaluate, evaluate_loss, fresh_model, gridtracknet_loss,
+                                    has_vis_head, heatmap_loss, hold_conv_scale, FILTER_NORM, largest_running_variance,
+                                    loss_of, normalised_conv_weights, save_weights, train_epoch, unit_loss, unpack,
+                                    visibility_loss, visibility_metrics, visible_frames, with_vis_head)
+from tennis_tracker import heatmapnet, streamnet
 from tennis_tracker.ball_models import load_ball_model
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS, HEIGHT, WIDTH, load_model
 from _workspace_helpers import blank_template
@@ -218,3 +221,106 @@ def test_unpack_reads_the_plain_and_the_longer_batches():
     valid, teacher = torch.ones(1, 5), torch.ones(1, 15, 1, 1)
     unpacked = unpack((images, target, valid, teacher), torch.device("cpu"))
     assert unpacked[2] is not None and unpacked[3] is not None and torch.equal(unpacked[3], teacher)
+
+
+# --------------------------------------------------------------------------- the weight average (--ema)
+
+def test_the_ema_tracks_the_live_weights_copies_the_buffers_and_holds_the_norm():
+    """After one step the shadow sits decay of the way from the live weights toward where it was,
+    its BatchNorm statistics are the live network's, its held convolutions are back at FILTER_NORM
+    (an average of two unit filters is shorter), it stays in eval mode with no gradient, and its
+    state round-trips through a fresh EMA (the checkpoint's path). A decay outside (0, 1) is refused."""
+    torch.manual_seed(2)
+    model = streamnet.StreamNet().train()
+    ema = EMA(model, decay=0.9)
+    assert ema.decay == 0.9 and not ema.model.training and ema.updates == 0 and EMA_DECAY == 0.999
+    assert all(not parameter.requires_grad for parameter in ema.model.parameters())
+    before = {name: tensor.clone() for name, tensor in ema.model.state_dict().items()}
+    with torch.no_grad():
+        model(torch.rand(2, 15, 64, 96))                      # moves the running statistics
+        model.head.bias.add_(1.0)
+        model.fuse16[1].dense[0].weight.mul_(3.0)             # a held filter, off its norm
+    ema.update(model)
+    assert ema.updates == 1
+    assert torch.allclose(ema.model.head.bias, 0.9 * before["head.bias"] + 0.1 * model.head.bias)
+    assert torch.equal(ema.model.fuse16[1].dense[1].running_mean, model.fuse16[1].dense[1].running_mean)
+    assert not torch.equal(ema.model.fuse16[1].dense[1].running_mean, before["fuse16.1.dense.1.running_mean"])
+    norms = ema.model.fuse16[1].dense[0].weight.flatten(1).norm(dim=1)
+    assert torch.allclose(norms, torch.full_like(norms, FILTER_NORM), rtol=1e-5)
+    assert not torch.equal(ema.model.head.bias, model.head.bias)      # a shadow, not an alias
+    again = EMA(streamnet.StreamNet())
+    again.load_state_dict(ema.state_dict())
+    assert again.updates == 1
+    for name, tensor in ema.model.state_dict().items():
+        assert torch.equal(again.model.state_dict()[name], tensor), name
+    for bad in (0.0, 1.0, 1.5):
+        with pytest.raises(ValueError, match="between 0 and 1"):
+            EMA(model, decay=bad)
+
+
+# --------------------------------------------------------------------------- the visibility head (--vis-head)
+
+def test_visible_frames_reads_the_peaks_and_the_visibility_loss_prefers_the_right_answer():
+    target = make_target([[960.0, 540.0], None, [300.0, 200.0], None, None], 1920, 1080, streamnet.ARCH).unsqueeze(0)
+    labels, weight = visible_frames(target)
+    assert torch.equal(labels, torch.tensor([[1.0, 0.0, 1.0, 0.0, 0.0]])) and torch.equal(weight, torch.ones(1, 5))
+    valid = torch.tensor([[1.0, 1.0, 1.0, 0.0, 1.0]])
+    assert torch.equal(visible_frames(target, valid)[1], valid)
+    right = torch.tensor([[4.0, -4.0, 4.0, -4.0, -4.0]])
+    wrong = -right
+    flat = torch.zeros(1, 5)
+    assert visibility_loss(right, target) < visibility_loss(flat, target) < visibility_loss(wrong, target)
+    assert float(visibility_loss(flat, target)) == pytest.approx(math.log(2.0))
+    scrambled = right.clone()
+    scrambled[0, 3] = 9.0                                              # frame 3's answer, ignored under valid
+    assert torch.allclose(visibility_loss(right, target, valid), visibility_loss(scrambled, target, valid))
+    assert not torch.allclose(visibility_loss(right, target), visibility_loss(scrambled, target))
+    assert float(visibility_loss(right, target, torch.zeros(1, 5))) == 0.0
+    assert VIS_LOSS_WEIGHT == 0.1
+
+
+def test_visibility_metrics_are_the_rank_statistic_and_the_mean_class_recall():
+    labels = torch.tensor([1.0, 1.0, 0.0, 0.0, 0.0])
+    assert visibility_metrics(torch.tensor([2.0, 1.0, -1.0, -2.0, -3.0]), labels) == (1.0, 1.0)
+    assert visibility_metrics(torch.tensor([-3.0, -2.0, 1.0, 2.0, 3.0]), labels) == (0.0, 0.0)
+    auc, balanced = visibility_metrics(torch.tensor([2.0, -1.0, 1.0, -1.0, -3.0]), labels)
+    assert auc == pytest.approx((3 + 1.5) / 6) and balanced == pytest.approx((0.5 + 2 / 3) / 2)   # the tie at -1 counts half
+    assert visibility_metrics(torch.zeros(4), labels[:4]) == (0.5, 0.5)                          # all tied: chance
+    assert visibility_metrics(torch.rand(3), torch.ones(3)) == (None, None)
+
+
+def test_fresh_model_gives_the_head_on_request_and_an_epoch_trains_it_beside_the_heat_loss():
+    """fresh_model(..., vis_head=True) is a StreamNet with the head and nothing else changed (the
+    15-channel call is untouched); another architecture is refused in one line. A training step
+    with --vis-weight moves the head and keeps the hold on the convolutions; evaluate reports the
+    head's metrics only when asked, and the plain evaluate_loss is the Validation's loss."""
+    device = torch.device("cpu")
+    plain = fresh_model(device, streamnet.ARCH)
+    headed = fresh_model(device, streamnet.ARCH, vis_head=True)
+    assert not has_vis_head(plain) and has_vis_head(headed) and headed.training
+    with pytest.raises(ValueError, match="has no visibility head"):
+        fresh_model(device, heatmapnet.ARCH, vis_head=True)
+    with pytest.raises(ValueError, match="heatmap_s4 has no visibility head"):
+        with_vis_head(heatmapnet.HeatmapNet())
+    images = torch.rand(2, 15, 64, 96)
+    target = torch.stack([make_target([[10.0, 8.0], None, [5.0, 3.0], None, None], 160, 96, streamnet.ARCH)[:, :16, :24],
+                          make_target([None] * 5, 160, 96, streamnet.ARCH)[:, :16, :24]])
+    loader = DataLoader(TensorDataset(images, target), batch_size=2)
+    head_before = headed.vis.weight.detach().clone()
+    optimizer = torch.optim.SGD(headed.parameters(), lr=0.1)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    ema = EMA(headed)
+    loss = train_epoch(headed, loader, optimizer, scaler, device, 1, 1, None, ema=ema, vis_weight=VIS_LOSS_WEIGHT)
+    assert np.isfinite(loss) and not torch.equal(headed.vis.weight, head_before) and ema.updates == 1
+    for weight in normalised_conv_weights(headed):
+        assert torch.allclose(weight.detach().flatten(1).norm(dim=1), torch.full((weight.shape[0],), FILTER_NORM), rtol=1e-5)
+    validation = evaluate(headed, loader, device, visibility=True)
+    assert isinstance(validation, Validation) and np.isfinite(validation.loss)
+    assert validation.vis_auc is not None and 0.0 <= validation.vis_auc <= 1.0
+    assert validation.vis_balanced_accuracy is not None and 0.0 <= validation.vis_balanced_accuracy <= 1.0
+    assert evaluate(headed, loader, device) == Validation(validation.loss) == Validation(evaluate_loss(headed, loader, device))
+    assert headed.training
+    # a weight of 0 leaves the head alone, the loss the heat loss: the run without the flag
+    frozen = headed.vis.weight.detach().clone()
+    plain_loss = train_epoch(headed, loader, optimizer, scaler, device, 1, 1, None, vis_weight=0.0)
+    assert np.isfinite(plain_loss) and torch.equal(headed.vis.weight, frozen)

@@ -9,18 +9,41 @@ Gaussian target), ``save_weights`` to the writer.
 
 A batch is ``(images, target)``, or ``(images, target, valid)`` and ``(images, target, valid,
 teacher)`` when its dataset carries frames without a label (the ignored frames of pseudo-labelled
-clips) or a precomputed teacher answer (``dataset.UnitDataset``): ``valid`` is one weight per
-frame, 0 for a frame the labelled loss must not read, and ``teacher`` the teacher's 15-channel
-answer. With a ``distill.Distiller`` an epoch adds its loss (the teacher's soft maps and
+clips), gap frames, or a precomputed teacher answer (``dataset.UnitDataset``): ``valid`` is one
+frame code per frame (``dataset.frame_codes``: 0 a frame the labelled loss must not read, 1 a
+labelled frame, 2 a gap frame, an absent label inside a rally), which every loss reads as a 0/1
+mask (``frame_weights``) and the visibility loss alone may weight (``gap_frames``); ``teacher`` is
+the teacher's 15-channel answer. With a ``distill.Distiller`` an epoch adds its loss (the teacher's soft maps and
 features) to the labelled one; without it the loop is what it always was.
+
+Two more parts, each off unless asked for (the trainer's ``--ema`` and ``--vis-head``):
+
+- ``EMA``, an exponential moving average of the weights (decay ``EMA_DECAY`` per optimizer step,
+  BatchNorm buffers copied). Why: on the mixed_v1 held-out set the recall of one stream_s4 run
+  moves by 0.013 (one standard deviation) between its late epochs, while the models compared
+  differ by less, so the epoch ``best.pt`` picks is a lottery ticket as much as a measurement.
+  An average over the last thousand or so steps (0.999 ** 1000 = 0.37) is what the run converged
+  to rather than where its last batch left it, and is free on the phone. The trainer scores the
+  averaged network beside the live one on every scored epoch, so the run itself says whether the
+  average matches the best epoch with less spread (the research report's kill test for F).
+- ``visibility_loss``, binary cross-entropy of a network's per-frame visibility logits
+  (``streamnet.StreamNet`` with ``vis_head``, of the variant ``--vis-pool`` names) against the
+  labels: a frame whose target holds a peak is visible, an absent-ball frame is the negative, and
+  a frame without a label (``valid`` 0) is neither. The absent frames inside a rally (the gap
+  frames, ``frame_cache.gap_frames``) are the ones the selector bridges and the head is for, and
+  they are rare (160 of the 518 held-out absent labels), so ``--vis-gap-weight`` weights their
+  terms. ``evaluate`` reports the head's AUC and balanced accuracy on the held-out set, and the
+  AUC of the visible labels against the gap frames alone (``vis_gap_auc``), the number that says
+  whether the head can refuse a fill.
 """
 
 from __future__ import annotations
 
+import copy
 import math
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -28,6 +51,7 @@ import torch
 from tennis_tracker import heatmapnet
 from tennis_tracker.ball_models import ARCHITECTURES, GRIDTRACKNET, model_class, weights_suffix
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
+from finetune.training.dataset import FRAME_GAP
 
 PROGRESS_EVERY = 200       # training steps between progress lines
 LOSS_EPSILON = 1e-6        # keeps the confidence loss's logs finite
@@ -37,14 +61,26 @@ HEAT_OFFSET_WEIGHT = 1.0       # the heat-map loss's, CenterNet's lambda_off: at
 HALF_MAX = 65504.0               # float16's largest value; the prepass and the training forward run in it
 POSITIVE_WEIGHT, NEGATIVE_WEIGHT = 0.75, 0.25    # the focal loss's class weights
 HEAT_ALPHA, HEAT_BETA = 2.0, 4.0                 # CenterNet's focal exponents: the easy-example one and the penalty reduction
+VIS_LOSS_WEIGHT = 0.1      # the visibility loss's default weight beside the heat loss (--vis-weight): a tenth, so the
+                           # head learns without steering the features the heat map is read from
+EMA_DECAY = 0.999          # the weight average's decay per optimizer step (--ema-decay): about the last 1000 steps
 
 
 def frame_weights(valid: Optional[torch.Tensor], units: int, like: torch.Tensor) -> torch.Tensor:
-    """The (units, FRAMES_PER_UNIT, 1, 1) weight of every frame's loss terms: `valid` (one weight
-    per frame, 0: no label) reshaped, or ones when the batch carries none."""
+    """The (units, FRAMES_PER_UNIT, 1, 1) weight of every frame's loss terms: 1 where `valid` (one
+    frame code per frame, module docstring) is above 0, so a labelled frame and a gap frame weigh
+    alike and a frame without a label 0; ones when the batch carries none."""
     if valid is None:
         return torch.ones(units, FRAMES_PER_UNIT, 1, 1, dtype=like.dtype, device=like.device)
-    return valid.to(like.device, like.dtype).reshape(units, FRAMES_PER_UNIT, 1, 1)
+    return (valid.to(like.device) > 0).to(like.dtype).reshape(units, FRAMES_PER_UNIT, 1, 1)
+
+
+def gap_frames(valid: Optional[torch.Tensor], labels: torch.Tensor) -> torch.Tensor:
+    """The ``(units, FRAMES_PER_UNIT)`` bool mask of the gap frames (code ``dataset.FRAME_GAP`` in
+    `valid`); all False when the batch carries no codes."""
+    if valid is None:
+        return torch.zeros(labels.shape, dtype=torch.bool, device=labels.device)
+    return (valid.to(labels.device) == FRAME_GAP).reshape(labels.shape)
 
 
 def gridtracknet_loss(prediction: torch.Tensor, target: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -89,6 +125,53 @@ def heatmap_loss(prediction: torch.Tensor, target: torch.Tensor, valid: Optional
     heat_loss = -(positive + negative).sum() / positives
     offset_loss = ((prediction[:, :, 1:3] - target[:, :, 1:3]).abs() * peak.unsqueeze(2)).sum() / positives
     return heat_loss + HEAT_OFFSET_WEIGHT * offset_loss
+
+
+def visible_frames(target: torch.Tensor, valid: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    """The visibility labels of a batch's frames and their weights, both ``(units, FRAMES_PER_UNIT)``
+    float: a frame is visible (1) when its heat channel in `target` holds a peak cell at exactly 1
+    (``dataset.make_target`` writes one for every ball, a pasted one too) and absent (0) otherwise;
+    the weight is `valid`'s (0: no label, the frame is neither) or one."""
+    rows, cols = int(target.shape[-2]), int(target.shape[-1])
+    heat = target.reshape(-1, FRAMES_PER_UNIT, 3, rows, cols)[:, :, 0]
+    labels = (heat.flatten(2).amax(dim=2) == 1).float()
+    return labels, frame_weights(valid, labels.shape[0], labels).reshape(labels.shape)
+
+
+def visibility_loss(logits: torch.Tensor, target: torch.Tensor, valid: Optional[torch.Tensor] = None,
+                    gap_weight: float = 1.0) -> torch.Tensor:
+    """The visibility head's loss: binary cross-entropy of the per-frame `logits`
+    (``(units, FRAMES_PER_UNIT)``, before the sigmoid) against ``visible_frames`` of `target`,
+    averaged over the frames that carry a label (`valid`) with a gap frame's term (``gap_frames``)
+    weighted `gap_weight` (``--vis-gap-weight``; 1, the default, is the plain mean); a batch
+    without a labelled frame scores 0. A weight at or below 0 is a ValueError."""
+    if gap_weight <= 0:
+        raise ValueError(f"--vis-gap-weight weights the gap frames' terms and must be above 0, not {gap_weight:g}")
+    labels, weight = visible_frames(target, valid)
+    if gap_weight != 1.0:
+        weight = weight * torch.where(gap_frames(valid, labels), gap_weight, 1.0)
+    entropy = torch.nn.functional.binary_cross_entropy_with_logits(logits.float(), labels, reduction="none")
+    return (entropy * weight).sum() / weight.sum().clamp(min=1.0)
+
+
+def with_vis_head(model: torch.nn.Module, pool: str = "global") -> torch.nn.Module:
+    """`model` with its visibility head of variant `pool` enabled (``StreamNet.enable_vis_head``,
+    ``--vis-pool``); a record's head of the other variant is replaced by a fresh one, with a line
+    saying so. An architecture without one is a ValueError, the one ``--vis-head`` reports."""
+    enable = getattr(model, "enable_vis_head", None)
+    if not callable(enable):
+        raise ValueError(f"--vis-head: {model.ARCH} has no visibility head (stream_s4 has)")
+    before = getattr(model, "vis_pool", None)
+    enable(pool, replace=True)
+    if before is not None and before != pool:
+        print(f"[train] the starting weights carry the {before} visibility head; a fresh {pool} head replaces it "
+              f"(--vis-pool {pool})", flush=True)
+    return model
+
+
+def has_vis_head(model: torch.nn.Module) -> bool:
+    """Whether `model` answers visibility logits (``forward(images, return_vis=True)``)."""
+    return bool(getattr(model, "has_vis_head", False))
 
 
 # Every architecture but GridTrackNet answers on a heat-map grid and trains with the heat-map loss.
@@ -224,49 +307,155 @@ def largest_running_variance(model: torch.nn.Module) -> Tuple[str, float]:
     return largest
 
 
-def fresh_model(device: torch.device, arch: str = GRIDTRACKNET) -> torch.nn.Module:
+def fresh_model(device: torch.device, arch: str = GRIDTRACKNET, vis_head: bool = False,
+                vis_pool: str = "global") -> torch.nn.Module:
     """A float32 network of `arch` to train from scratch, in train mode: a GridTrackNet with
     Kaiming convolutions and BatchNorm at Keras's defaults (gamma 1, beta 0, running mean 0,
     running variance 1); a HeatmapNet as its own constructor leaves it (Kaiming convolutions,
-    the heat head at its prior)."""
+    the heat head at its prior). With `vis_head` the network carries its visibility head of
+    variant `vis_pool` (``with_vis_head``)."""
     model = model_class(arch)()
     if arch == GRIDTRACKNET:
         for conv in model.convs:
             torch.nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
             torch.nn.init.zeros_(conv.bias)
+    if vis_head:
+        with_vis_head(model, vis_pool)
     return model.to(device).float()
 
 
-def evaluate_loss(model, loader, device, max_steps=None) -> float:
-    """The mean loss over the loader in eval mode (the running BatchNorm statistics, which
-    stay as they are); the model's mode is restored afterwards."""
+class EMA:
+    """An exponential moving average of a network's weights (the module docstring says why): a
+    shadow copy of `model` in eval mode, moved toward the live weights by ``1 - decay`` after
+    every optimizer step (``update``), its buffers (the BatchNorm running statistics) copied
+    from the live network, and its normalised convolutions held at ``FILTER_NORM`` like the live
+    ones (an average of filters at that norm is shorter; held, the copied running statistics
+    still match its activations). ``model`` is scored and saved like any network;
+    ``state_dict`` and ``load_state_dict`` carry it through the trainer's checkpoint. The copy
+    is made before any forward hook is put on the live network (``distill.FeatureTap``), so
+    the shadow's forwards write into nobody's taps."""
+
+    def __init__(self, model: torch.nn.Module, decay: float = EMA_DECAY) -> None:
+        if not 0.0 < decay < 1.0:
+            raise ValueError(f"--ema-decay is the weight average's decay per step, between 0 and 1, not {decay:g}")
+        self.decay = decay
+        self.model = copy.deepcopy(model).eval()
+        for parameter in self.model.parameters():
+            parameter.requires_grad_(False)
+        self.held = normalised_conv_weights(self.model)
+        self.updates = 0
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        shadow: List[torch.Tensor] = [parameter.data for parameter in self.model.parameters()]
+        live: List[torch.Tensor] = [parameter.detach() for parameter in model.parameters()]
+        torch._foreach_mul_(shadow, self.decay)
+        torch._foreach_add_(shadow, live, alpha=1.0 - self.decay)
+        for mine, theirs in zip(self.model.buffers(), model.buffers()):
+            mine.copy_(theirs)
+        hold_conv_scale(self.held)
+        self.updates += 1
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {"model": self.model.state_dict(), "updates": self.updates, "decay": self.decay}
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        self.model.load_state_dict(state["model"])
+        self.updates = int(state["updates"])
+
+
+class Validation(NamedTuple):
+    """One pass over the held-out loader (``evaluate``): the mean loss and, when the visibility
+    head was asked for, its AUC and balanced accuracy over the labelled frames (None when the
+    head was not evaluated, or when the frames seen were all visible or all absent, which no
+    ranking can be measured on), and ``vis_gap_auc``, the AUC of the visible frames against the
+    gap frames alone (None without a gap frame among the frames seen)."""
+    loss: float
+    vis_auc: Optional[float] = None
+    vis_balanced_accuracy: Optional[float] = None
+    vis_gap_auc: Optional[float] = None
+
+
+def visibility_metrics(logits: torch.Tensor, labels: torch.Tensor) -> Tuple[Optional[float], Optional[float]]:
+    """(AUC, balanced accuracy) of the visibility `logits` against the 0/1 `labels`, both flat and
+    of the labelled frames only. The AUC is the Mann-Whitney statistic (the share of visible-absent
+    pairs ranked the right way, ties at half), the balanced accuracy the mean of the recall of each
+    class at a logit of 0 (probability 0.5). Both None without a frame of each class."""
+    scores, labels = logits.detach().float().cpu(), labels.detach().float().cpu()
+    positives, negatives = int((labels == 1).sum()), int((labels == 0).sum())
+    if not positives or not negatives:
+        return None, None
+    order = scores.argsort()
+    _, inverse, counts = torch.unique(scores[order], return_inverse=True, return_counts=True)
+    first = (counts.cumsum(0) - counts + 1).double()
+    ranks = torch.empty_like(scores, dtype=torch.float64)
+    ranks[order] = (first + (counts.double() - 1) / 2)[inverse]
+    auc = (float(ranks[labels == 1].sum()) - positives * (positives + 1) / 2) / (positives * negatives)
+    predicted = (scores > 0).float()
+    balanced = (float((predicted[labels == 1] == 1).float().mean()) + float((predicted[labels == 0] == 0).float().mean())) / 2
+    return auc, balanced
+
+
+def evaluate(model, loader, device, max_steps=None, visibility: bool = False) -> Validation:
+    """One pass over the loader in eval mode (the running BatchNorm statistics, which stay as they
+    are): the mean labelled loss and, with `visibility` (the model has the head), the head's
+    metrics over every labelled frame seen (``visibility_metrics``); the model's mode is restored
+    afterwards."""
     was_training = model.training
     model.eval()
     total, steps = 0.0, 0
+    logits: List[torch.Tensor] = []
+    labels: List[torch.Tensor] = []
+    gaps: List[torch.Tensor] = []
     try:
         with torch.inference_mode():
             for batch in loader:
                 images, target, valid, _ = unpack(batch, device)
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-                    loss = batch_loss(model, images, target, valid)
+                    if visibility:
+                        prediction, vis = model(images, return_vis=True)
+                        visible, weight = visible_frames(target, valid)
+                        counted = weight.flatten() > 0
+                        logits.append(vis.flatten()[counted])
+                        labels.append(visible.flatten()[counted])
+                        gaps.append(gap_frames(valid, visible).flatten()[counted])
+                    else:
+                        prediction = model(images)
+                    loss = unit_loss(model, prediction, target, valid)
                 total += float(loss)
                 steps += 1
                 if max_steps and steps >= max_steps:
                     break
     finally:
         model.train(was_training)
-    return total / max(steps, 1)
+    mean = total / max(steps, 1)
+    if not visibility:
+        return Validation(mean)
+    scores, visible, gap = torch.cat(logits), torch.cat(labels), torch.cat(gaps)
+    judged = (visible == 1) | gap                 # the visible labels against the gap frames alone
+    gap_auc = visibility_metrics(scores[judged], visible[judged])[0] if bool(gap.any()) else None
+    return Validation(mean, *visibility_metrics(scores, visible), gap_auc)
+
+
+def evaluate_loss(model, loader, device, max_steps=None) -> float:
+    """The mean loss over the loader in eval mode: ``evaluate`` without the visibility metrics."""
+    return evaluate(model, loader, device, max_steps).loss
 
 
 def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: int, epochs: int,
-                max_steps: Optional[int], distiller: Any = None) -> float:
+                max_steps: Optional[int], distiller: Any = None, ema: Optional[EMA] = None,
+                vis_weight: float = 0.0, vis_gap_weight: float = 1.0) -> float:
     """One pass over the training loader; returns the mean loss. The normalised convolutions are
     held at ``FILTER_NORM`` per filter before the first step and after every step (``hold_conv_scale``;
     nothing to hold in a GridTrackNet). With a `distiller` (``distill.Distiller``) every step adds
-    its loss on the same output to the labelled one, and the progress lines name its parts."""
+    its loss on the same output to the labelled one, and the progress lines name its parts; with
+    `vis_weight` above 0 on a network with the visibility head, `vis_weight` times
+    ``visibility_loss`` of its logits (part ``vis``, the gap frames weighted `vis_gap_weight`); an
+    `ema` is updated after every step."""
     model.train()
     held = normalised_conv_weights(model)
     hold_conv_scale(held)
+    visibility = vis_weight > 0 and has_vis_head(model)
     total, steps = 0.0, 0
     parts: Dict[str, float] = {}
     started = time.perf_counter()
@@ -274,8 +463,15 @@ def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: i
         images, target, valid, teacher = unpack(batch, device)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-            prediction = model(images)
+            if visibility:
+                prediction, logits = model(images, return_vis=True)
+            else:
+                prediction = model(images)
             loss = unit_loss(model, prediction, target, valid)
+            if visibility:
+                vis = visibility_loss(logits, target, valid, vis_gap_weight)
+                loss = loss + vis_weight * vis
+                parts["vis"] = parts.get("vis", 0.0) + float(vis.detach())
             if distiller is not None:
                 extra, terms = distiller.loss(prediction, images, teacher)
                 loss = loss + extra
@@ -285,6 +481,8 @@ def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: i
         scaler.step(optimizer)
         scaler.update()
         hold_conv_scale(held)
+        if ema is not None:
+            ema.update(model)
         total += float(loss.detach())
         steps += 1
         if steps == 1 or steps % PROGRESS_EVERY == 0:

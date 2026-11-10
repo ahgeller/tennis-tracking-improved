@@ -180,6 +180,27 @@ class BallDetectorBackend:
     def supports_cuda_frame(self) -> bool:
         return False
 
+    def visibility_scores(self) -> Optional[List[Optional[float]]]:
+        """Per decoded source frame, the probability that a ball is visible
+        (``Config.ball_visibility_gate``), None where the frame has none; None altogether from a
+        backend that computes none."""
+        return None
+
+
+def refuse_visibility_gate(cfg: Config) -> None:
+    """The visibility gate needs the stream_s4 visibility head's score per frame, and no prepass
+    on this tree computes it yet (the streaming prepass decodes from cached transitions through
+    engines exported without the head; the unit prepass that reads it is on ``phase-vis-head2``).
+    A run asking for the gate is refused at start-up rather than run with it silently off; the
+    selector's side of the gate is here, and ``replay_selector.py`` applies it to a recorded run's
+    scores."""
+    gate = float(cfg.ball_visibility_gate)
+    if not 0.0 <= gate < 1.0:
+        raise ValueError(f"ball_visibility_gate is 0 (off) or a probability below 1, not {gate}")
+    if gate:
+        raise ValueError(f"ball_visibility_gate={gate}: no prepass on this tree reads the stream_s4 visibility head "
+                         "(run the gate on phase-vis-head2, or replay a recorded run with replay_selector.py)")
+
 
 @dataclass
 class CachedDetections:
@@ -250,6 +271,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
     def __init__(self, weights_path: str, cfg: Config):
         if not torch.cuda.is_available():
             raise RuntimeError("GridTrackNet requires CUDA-enabled torch.")
+        refuse_visibility_gate(cfg)
         self.cfg = cfg
         self.device = torch.device(f"cuda:{cfg.device}")
         self._frame_tensor: Callable[[PrepassFrame, torch.device], torch.Tensor] = self._model_input
@@ -898,6 +920,7 @@ class TensorRTRuntimeBallDetector(BallDetectorBackend):
     ):
         if not torch.cuda.is_available():
             raise RuntimeError("TensorRT runtime backend requires CUDA.")
+        refuse_visibility_gate(cfg)
         self.cfg = cfg
         self.names = names or dict(_DEFAULT_NAMES)
         self.ball_cls_id = ball_cls_id

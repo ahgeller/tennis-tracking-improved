@@ -29,6 +29,7 @@ from finetune.training.clips import Clip
 from finetune.training.pseudo_labels import PSEUDO_SOURCE, is_pseudo_csv, pseudo_csv, read_pseudo_labels
 
 DATA_VERSION = 5
+GAP_RUN = 3                # the longest absent run (in label frames) counted as a gap inside a rally, see gap_frames
 PNG_COMPRESSION = 1        # the frame cache's encoding: lossless, and the fastest zlib level to write and read
 FRAME_SUFFIX = ".png"
 
@@ -49,6 +50,9 @@ class TrainingUnit(_Unit, total=False):
     pseudo-labelled clip also carries ``valid``, False for a frame whose label is ignored (its
     point is None and the labelled loss leaves it out), see ``pseudo_labels``."""
     valid: List[bool]
+    # One flag per frame, carried only by a unit holding a gap frame: an absent label inside a
+    # run of at most GAP_RUN flanked by visible labels, the occlusion a rally crosses (gap_frames).
+    gap: List[bool]
 
 
 class ClipRecord(TypedDict):
@@ -79,6 +83,32 @@ def training_targets(path: Path, width: int, height: int) -> Dict[int, Target]:
     def target(point: LabelPoint) -> Target:
         return None if point is None else [min(max(point[0], 0.0), width - 1.0), min(max(point[1], 0.0), height - 1.0)]
     return {frame: target(point) for frame, point in read_labels(path, width, height).items()}
+
+
+def gap_frames(labels: Dict[int, Optional[List[float]]], ignored: Set[int], stride: int,
+               max_run: int = GAP_RUN) -> Set[int]:
+    """The absent labels that sit inside a rally: every run of at most `max_run` consecutive
+    (at `stride`, the label cadence) absent labels with a visible label on both sides. A longer
+    run, a run that reaches the clip's edge or a missing label, and a run touching an ignored
+    frame (a pseudo-label's) are not gaps: the ball may really be gone there. These are the frames
+    the selector bridges and the visibility head's answer matters on (held out: 160 of 518 absent
+    labels), so the trainer can weight them (``--vis-gap-weight``) and measure them apart."""
+    gaps: Set[int] = set()
+    run: List[int] = []
+    for index in sorted(labels):
+        if run and index != run[-1] + stride:               # a missing label: the run is not flanked
+            run = []
+        if index in ignored:
+            run = []
+            continue
+        if labels[index] is None:
+            if run or (index - stride in labels and labels[index - stride] is not None and index - stride not in ignored):
+                run.append(index)
+            continue
+        if run and len(run) <= max_run:
+            gaps.update(run)
+        run = []
+    return gaps
 
 
 def build_units(labels: Dict[int, Optional[List[float]]], stride: int) -> List[List[int]]:
@@ -181,6 +211,7 @@ def prepare_clip(entry: Clip, data_dir: Path, rebuild: bool, prefix: str = "") -
         labels = training_targets(csv_path, width, height)
     samples: List[TrainingUnit] = []
     needed: Set[int] = set()
+    gaps = gap_frames(labels, ignored, stride)
     for window in build_units(labels, stride):
         if all(index in ignored for index in window):
             continue                       # nothing in it the labelled loss could read
@@ -189,6 +220,8 @@ def prepare_clip(entry: Clip, data_dir: Path, rebuild: bool, prefix: str = "") -
                             points=[labels[index] for index in window], size=[width, height])
         if ignored:
             unit["valid"] = [index not in ignored for index in window]
+        if any(index in gaps for index in window):
+            unit["gap"] = [index in gaps for index in window]
         samples.append(unit)
         needed.update(window)
     missing = needed - on_disk

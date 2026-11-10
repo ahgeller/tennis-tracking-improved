@@ -89,6 +89,25 @@ the evidence for their settings):
   held-out set is still scored against its hand labels;
 - ``--augment copypaste``: a second, real, motion-blurred ball pasted along a real path
   (``copy_paste.py``).
+
+And two the stream_s4 Colab run of 2026-11 tests (``loop.py``'s docstring has the reasoning):
+
+- ``--ema``: an exponential moving average of the weights (``loop.EMA``, ``--ema-decay``), written
+  as ``last_ema.pt`` every epoch and scored beside the live weights on every scored epoch;
+  ``best_ema.pt`` is the scored epoch the averaged weights rank highest by ``epoch_score``, and
+  ``results.csv`` carries the averaged network's held-out columns (``ema_*``) beside the live
+  ones. ``best.pt`` and the winner stay the live network's: the run compares the two, it does not
+  yet promote the average. The average's state rides in ``checkpoint.pt``; recorded as ``ema``;
+- ``--vis-head``: the network's visibility head (``streamnet.StreamNet``), trained with
+  ``loop.visibility_loss`` at ``--vis-weight`` of the heat loss against the labels' visible and
+  absent frames; ``results.csv`` gains the head's held-out AUC and balanced accuracy
+  (``vis_auc``, ``vis_bacc``, and ``ema_vis_*`` for the average). ``--vis-pool`` picks the head's
+  variant (``streamnet.VIS_POOLS``: ``global``, the first head, or ``peak``, the per-frame answer
+  read at each frame's own heat peak), and ``--vis-gap-weight`` weights the loss terms of the gap
+  frames, the absent labels inside a rally (``frame_cache.gap_frames``) that the selector bridges;
+  ``vis_gap_auc`` (and ``ema_vis_gap_auc``) is the head's AUC on those frames alone. Recorded as
+  ``vis_head`` (``weight``, ``pool``, ``gap_weight``; a run recorded with ``weight`` alone was the
+  global head at gap weight 1, ``vis_head_of_config``).
 """
 
 from __future__ import annotations
@@ -113,6 +132,7 @@ if __name__ == "__main__":          # run as a script: make the repository root 
 
 from tennis_tracker import heatmapnet
 from tennis_tracker.ball_models import ARCHITECTURES, GRIDTRACKNET, HEATMAP_S4, arch_of, load_ball_model, weights_suffix
+from tennis_tracker.streamnet import VIS_POOLS
 from tennis_tracker.gridtracknet import GRID_COLS, GRID_ROWS, HEIGHT, WIDTH
 from finetune.data.detector_metrics import DetectorMetrics
 from finetune.data.fileio import atomic_binary, atomic_csv, copy_atomic, write_atomic
@@ -124,18 +144,26 @@ from finetune.training.dataset import (AUGMENTATIONS, Augmenter, UnitDataset, ma
 from finetune.training.distill import (DISTILL_LOSSES, TEACHER_DIR, TEACHER_MAPS, DistillConfig, Distiller,
                                        build_teacher_maps)
 from finetune.training.frame_cache import TrainingUnit, build_units, prepare_data, prepare_pseudo
-from finetune.training.loop import (HALF_MAX, build_optimizer, check_finite, evaluate_loss, fresh_model, gridtracknet_loss,
-                                    heatmap_loss, largest_running_variance, save_weights, train_epoch)
+from finetune.training.loop import (EMA, EMA_DECAY, HALF_MAX, VIS_LOSS_WEIGHT, Validation, build_optimizer, check_finite,
+                                    evaluate, fresh_model, gridtracknet_loss, heatmap_loss, largest_running_variance,
+                                    save_weights, train_epoch, with_vis_head)
 from finetune.training.metrics import FALSE_ALARM_CONF, epoch_score, false_alarm_units, promotion_improves, score_weights
 
 SEED = 7                   # every run draws the same augmentation and sampling sequence unless --seed says otherwise
 DEFAULT_EPOCHS = 10
-RESULTS_COLUMNS = ("epoch", "train_loss", "val_loss", "seconds", "score_seconds", *DetectorMetrics._fields)
+LEGACY_RESULTS_COLUMNS = ("epoch", "train_loss", "val_loss", "seconds", "score_seconds", *DetectorMetrics._fields)
+EMA_PREFIX = "ema_"        # the averaged network's columns in results.csv: its metric fields under this prefix
+EMA_COLUMNS = tuple(EMA_PREFIX + field for field in DetectorMetrics._fields)
+RESULTS_COLUMNS = (*LEGACY_RESULTS_COLUMNS, "vis_auc", "vis_bacc", "ema_val_loss", "ema_vis_auc", "ema_vis_bacc", *EMA_COLUMNS,
+                   "vis_gap_auc", "ema_vis_gap_auc")      # the gap columns last: rows written before them pad (whole_row)
+GAP_COLUMNS = 2            # ... how many
+VIS_POOL_DEFAULT, VIS_GAP_WEIGHT_DEFAULT = "global", 1.0   # what a vis_head record without the fields meant
 CHECKPOINT = "checkpoint.pt"
 EPOCHS_DIR = "epochs"      # every scored epoch's weights, epoch_NNN.npz (or .pt), unless --no-keep-epochs
+EMA_SUFFIX = "_ema"        # the averaged weights' files: last_ema.pt, best_ema.pt, epochs/epoch_NNN_ema.pt
 RECIPE_FIELDS = ("arch", "augment", "oversample", "oversample_absent", "oversample_false_alarms",
                  "epoch_units", "batch_size", "lr", "seed", "holdout", "validation_clips",
-                 "distill", "pseudo")      # what read_selection_run copies
+                 "distill", "pseudo", "ema", "vis_head")      # what read_selection_run copies
 HEAT_RECIPE = 3            # the heat-map losses' and optimizer's version, see run_config; 1 was heat1's (never recorded)
 VARIANCE_WARNING_SHARE = 0.1   # of HALF_MAX: the running variance above which an epoch warns (held convolutions never should)
 RUN_OUTCOMES = ("epochs", "false_alarm_units")     # the config.json fields a --resume may differ in, see same_run
@@ -164,12 +192,15 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
     Kaiming norm by ``loop.hold_conv_scale``; 2 decayed them instead, which held at ``--lr 0.3`` and
     not at 1.0) and None for GridTrackNet, whose recipe has not changed; ``same_run`` refuses to
     continue a run recorded under another, so heat1 (recipe 1, before the field existed) and heat2
-    and heat3 (recipe 2) are not resumed as this one. ``distill`` and ``pseudo`` are None for a run
-    without them, so a run recorded before they existed resumes as one."""
+    and heat3 (recipe 2) are not resumed as this one. ``distill``, ``pseudo``, ``ema`` and ``vis_head``
+    are None for a run without them, so a run recorded before they existed resumes as one."""
     arch, distilled = args.arch or GRIDTRACKNET, distill_config(args)
     return {"arch": arch, "heat_recipe": None if arch == GRIDTRACKNET else HEAT_RECIPE,
             "distill": None if distilled is None else distilled.record(),
             "pseudo": None if not args.pseudo else {"dir": str(args.pseudo), "share": args.pseudo_share},
+            "ema": None if not args.ema else {"decay": args.ema_decay},
+            "vis_head": None if not args.vis_head else {"weight": args.vis_weight, "pool": args.vis_pool,
+                                                       "gap_weight": args.vis_gap_weight},
             "clips": names,
             "validation_clips": val_clips, "holdout": args.holdout,
             "val_clips": args.val_clips,
@@ -181,6 +212,16 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
             "lr_schedule": lr_schedule or [{"epoch": 1, "lr": args.lr}],
             "seed": args.seed, "score_every": args.score_every,
             "from_scratch": args.from_scratch, "weights": str(args.weights)}
+
+
+def vis_head_of_config(config: dict) -> Optional[dict]:
+    """The visibility head a run's ``config.json`` records (``vis_head``), None without one; a run
+    recorded before ``pool`` and ``gap_weight`` existed trained the global head at gap weight 1."""
+    recorded = config.get("vis_head")
+    if recorded is None:
+        return None
+    return {"weight": recorded.get("weight"), "pool": recorded.get("pool", VIS_POOL_DEFAULT),
+            "gap_weight": recorded.get("gap_weight", VIS_GAP_WEIGHT_DEFAULT)}
 
 
 def distill_config(args: argparse.Namespace) -> Optional[DistillConfig]:
@@ -239,12 +280,15 @@ class Selection(NamedTuple):
     validation loss (``best_loss.npz``), for the record. A run with nothing held out
     (``--all-clips``) scores nothing: its result is ``last.npz``, the
     final epoch, the metrics are None and the loss fields keep their starting values (epoch 0,
-    an infinite loss), since no validation loss was ever measured."""
+    an infinite loss), since no validation loss was ever measured. With ``--ema`` the averaged
+    network's best scored epoch and its metrics (``best_ema.pt``) come too; 0 and None without."""
     best_path: Path
     best_epoch: int
     best_metrics: Optional[DetectorMetrics]
     best_loss_epoch: int
     best_loss: float
+    best_ema_epoch: int = 0
+    best_ema_metrics: Optional[DetectorMetrics] = None
 
 
 class Checkpoint(NamedTuple):
@@ -254,36 +298,55 @@ class Checkpoint(NamedTuple):
     ``--resume`` picks the run up from it; ``START`` is a run that has not begun. The best
     epoch and its metrics are recorded for the reader but not trusted on resume: ``fit``
     re-derives them from ``results.csv`` (``best_scored_epoch``), so a checkpoint written under
-    an earlier selection rule carries on under the current one."""
+    an earlier selection rule carries on under the current one. The averaged network's best epoch
+    (``--ema``) is the same kind of record; a checkpoint from before it existed reads as 0, None."""
     epoch: int
     best_epoch: int
     best_metrics: Optional[DetectorMetrics]
     best_loss_epoch: int
     best_loss: float
+    best_ema_epoch: int = 0
+    best_ema_metrics: Optional[DetectorMetrics] = None
 
 
 START = Checkpoint(0, 0, None, 0, math.inf)
 
 
+def metrics_state(metrics: Optional[DetectorMetrics]) -> Optional[dict]:
+    return None if metrics is None else metrics._asdict()
+
+
+def metrics_from_state(state: Optional[dict]) -> Optional[DetectorMetrics]:
+    return None if state is None else DetectorMetrics(**state)
+
+
 def write_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
-                     scaler: torch.amp.GradScaler, progress: Checkpoint, distiller: Optional[torch.nn.Module] = None) -> None:
+                     scaler: torch.amp.GradScaler, progress: Checkpoint, distiller: Optional[torch.nn.Module] = None,
+                     ema: Optional[EMA] = None) -> None:
     """Record `progress` with the model, optimizer, GradScaler and torch RNG states at `path`, through
     a temporary file beside it, so an interruption leaves the previous checkpoint or this one whole;
-    a distilled run's `distiller` (its MGD adapters, ``distill.Distiller``) is recorded too."""
-    state = {**progress._asdict(), "best_metrics": None if progress.best_metrics is None else progress.best_metrics._asdict(),
+    a distilled run's `distiller` (its MGD adapters, ``distill.Distiller``) and an ``--ema`` run's
+    `ema` (the averaged weights and their update count) are recorded too."""
+    state = {**progress._asdict(), "best_metrics": metrics_state(progress.best_metrics),
+             "best_ema_metrics": metrics_state(progress.best_ema_metrics),
              "model": model.state_dict(), "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
              "torch_rng": torch.get_rng_state()}
     if distiller is not None:
         state["distiller"] = distiller.state_dict()
+    if ema is not None:
+        state["ema"] = ema.state_dict()
     with atomic_binary(path) as handle:
         torch.save(state, handle)
 
 
 def read_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
-                    scaler: torch.amp.GradScaler, distiller: Optional[torch.nn.Module] = None) -> Checkpoint:
+                    scaler: torch.amp.GradScaler, distiller: Optional[torch.nn.Module] = None,
+                    ema: Optional[EMA] = None) -> Checkpoint:
     """Load the states ``write_checkpoint`` recorded at `path` into `model`, `optimizer`, `scaler`,
-    the `distiller` of a distilled run and torch's RNG, and return the progress they belong to. A missing or unreadable file, or one
-    without the fields ``write_checkpoint`` records, is a ValueError, the one ``--resume`` reports."""
+    the `distiller` of a distilled run, the `ema` of an ``--ema`` run and torch's RNG, and return
+    the progress they belong to. A missing or unreadable file, or one without the fields
+    ``write_checkpoint`` records (an `ema` asked of a checkpoint written without one), is a
+    ValueError, the one ``--resume`` reports."""
     try:
         state = torch.load(path, map_location="cpu", weights_only=True)
     except (OSError, RuntimeError, ValueError, pickle.UnpicklingError, EOFError) as error:
@@ -292,12 +355,17 @@ def read_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.O
         model.load_state_dict(state["model"])
         if distiller is not None:
             distiller.load_state_dict(state["distiller"])
+        if ema is not None:
+            if "ema" not in state:
+                raise ValueError(f"{path} was written by a run without --ema; there is no weight average to continue")
+            ema.load_state_dict(state["ema"])
         optimizer.load_state_dict(state["optimizer"])
         if state["scaler"]:             # a disabled (CPU) scaler saves nothing, and an enabled one refuses nothing
             scaler.load_state_dict(state["scaler"])
         torch.set_rng_state(state["torch_rng"])
-        best_metrics = None if state["best_metrics"] is None else DetectorMetrics(**state["best_metrics"])
-        return Checkpoint(state["epoch"], state["best_epoch"], best_metrics, state["best_loss_epoch"], state["best_loss"])
+        return Checkpoint(state["epoch"], state["best_epoch"], metrics_from_state(state["best_metrics"]),
+                          state["best_loss_epoch"], state["best_loss"], state.get("best_ema_epoch", 0),
+                          metrics_from_state(state.get("best_ema_metrics")))
     except (KeyError, TypeError, RuntimeError) as error:
         raise ValueError(f"{path} is not a checkpoint this trainer wrote ({error!r})") from error
 
@@ -327,7 +395,8 @@ def same_run(saved: dict, current: dict, lr_drop: bool = False) -> None:
     for field in current:
         if field in RUN_OUTCOMES or field in RATE_FIELDS:
             continue
-        recorded = arch_of_config(saved) if field == "arch" else saved.get(field)
+        recorded = (arch_of_config(saved) if field == "arch" else vis_head_of_config(saved) if field == "vis_head"
+                    else saved.get(field))
         if recorded != current[field]:
             raise ValueError(f"--resume would continue a different run: config.json has {field}={recorded!r}, "
                              f"this run {field}={current[field]!r}")
@@ -342,55 +411,91 @@ def same_run(saved: dict, current: dict, lr_drop: bool = False) -> None:
                             else ", the same, so there is nothing to drop"))
 
 
-def results_row(epoch: int, train_loss: float, val_loss: Optional[float], seconds: float,
-                score_seconds: Optional[float], metrics: Optional[DetectorMetrics]) -> List[str]:
-    """One ``results.csv`` row; the validation column is empty when nothing is held out and the
-    scoring columns are empty on an epoch that was not scored."""
-    row = [str(epoch), f"{train_loss:.8f}", "" if val_loss is None else f"{val_loss:.8f}", f"{seconds:.0f}"]
+def cell(value: Optional[float], digits: int = 6) -> str:
+    """A results.csv cell: the float to `digits` places, or empty for None (not measured)."""
+    return "" if value is None else f"{value:.{digits}f}"
+
+
+def metric_cells(metrics: Optional[DetectorMetrics]) -> List[str]:
+    """The metric's fields as results.csv cells, all empty when it was not measured."""
     if metrics is None:
+        return [""] * len(DetectorMetrics._fields)
+    return [f"{value:.6f}" if isinstance(value, float) else str(value) for value in metrics]
+
+
+def results_row(epoch: int, train_loss: float, val_loss: Optional[float], seconds: float,
+                score_seconds: Optional[float], metrics: Optional[DetectorMetrics],
+                validation: Optional[Validation] = None, ema_validation: Optional[Validation] = None,
+                ema_metrics: Optional[DetectorMetrics] = None) -> List[str]:
+    """One ``results.csv`` row (``RESULTS_COLUMNS``); the validation column is empty when nothing
+    is held out and the scoring columns are empty on an epoch that was not scored. `validation`
+    gives the visibility head's held-out metrics (empty without the head); `ema_validation` and
+    `ema_metrics` the averaged network's columns, measured on a scored epoch of an ``--ema`` run
+    (`score_seconds` then covers both networks)."""
+    row = [str(epoch), f"{train_loss:.8f}", cell(val_loss, 8), f"{seconds:.0f}", cell(score_seconds, 0)]
+    row += metric_cells(metrics)
+    vis_auc, vis_bacc = (None, None) if validation is None else (validation.vis_auc, validation.vis_balanced_accuracy)
+    row += [cell(vis_auc), cell(vis_bacc)]
+    ema_loss, ema_auc, ema_bacc = ((None, None, None) if ema_validation is None
+                                   else (ema_validation.loss, ema_validation.vis_auc, ema_validation.vis_balanced_accuracy))
+    row += [cell(ema_loss, 8), cell(ema_auc), cell(ema_bacc)]
+    row += metric_cells(ema_metrics)
+    return row + [cell(None if validation is None else validation.vis_gap_auc),
+                  cell(None if ema_validation is None else ema_validation.vis_gap_auc)]
+
+
+def whole_row(row: List[str]) -> Optional[List[str]]:
+    """`row` padded to ``RESULTS_COLUMNS`` when it is a whole results row: this layout's, the
+    layout before the gap columns, or the one before the EMA and visibility columns (a run begun
+    under an older trainer resumes with its rows kept, the new columns empty); None for a fragment."""
+    if len(row) in (len(RESULTS_COLUMNS), len(LEGACY_RESULTS_COLUMNS), len(RESULTS_COLUMNS) - GAP_COLUMNS):
         return row + [""] * (len(RESULTS_COLUMNS) - len(row))
-    return row + [f"{score_seconds:.0f}"] + [f"{value:.6f}" if isinstance(value, float) else str(value) for value in metrics]
+    return None
 
 
 def keep_results_through(results: Path, epoch: int) -> None:
     """Cut ``results.csv`` back to the whole rows up to `epoch`, the checkpoint's: an interruption
     between an epoch's row and its checkpoint leaves a row the resumed run writes again, and one
-    during the row leaves a fragment (fewer columns, or an epoch number cut short) that goes too."""
+    during the row leaves a fragment (fewer columns, or an epoch number cut short) that goes too.
+    The file is rewritten with this layout's header (``whole_row`` pads an older run's rows)."""
     rows: List[List[str]] = []
     if results.is_file():
         with results.open(newline="", encoding="utf-8") as handle:
-            rows = [row for row in csv.reader(handle)
-                    if len(row) == len(RESULTS_COLUMNS) and row[0].isdigit() and int(row[0]) <= epoch]
+            for row in csv.reader(handle):
+                whole = whole_row(row)
+                if whole is not None and row[0].isdigit() and int(row[0]) <= epoch:
+                    rows.append(whole)
     with atomic_csv(results) as writer:
         writer.writerow(RESULTS_COLUMNS)
         writer.writerows(rows)
 
 
-def best_scored_epoch(results: Path) -> Tuple[int, Optional[DetectorMetrics]]:
+def best_scored_epoch(results: Path, prefix: str = "") -> Tuple[int, Optional[DetectorMetrics]]:
     """The scored epoch ``results.csv`` ranks highest by ``epoch_score`` (a tie keeps the earlier
     epoch) with its metrics, or (0, None) when no row was scored: the best-so-far a run starts
-    or resumes from, derived from the rows rather than from the checkpoint's bookkeeping."""
+    or resumes from, derived from the rows rather than from the checkpoint's bookkeeping. With
+    `prefix` ``EMA_PREFIX`` the same question of the averaged network's columns."""
     best_epoch, best_metrics = 0, None
     if not results.is_file():
         return best_epoch, best_metrics
     with results.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
-            if not row.get("recall"):
+            if not row.get(prefix + "recall"):
                 continue
             # A column the metric gained after the run began (``bridged``) is missing from its
             # earlier rows and reads as the field's default.
-            metrics = DetectorMetrics(**{field: (int if field in ("visible", "invisible") else float)(row[field])
+            metrics = DetectorMetrics(**{field: (int if field in ("visible", "invisible") else float)(row[prefix + field])
                                          for field in DetectorMetrics._fields
-                                         if row.get(field) or field not in DetectorMetrics._field_defaults})
+                                         if row.get(prefix + field) or field not in DetectorMetrics._field_defaults})
             if best_metrics is None or epoch_score(metrics) > epoch_score(best_metrics):
                 best_epoch, best_metrics = int(row["epoch"]), metrics
     return best_epoch, best_metrics
 
 
-def epoch_weights(run_dir: Path, epoch: int, suffix: str) -> Path:
+def epoch_weights(run_dir: Path, epoch: int, suffix: str, ema: bool = False) -> Path:
     """Where a scored epoch's weights are kept: ``<run_dir>/epochs/epoch_NNN<suffix>``, the suffix
-    the architecture's (``weights_suffix``)."""
-    return run_dir / EPOCHS_DIR / f"epoch_{epoch:03d}{suffix}"
+    the architecture's (``weights_suffix``); ``epoch_NNN_ema<suffix>`` for the averaged weights."""
+    return run_dir / EPOCHS_DIR / f"epoch_{epoch:03d}{EMA_SUFFIX if ema else ''}{suffix}"
 
 
 def metrics_record(metrics: DetectorMetrics) -> dict:
@@ -403,7 +508,7 @@ def metrics_record(metrics: DetectorMetrics) -> dict:
 def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoader, val_loader: Optional[DataLoader],
         optimizer: torch.optim.Optimizer, scaler: torch.amp.GradScaler, device: torch.device,
         score: Optional[Callable[[Path], DetectorMetrics]], progress: Checkpoint = START,
-        distiller: Optional[Distiller] = None) -> Selection:
+        distiller: Optional[Distiller] = None, ema: Optional[EMA] = None) -> Selection:
     """Run the epochs after `progress` (``START``, or the checkpoint ``--resume`` read; one past
     ``--epochs`` is a ValueError, one at it leaves nothing to run). After each one ``last.npz`` is
     written (every file here carries the architecture's suffix, ``.pt`` for a HeatmapNet), ``results.csv`` gets its row and ``checkpoint.pt`` is rewritten; on a scored epoch
@@ -425,7 +530,13 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
     and a resumed run draws the batches the uninterrupted one would have. A distilled run passes its `distiller` to every
     step (``loop.train_epoch``) and into the checkpoint. The augmentation draws
     are not exactly those: a persistent worker's ``Augmenter`` streams on from the seed it got
-    when the loader first ran, and a resumed run starts its workers afresh."""
+    when the loader first ran, and a resumed run starts its workers afresh.
+
+    With an `ema` (``--ema``) every step updates the averaged weights, every epoch writes them as
+    ``last_ema.pt``, and a scored epoch validates and scores them too (``ema_*`` in ``results.csv``,
+    ``epochs/epoch_NNN_ema.pt``), ``best_ema.pt`` following their own ``epoch_score`` ranking, which
+    a resume re-derives from the rows like the live one's. With ``--vis-head`` the validation pass
+    also measures the head (``vis_auc``, ``vis_bacc``)."""
     if progress.epoch > args.epochs:
         raise ValueError(f"--epochs {args.epochs} is below the checkpoint's epoch {progress.epoch}; "
                          "--resume can only keep or raise it")
@@ -433,6 +544,8 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
     keep_results_through(results, progress.epoch)
     suffix = weights_suffix(model.ARCH)          # the files carry the suffix of the network actually trained
     last_path, best_path, best_loss_path = (args.run_dir / (name + suffix) for name in ("last", "best", "best_loss"))
+    last_ema_path, best_ema_path = (args.run_dir / (name + EMA_SUFFIX + suffix) for name in ("last", "best"))
+    visibility = bool(getattr(args, "vis_head", False))
     best_loss_epoch, best_loss = progress.best_loss_epoch, progress.best_loss
     best_epoch, best_metrics = best_scored_epoch(results)
     if best_epoch and best_epoch != progress.best_epoch:
@@ -442,44 +555,78 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
         print(f"[train] best epoch so far by results.csv: {best_epoch} (the checkpoint said {progress.best_epoch}); "
               + (f"{best_path.name} is now that epoch" if kept.is_file()
                  else f"{kept.name} was not kept, {best_path.name} stays as it was"))
+    best_ema_epoch, best_ema_metrics = best_scored_epoch(results, EMA_PREFIX) if ema is not None else (0, None)
+    if best_ema_epoch and best_ema_epoch != progress.best_ema_epoch:
+        kept = epoch_weights(args.run_dir, best_ema_epoch, suffix, ema=True)
+        if kept.is_file():
+            copy_atomic(kept, best_ema_path)
+        print(f"[train] best EMA epoch so far by results.csv: {best_ema_epoch} (the checkpoint said "
+              f"{progress.best_ema_epoch}); " + (f"{best_ema_path.name} is now that epoch" if kept.is_file()
+                                                else f"{kept.name} was not kept, {best_ema_path.name} stays as it was"))
     for epoch in range(progress.epoch + 1, args.epochs + 1):
         started = time.perf_counter()
         torch.manual_seed(args.seed + epoch)
         train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch, args.epochs, args.max_train_steps,
-                                 distiller)
+                                 distiller, ema, args.vis_weight if visibility else 0.0, args.vis_gap_weight)
         check_finite(model)
         name, variance = largest_running_variance(model)
         if variance > HALF_MAX * VARIANCE_WARNING_SHARE:
             print(f"[train] warning: {name} running variance {variance:.0f}, float16 overflows at {HALF_MAX:.0f}; "
                   f"the pre-normalisation activations are growing although the convolutions are held", flush=True)
-        val_loss = None if val_loader is None else evaluate_loss(model, val_loader, device, args.max_val_steps)
+        validation = None if val_loader is None else evaluate(model, val_loader, device, args.max_val_steps, visibility)
+        val_loss = None if validation is None else validation.loss
         save_weights(model, args.weights, last_path)
+        if ema is not None:
+            save_weights(ema.model, args.weights, last_ema_path)
         if val_loss is not None and val_loss < best_loss:
             best_loss_epoch, best_loss = epoch, val_loss
             copy_atomic(last_path, best_loss_path)
         seconds = time.perf_counter() - started
-        metrics = score_seconds = None
+        metrics = score_seconds = ema_validation = ema_metrics = None
         if score is not None and (epoch % args.score_every == 0 or epoch == args.epochs):
             scoring = time.perf_counter()
             metrics = score(last_path)
-            score_seconds = time.perf_counter() - scoring
             if args.keep_epochs:
                 copy_atomic(last_path, epoch_weights(args.run_dir, epoch, suffix))
             if best_metrics is None or epoch_score(metrics) > epoch_score(best_metrics):
                 best_epoch, best_metrics = epoch, metrics
                 copy_atomic(last_path, best_path)
+            if ema is not None:
+                if val_loader is not None:
+                    ema_validation = evaluate(ema.model, val_loader, device, args.max_val_steps, visibility)
+                ema_metrics = score(last_ema_path)
+                if args.keep_epochs:
+                    copy_atomic(last_ema_path, epoch_weights(args.run_dir, epoch, suffix, ema=True))
+                if best_ema_metrics is None or epoch_score(ema_metrics) > epoch_score(best_ema_metrics):
+                    best_ema_epoch, best_ema_metrics = epoch, ema_metrics
+                    copy_atomic(last_ema_path, best_ema_path)
+            score_seconds = time.perf_counter() - scoring
         with results.open("a", encoding="utf-8", newline="") as handle:    # one line per epoch, appended
-            csv.writer(handle).writerow(results_row(epoch, train_loss, val_loss, seconds, score_seconds, metrics))
+            csv.writer(handle).writerow(results_row(epoch, train_loss, val_loss, seconds, score_seconds, metrics,
+                                                    validation, ema_validation, ema_metrics))
         write_checkpoint(args.run_dir / CHECKPOINT, model, optimizer, scaler,
-                         Checkpoint(epoch, best_epoch, best_metrics, best_loss_epoch, best_loss), distiller)
+                         Checkpoint(epoch, best_epoch, best_metrics, best_loss_epoch, best_loss, best_ema_epoch,
+                                    best_ema_metrics), distiller, ema)
         validated = "" if val_loss is None else f" val={val_loss:.6f}"
+        if validation is not None and validation.vis_auc is not None:
+            validated += f" visAUC={validation.vis_auc:.3f}"
+            if validation.vis_gap_auc is not None:
+                validated += f" gapAUC={validation.vis_gap_auc:.3f}"
         scored = (f" | held-out recall={metrics.recall:.3f} wrong={metrics.wrong:.3f} falseAlarm={metrics.false_alarm:.3f}"
                   f" score={epoch_score(metrics):+.3f} ({score_seconds / 60:.1f} min) | best epoch {best_epoch}"
                   if metrics is not None else "")
+        if ema_metrics is not None:
+            scored += (f" | EMA recall={ema_metrics.recall:.3f} wrong={ema_metrics.wrong:.3f} "
+                       f"falseAlarm={ema_metrics.false_alarm:.3f} score={epoch_score(ema_metrics):+.3f}"
+                       + (f" visAUC={ema_validation.vis_auc:.3f}"
+                          if ema_validation is not None and ema_validation.vis_auc is not None else "")
+                       + (f" gapAUC={ema_validation.vis_gap_auc:.3f}"
+                          if ema_validation is not None and ema_validation.vis_gap_auc is not None else "")
+                       + f" | best EMA epoch {best_ema_epoch}")
         print(f"[train] epoch {epoch}: train={train_loss:.6f}{validated} ({seconds / 60:.1f} min){scored}", flush=True)
     if score is None:
         return Selection(last_path, args.epochs, None, best_loss_epoch, best_loss)
-    return Selection(best_path, best_epoch, best_metrics, best_loss_epoch, best_loss)
+    return Selection(best_path, best_epoch, best_metrics, best_loss_epoch, best_loss, best_ema_epoch, best_ema_metrics)
 
 
 def read_selection_run(run_dir: Path) -> dict:
@@ -509,9 +656,11 @@ def record_recipe_result(args: argparse.Namespace, selection: Selection, selecti
     says the weights were chosen by recipe, with the selection run's details beside, not by a
     measurement of these weights, which saw every clip."""
     copy_atomic(selection.best_path, args.save)
+    last_ema = selection.best_path.with_name("last" + EMA_SUFFIX + selection.best_path.suffix)
     write_atomic(args.run_dir / "winner.json", json.dumps({
         "winner": str(selection.best_path), "selected_by": "recipe", "epochs": args.epochs, "metrics": None,
-        "validation_clips": [], "selection_run": selection_run}, indent=2))
+        "validation_clips": [], "selection_run": selection_run,
+        "ema_weights": str(last_ema) if last_ema.is_file() else None}, indent=2))
     print(f"[done] trained on every clip for {args.epochs} epochs -> {args.save}  (from {selection.best_path.name}; "
           "nothing was held out, so these weights carry no measurement of their own)")
     print("[done] promote it with: python finetune/ft.py promote")
@@ -529,6 +678,12 @@ def pick_winner(args: argparse.Namespace, clips: List[Clip], val_clips: List[str
     winner, winner_stats = selection.best_path, trained
     record = {"selected_by": "detector_metric", "best_epoch": selection.best_epoch,
               "best_loss_epoch": selection.best_loss_epoch, "validation_clips": val_clips}
+    if selection.best_ema_metrics is not None:          # --ema: the averaged network's best epoch, for the comparison
+        ema_path = selection.best_path.with_name("best" + EMA_SUFFIX + selection.best_path.suffix)
+        print(f"[eval] {ema_path.name} (EMA, epoch {selection.best_ema_epoch}) on {val_clips}: {selection.best_ema_metrics}")
+        record["ema"] = {"weights": str(ema_path), "best_epoch": selection.best_ema_epoch,
+                         "metrics": metrics_record(selection.best_ema_metrics),
+                         "beats_live": trained is not None and epoch_score(selection.best_ema_metrics) > epoch_score(trained)}
     if not args.from_scratch:
         val_only = [entry for entry in clips if entry[0] in val_clips]
         baseline = score_weights(args.weights, val_only, device)
@@ -645,12 +800,21 @@ def train(args: argparse.Namespace) -> None:
         UnitDataset(args.data_dir, manifest["val"], augment=False, arch=args.arch), batch_size=args.batch_size,
         num_workers=args.workers, pin_memory=device.type == "cuda")
     if args.from_scratch:
-        model = fresh_model(device, args.arch)
+        model = fresh_model(device, args.arch, args.vis_head, args.vis_pool)
         print(f"[train] fresh {args.arch} (random init, {model.GRID_COLS}x{model.GRID_ROWS} grid)")
     else:
         model = load_ball_model(args.weights, device).float()
+        if args.vis_head:
+            with_vis_head(model, args.vis_pool)
         print(f"[train] fine-tuning {args.arch} from {args.weights}")
     model.train()
+    if args.vis_head:
+        print(f"[train] visibility head on ({args.vis_pool}): BCE x{args.vis_weight:g} beside the heat loss, the gap "
+              f"frames x{args.vis_gap_weight:g}; held-out AUC (vis_auc) and gap-frame AUC (vis_gap_auc) in results.csv")
+    ema = EMA(model, args.ema_decay) if args.ema else None      # before the distiller puts its taps on the model
+    if ema is not None:
+        print(f"[train] weight average on: decay {args.ema_decay:g} per step, scored beside the live weights "
+              f"(last{EMA_SUFFIX}, best{EMA_SUFFIX})")
     distiller = None if config is None else Distiller(config, model, device)
     if config is not None:
         print(f"[train] distilling from {config.teacher}: {config.loss} x{config.weight:g}, teacher maps {config.maps}"
@@ -660,7 +824,7 @@ def train(args: argparse.Namespace) -> None:
     checkpoint = args.run_dir / CHECKPOINT
     progress, schedule = START, None
     if args.resume:
-        progress = read_checkpoint(checkpoint, model, optimizer, scaler, distiller)
+        progress = read_checkpoint(checkpoint, model, optimizer, scaler, distiller, ema)
         print(f"[train] resuming {args.run_dir} after epoch {progress.epoch} of {args.epochs}"
               + (": the epochs are done, only the winner is left to pick" if progress.epoch == args.epochs else ""))
         schedule = lr_schedule_of(resumed)
@@ -677,11 +841,11 @@ def train(args: argparse.Namespace) -> None:
           + (f" oversample={oversample}" if oversample else ""))
     if args.all_clips:
         record_recipe_result(args, fit(args, model, train_loader, None, optimizer, scaler, device, None, progress,
-                                       distiller), selection_run)
+                                       distiller, ema), selection_run)
         return
     val_only = [entry for entry in clips if entry[0] in val_clips]
     selection = fit(args, model, train_loader, val_loader, optimizer, scaler, device,
-                    lambda weights: score_weights(weights, val_only, device), progress, distiller)
+                    lambda weights: score_weights(weights, val_only, device), progress, distiller, ema)
     pick_winner(args, clips, val_clips, selection, device)
 
 
@@ -814,6 +978,27 @@ def build_parser() -> argparse.ArgumentParser:
                              "makes them); training only, never held out")
     pseudo.add_argument("--pseudo-share", type=float, default=0.3,
                         help="Their share of every epoch's draws (default 0.3; 1 trains on them alone)")
+    averaging = parser.add_argument_group("weight averaging (loop.EMA)")
+    averaging.add_argument("--ema", action="store_true",
+                           help=f"Keep an exponential moving average of the weights, written as last{EMA_SUFFIX} every "
+                                f"epoch and scored beside the live weights on every scored epoch (best{EMA_SUFFIX}, the "
+                                "ema_* columns of results.csv); the winner stays the live network's")
+    averaging.add_argument("--ema-decay", type=float, default=EMA_DECAY, metavar="D",
+                           help=f"The average's decay per optimizer step (default {EMA_DECAY}: about the last 1000 steps)")
+    visibility = parser.add_argument_group("visibility head (streamnet.StreamNet, loop.visibility_loss)")
+    visibility.add_argument("--vis-head", action="store_true",
+                            help="Train the network's per-frame visibility head (stream_s4) against the visible and "
+                                 "absent labels; its held-out AUC and balanced accuracy go to results.csv (vis_auc, "
+                                 "vis_bacc). The 15-channel output the tracker reads is unchanged")
+    visibility.add_argument("--vis-weight", type=float, default=VIS_LOSS_WEIGHT, metavar="W",
+                            help=f"The visibility loss's weight beside the heat loss (default {VIS_LOSS_WEIGHT})")
+    visibility.add_argument("--vis-pool", choices=VIS_POOLS, default=VIS_POOL_DEFAULT,
+                            help="The head's variant: global (the default: a global average of the fused stride-16 "
+                                 "features, one linear layer) or peak (per frame, the stride-4 features at that frame's "
+                                 "own heat peak with its top heat values, a small MLP; streamnet.PeakHead)")
+    visibility.add_argument("--vis-gap-weight", type=float, default=VIS_GAP_WEIGHT_DEFAULT, metavar="W",
+                            help="Weight of the visibility loss on the gap frames, the absent labels in a run of at most "
+                                 "3 flanked by visible labels (the occlusions the selector bridges; default 1: off)")
     parser.add_argument("--oversample", nargs="*", metavar="SOURCE=WEIGHT",
                         help="Relative sampling weight per source, e.g. custom=6 grid=1 tracknetv2=0.5 (0 drops it from training)")
     parser.add_argument("--oversample-absent", type=float, default=1.0, metavar="K",
@@ -866,6 +1051,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     if args.lr_drop and not args.resume:
         print("[error] --lr-drop goes with --resume: it lowers the learning rate of the run being continued", file=sys.stderr)
+        return 1
+    if args.vis_gap_weight <= 0:
+        print(f"[error] --vis-gap-weight must be above 0 (1 leaves the gap frames at the other frames' weight), "
+              f"not {args.vis_gap_weight:g}", file=sys.stderr)
         return 1
     try:
         train(args)

@@ -28,6 +28,11 @@ line, with the false alarms split into bridged and false, then the hits and trac
 
 The replay patches ``ball_in_play_selector.core.build_detections`` for the duration of a call so
 the recorded rows, motion flags included, stand in for the ones the masks would have produced.
+
+A run made with ``Config.ball_visibility_gate`` on wrote the gate into its ``config`` and the
+visibility head's score into every frame row (``visibility``); the chain replay applies the
+run's gate to the run's scores, and ``--visibility-gate`` applies another one (0: off), so the
+gate is re-scored from the JSON without the GPU.
 """
 from __future__ import annotations
 
@@ -91,16 +96,21 @@ class ReplayScene(NamedTuple):
     court_polygon: Optional[np.ndarray]
     player_boxes: List[Optional[Dict[str, Optional[List[float]]]]]
     court_keypoints: List[Optional[List[float]]]
+    visibility: List[Optional[float]]        # the run's per-frame visibility scores (None where it wrote none)
+    visibility_gate: float                   # the gate to apply: the override, else the run's own, else 0 (off)
 
     @classmethod
-    def of(cls, payload: TrackingJson) -> "ReplayScene":
+    def of(cls, payload: TrackingJson, visibility_gate: Optional[float] = None) -> "ReplayScene":
         video = payload["video"]
         frames = payload["frames"]
         with contextlib.redirect_stdout(io.StringIO()):          # build_court_polygon reports what it built
             court_polygon, _ = build_court_polygon([row.get("court_keypoints") for row in frames])
+        if visibility_gate is None:
+            visibility_gate = float((payload.get("config") or {}).get("ball_visibility_gate", 0.0))
         return cls(float(video["fps"]), int(video["width"]), int(video["height"]), int(video["total_frames"]),
                    court_polygon, [row.get("player_boxes") for row in frames],
-                   [row.get("court_keypoints") for row in frames])
+                   [row.get("court_keypoints") for row in frames],
+                   [row.get("visibility") for row in frames], float(visibility_gate))
 
 
 class Replay(NamedTuple):
@@ -123,7 +133,8 @@ def replay_chain(detections: List[List[Detection]], scene: ReplayScene) -> Repla
     with recorded_rows(detections):
         per_frame, chosen, tracks = select_ball_in_play(
             _raw_rows(detections), scene.fps, scene.width, scene.height, court_polygon=scene.court_polygon,
-            player_boxes_by_frame=scene.player_boxes, court_keypoints_by_frame=scene.court_keypoints)
+            player_boxes_by_frame=scene.player_boxes, court_keypoints_by_frame=scene.court_keypoints,
+            visibility=scene.visibility, visibility_gate=scene.visibility_gate)
     return Replay(per_frame, tracks, chosen)
 
 
@@ -133,7 +144,7 @@ def replay_union(detections: List[List[Detection]], scene: ReplayScene) -> Repla
     cfg = SelectorConfig(fps=scene.fps, width=scene.width, height=scene.height)
     tracks = build_tracks(detections, cfg)
     output_scene = core.make_scene(cfg, scene.fps, scene.total, scene.width, scene.height, None, None,
-                                   scene.player_boxes)
+                                   scene.player_boxes, visibility=scene.visibility, visibility_gate=scene.visibility_gate)
     for track in tracks:
         track.in_timeline = True
     return Replay(core.output_trajectory(output_scene, tracks), tracks, None)
@@ -166,12 +177,13 @@ def replay_payload(replay: Replay, payload: TrackingJson) -> TrackingJson:
     return out      # type: ignore[return-value]
 
 
-def replay_variant(variant: str, payload: TrackingJson) -> TrackingJson:
-    """The tracking payload of one variant on one clip's JSON (the run's own for ``control``)."""
+def replay_variant(variant: str, payload: TrackingJson, visibility_gate: Optional[float] = None) -> TrackingJson:
+    """The tracking payload of one variant on one clip's JSON (the run's own for ``control``);
+    `visibility_gate` replaces the run's own gate on its recorded scores (``ReplayScene.of``)."""
     if variant == "control":
         return payload
     detections = recorded_detections(payload)
-    scene = ReplayScene.of(payload)
+    scene = ReplayScene.of(payload, visibility_gate)
     replayed = {"chain": replay_chain, "union": replay_union, "raw": replay_raw}[variant](detections, scene)
     return replay_payload(replayed, payload)
 
@@ -235,14 +247,14 @@ def _labelled_clips(run_dir: Path, model: str, archive: Path, names: Optional[Se
 
 
 def report(run_dir: Path, model: str, archive: Path, variants: Sequence[str],
-           names: Optional[Sequence[str]] = None) -> List[str]:
+           names: Optional[Sequence[str]] = None, visibility_gate: Optional[float] = None) -> List[str]:
     """Every variant's report over the run's labelled clips."""
     clips = _labelled_clips(run_dir, model, archive, names)
     lines: List[str] = []
     if not clips:
         return lines
     for variant in variants:
-        scored = [score_payload(clip, source, replay_variant(variant, payload), labels)
+        scored = [score_payload(clip, source, replay_variant(variant, payload, visibility_gate), labels)
                   for clip, source, payload, labels in clips]
         if lines:
             lines.append("")
@@ -260,9 +272,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--clips", nargs="*", default=None, help="Clip stems to replay (default: every JSON with labels)")
     parser.add_argument("--variant", nargs="+", choices=VARIANTS, default=list(DEFAULT_VARIANTS),
                         help="Which outputs to score (see the module docstring)")
+    parser.add_argument("--visibility-gate", type=float, default=None,
+                        help="Apply this Config.ball_visibility_gate to the run's recorded visibility scores "
+                             "(default: the run's own gate; 0 turns it off)")
     args = parser.parse_args(argv)
     archive = Path(args.archive) if args.archive else default_archive()
-    lines = report(args.run_dir, args.model, archive, args.variant, args.clips)
+    lines = report(args.run_dir, args.model, archive, args.variant, args.clips, args.visibility_gate)
     if not lines:
         print(f"no {args.model} tracking JSONs with labels under {args.run_dir}", file=sys.stderr)
         return 1

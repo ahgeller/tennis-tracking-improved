@@ -214,7 +214,7 @@ class WindowDecoder(nn.Module):
         if len(features) != PAIRS * levels:
             raise ValueError(f"the decoder takes {PAIRS * levels} feature maps, not {len(features)}")
         pairs = [cast(streamnet.PairFeatures, tuple(features[levels * i:levels * (i + 1)])) for i in range(PAIRS)]
-        return self.model.decode(pairs)
+        return cast(torch.Tensor, self.model.decode(pairs))     # the grids alone, no visibility logits
 
 
 def load_trainable(weights: Path) -> nn.Module:

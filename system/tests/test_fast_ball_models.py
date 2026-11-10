@@ -129,6 +129,83 @@ def test_streaming_answers_exactly_as_the_unit_forward_pass():
             assert float((stream_output - unit_output).abs().max()) < 1e-6
 
 
+def test_the_visibility_head_is_an_extra_output_the_contract_never_sees():
+    """Off by default: no parameters, no state-dict keys, and asking for it is a ValueError. On, the
+    default call still answers the 15 channels alone, bit for bit what the headless network answers
+    from the same weights, and ``return_vis`` adds one logit per frame of the unit, which starts at
+    the prior (0: a fresh head claims nothing). The streaming decode answers it the same way."""
+    torch.manual_seed(1)
+    plain = streamnet.StreamNet()
+    assert not plain.has_vis_head and not streamnet.has_vis_head(plain.state_dict())
+    value = torch.rand(2, INPUT_CHANNELS, *SMALL)
+    with torch.no_grad(), pytest.raises(ValueError, match="no visibility head"):
+        plain(value, return_vis=True)
+    headed = streamnet.StreamNet(vis_head=True).eval()
+    headed.load_state_dict(plain.state_dict(), strict=False)      # the same weights, plus the head
+    assert headed.has_vis_head and streamnet.has_vis_head(headed.state_dict())
+    assert set(headed.state_dict()) - set(plain.state_dict()) == {"vis.weight", "vis.bias"}
+    with torch.no_grad():
+        grids = headed(value)
+        grids_again, logits = headed(value, return_vis=True)
+        expected = plain.eval()(value)
+    assert isinstance(grids, torch.Tensor) and grids.shape == (2, 15, SMALL[0] // 4, SMALL[1] // 4)
+    assert torch.equal(grids, expected) and torch.equal(grids_again, grids)
+    assert logits.shape == (2, streamnet.VIS_LOGITS) == (2, FRAMES_PER_UNIT)
+    assert float(logits.abs().max()) < 0.5                        # near the prior: small weights, zero bias
+    frames = [torch.rand(1, 3, *SMALL) for _ in range(FRAMES_PER_UNIT)]
+    with torch.no_grad():
+        cached = [headed.encode_frame(frames[index], frames[index - 1]) for index in range(1, FRAMES_PER_UNIT)]
+        streamed, streamed_logits = headed.decode(cached, return_vis=True)
+        unit, unit_logits = headed(torch.cat(frames, dim=1), return_vis=True)
+    assert torch.allclose(streamed, unit, atol=1e-6) and torch.allclose(streamed_logits, unit_logits, atol=1e-6)
+    assert plain.enable_vis_head() is plain and plain.has_vis_head
+    assert plain.enable_vis_head().vis is plain.vis                 # idempotent: the head is not replaced
+
+
+def test_a_record_with_the_visibility_head_round_trips_and_deploys_and_one_without_still_loads(tmp_path):
+    headed = scrambled(streamnet.StreamNet(vis_head=True))
+    with torch.no_grad():
+        headed.vis.weight.copy_(torch.rand_like(headed.vis.weight))
+    save_model(headed, tmp_path / "headed.pt")
+    save_model(streamnet.StreamNet(), tmp_path / "plain.pt")
+    loaded = load_ball_model(tmp_path / "headed.pt", CPU).float()
+    plain = load_ball_model(tmp_path / "plain.pt", CPU)
+    assert isinstance(loaded, streamnet.StreamNet) and loaded.has_vis_head and not plain.has_vis_head
+    value = torch.rand(1, INPUT_CHANNELS, *SMALL)
+    with torch.no_grad():
+        grids, logits = headed(value, return_vis=True)
+        back, back_logits = loaded(value, return_vis=True)
+        fused = deployed(copy.deepcopy(loaded))
+        fused_grids, fused_logits = fused(value, return_vis=True)
+        assert torch.equal(fused(value), fused_grids)
+    assert torch.allclose(grids, back, atol=2e-3) and torch.allclose(logits, back_logits, rtol=2e-3)   # float16 record
+    assert torch.allclose(fused_grids, back, atol=1e-5) and torch.allclose(fused_logits, back_logits, rtol=1e-5)
+    assert not any(isinstance(module, nn.BatchNorm2d) for module in fused.modules()) and fused.has_vis_head
+
+
+def test_the_onnx_export_of_a_headed_network_has_the_one_output_the_engine_reads(tmp_path):
+    """``ball_trt.export_onnx`` traces the default call, so the engine built from a record with the
+    head has one output tensor, the grids: nothing in the TensorRT path or the Core ML export needs
+    to strip the head."""
+    import io
+    import warnings
+
+    onnx = pytest.importorskip("onnx")
+    from tennis_tracker.engines import ball_trt
+
+    model = deployed(streamnet.StreamNet(vis_head=True))
+    probe = torch.zeros((1, INPUT_CHANNELS, *SMALL))
+    buffer = io.BytesIO()
+    with warnings.catch_warnings(), torch.no_grad():
+        warnings.simplefilter("ignore")
+        torch.onnx.export(model, (probe,), buffer, input_names=[ball_trt.INPUT_NAME], output_names=[ball_trt.OUTPUT_NAME],
+                          opset_version=ball_trt._ONNX_OPSET, dynamo=False)
+    graph = onnx.load_from_string(buffer.getvalue()).graph
+    assert [output.name for output in graph.output] == [ball_trt.OUTPUT_NAME]
+    assert [dim.dim_value for dim in graph.output[0].type.tensor_type.shape.dim] == [1, 15, SMALL[0] // 4, SMALL[1] // 4]
+    assert not any("vis" in node.name.lower() or any("vis" in name for name in node.input) for node in graph.node)
+
+
 def test_a_transition_keeps_the_previous_frame_recoverable_and_decode_wants_four():
     frame, previous = torch.rand(1, 3, 4, 4), torch.rand(1, 3, 4, 4)
     value = streamnet.transition(frame, previous)

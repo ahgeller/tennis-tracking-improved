@@ -596,6 +596,19 @@ class _Scene:
     fill_frames: int                # longest gap or tail the selector fills
     min_fill_speed: float           # px/frame at this fps and resolution
     near_player_fill_speed: float   # the same floor beside a player
+    # The visibility gate (``Config.ball_visibility_gate``): per source frame the detector's
+    # probability that a ball is visible (None where it has none), and the probability below
+    # which a fill is refused; 0 is off.
+    visibility: Optional[Sequence[Optional[float]]] = None
+    visibility_gate: float = 0.0
+
+    def fill_refused(self, frame: int) -> bool:
+        """Whether the visibility gate refuses a fill on `frame`: the gate is on and the frame's
+        score is below it. A frame without a score is never refused; a detection never asks."""
+        if self.visibility_gate <= 0.0 or self.visibility is None or frame >= len(self.visibility):
+            return False
+        score = self.visibility[frame]
+        return score is not None and score < self.visibility_gate
 
     def motion_candidate(
         self, frame: int, x: float, y: float, area: float, steps: int, speed: float
@@ -681,6 +694,10 @@ def _fill_gap(
     offset_active = False
     for frame in range(left.frame + 1, right.frame):
         if results[frame] is not None:
+            continue
+        if scene.fill_refused(frame):
+            offset_x = offset_y = 0.0
+            offset_active = False
             continue
         alpha = (frame - left.frame) / float(gap)
         base_x = left.cx + alpha * (right.cx - left.cx)
@@ -797,10 +814,11 @@ def _extend_tail(
         motion, search_radius = scene.motion_candidate(
             frame, base_x, base_y, right.area, step, tail_speed
         )
-        if motion is None:
+        if motion is None or scene.fill_refused(frame):
             # A single blobless frame is a dropped mask, not proof the ball
             # is gone; keep coasting on the prediction for a moment. The
-            # run still ends the moment the evidence runs out for good.
+            # run still ends the moment the evidence runs out for good. A
+            # frame the visibility gate refuses counts as a miss the same way.
             misses += 1
             if misses > cfg.motion_tail_miss_budget:
                 break
@@ -832,6 +850,7 @@ def _close_single_frame_holes(scene: _Scene, results: List[Optional[FrameResult]
             and left.source == right.source == "det"
             and left.conf >= _STRONG_ANCHOR_CONF and right.conf >= _STRONG_ANCHOR_CONF
             and scene.min_fill_speed <= speed <= max_step
+            and not scene.fill_refused(frame)
             and not is_near_player(
                 0.5 * (left.cx + right.cx),
                 0.5 * (left.cy + right.cy),
@@ -883,6 +902,8 @@ def select_ball_in_play(
     player_boxes_by_frame: Optional[PlayerBoxesByFrame] = None,
     debug: bool = False,
     court_keypoints_by_frame: Optional[Sequence[Optional[CourtKeypoints]]] = None,
+    visibility: Optional[Sequence[Optional[float]]] = None,
+    visibility_gate: float = 0.0,
 ) -> Tuple[List[Optional[FrameResult]], Optional[Track], List[Track]]:
     """Select one ball trajectory from per-frame detector candidates.
 
@@ -892,6 +913,10 @@ def select_ball_in_play(
     ``player_boxes_by_frame[t]`` a dict or list of player boxes.
     ``court_keypoints_by_frame[t]`` is frame ``t``'s court keypoints (or None); a track is
     measured against them for the neighbouring-court test, and without them nothing is vetoed.
+    ``visibility[t]`` is the detector's probability that a ball is visible on
+    frame ``t`` (None where it has none) and ``visibility_gate`` the probability
+    below which no fill is placed on that frame (``_Scene.fill_refused``); the
+    default, 0, is off and the scores are not read.
 
     Returns ``(per_frame, chosen, tracks)``: one ``FrameResult`` or ``None`` per
     source frame, the stitched chosen track (``None`` when nothing qualified),
@@ -899,7 +924,8 @@ def select_ball_in_play(
     """
     total = len(detections_by_frame)
     cfg = SelectorConfig(fps=fps, width=width, height=height)
-    scene = make_scene(cfg, fps, total, width, height, boost_masks, raw_motions, player_boxes_by_frame)
+    scene = make_scene(cfg, fps, total, width, height, boost_masks, raw_motions, player_boxes_by_frame,
+                       visibility=visibility, visibility_gate=visibility_gate)
     detections = build_detections(detections_by_frame, boost_masks)
     tracks = score_tracks(
         build_tracks(detections, cfg),
@@ -941,10 +967,13 @@ def make_scene(
     boost_masks: Optional[Sequence[Optional[MaskLike]]],
     raw_motions: Optional[Sequence[Optional[MaskLike]]],
     player_boxes_by_frame: Optional[PlayerBoxesByFrame],
+    visibility: Optional[Sequence[Optional[float]]] = None,
+    visibility_gate: float = 0.0,
 ) -> _Scene:
     """The inputs the output phase reads, with the fill window at this clip's frame rate and the
     speed floors at its frame rate and resolution: a floor tuned in 1080p pixels is a fraction of
-    the picture, and a 720p ball moving the same way covers two thirds of the pixels."""
+    the picture, and a 720p ball moving the same way covers two thirds of the pixels. The
+    visibility scores and gate are ``select_ball_in_play``'s."""
     res_scale = cfg.diag / REFERENCE_DIAG_PX
     return _Scene(
         cfg=cfg, fps=fps, total=total, width=width, height=height,
@@ -953,6 +982,7 @@ def make_scene(
         fill_frames=max(_FILL_WINDOW_MIN_FRAMES, int(round(float(fps) * _FILL_WINDOW_SEC))),
         min_fill_speed=pxpf_at_fps(_MIN_FILL_SPEED_PXPF * res_scale, fps, clamp=False),
         near_player_fill_speed=pxpf_at_fps(_NEAR_PLAYER_FILL_SPEED_PXPF * res_scale, fps, clamp=False),
+        visibility=visibility, visibility_gate=float(visibility_gate),
     )
 
 
