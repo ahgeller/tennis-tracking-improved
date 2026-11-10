@@ -143,7 +143,7 @@ from finetune.training.dataset import (AUGMENTATIONS, Augmenter, UnitDataset, ma
                                        unit_weights, weighted_sampler)
 from finetune.training.distill import (DISTILL_LOSSES, TEACHER_DIR, TEACHER_MAPS, DistillConfig, Distiller,
                                        build_teacher_maps)
-from finetune.training.frame_cache import TrainingUnit, build_units, prepare_data, prepare_pseudo
+from finetune.training.frame_cache import TrainingUnit, build_units, prepare_data, prepare_pseudo, write_raw_copies
 from finetune.training.loop import (EMA, EMA_DECAY, HALF_MAX, VIS_LOSS_WEIGHT, Validation, build_optimizer, check_finite,
                                     evaluate, fresh_model, gridtracknet_loss, heatmap_loss, largest_running_variance,
                                     save_weights, train_epoch, with_vis_head)
@@ -573,7 +573,9 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
         if variance > HALF_MAX * VARIANCE_WARNING_SHARE:
             print(f"[train] warning: {name} running variance {variance:.0f}, float16 overflows at {HALF_MAX:.0f}; "
                   f"the pre-normalisation activations are growing although the convolutions are held", flush=True)
-        validation = None if val_loader is None else evaluate(model, val_loader, device, args.max_val_steps, visibility)
+        validated_epoch = epoch % getattr(args, "val_every", 1) == 0 or epoch == args.epochs
+        validation = (evaluate(model, val_loader, device, args.max_val_steps, visibility)
+                      if val_loader is not None and validated_epoch else None)
         val_loss = None if validation is None else validation.loss
         save_weights(model, args.weights, last_path)
         if ema is not None:
@@ -592,7 +594,7 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
                 best_epoch, best_metrics = epoch, metrics
                 copy_atomic(last_path, best_path)
             if ema is not None:
-                if val_loader is not None:
+                if val_loader is not None and validated_epoch:
                     ema_validation = evaluate(ema.model, val_loader, device, args.max_val_steps, visibility)
                 ema_metrics = score(last_ema_path)
                 if args.keep_epochs:
@@ -791,13 +793,17 @@ def train(args: argparse.Namespace) -> None:
     if config is not None and config.maps == "cache":
         maps_dir = args.teacher_maps_dir or args.data_dir / TEACHER_DIR
         build_teacher_maps(Path(config.teacher), args.data_dir, [*train_units, *pseudo_units], device, maps_dir)
+    if args.raw_frames:
+        write_raw_copies(args.data_dir, [*train_units, *pseudo_units, *manifest["val"]], args.prep_workers)
     train_loader = DataLoader(UnitDataset(args.data_dir, [*train_units, *pseudo_units], augment=True,
-                                          augmentations=args.augment, arch=args.arch, banks=banks, teacher_maps=maps_dir),
+                                          augmentations=args.augment, arch=args.arch, banks=banks, teacher_maps=maps_dir,
+                                          raw_frames=args.raw_frames),
                               batch_size=args.batch_size,
                               shuffle=sampler is None, sampler=sampler, num_workers=args.workers,
                               pin_memory=device.type == "cuda", persistent_workers=args.workers > 0)
     val_loader = None if args.all_clips else DataLoader(
-        UnitDataset(args.data_dir, manifest["val"], augment=False, arch=args.arch), batch_size=args.batch_size,
+        UnitDataset(args.data_dir, manifest["val"], augment=False, arch=args.arch, raw_frames=args.raw_frames),
+        batch_size=args.batch_size,
         num_workers=args.workers, pin_memory=device.type == "cuda")
     if args.from_scratch:
         model = fresh_model(device, args.arch, args.vis_head, args.vis_pool)
@@ -1015,6 +1021,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--score-every", type=int, default=1, metavar="K",
                         help="Score the held-out clips with the detector metric every K epochs (the last epoch always); "
                              "best.npz (best.pt) is the scored epoch with the highest recall - wrong - false_alarm")
+    parser.add_argument("--val-every", type=int, default=1, metavar="K",
+                        help="Measure the validation loss (and the visibility head's metrics) every K epochs and on the "
+                             "last (default 1: every epoch). The winner is chosen by the detector metric, not this loss; "
+                             "one pass cost about a quarter of an s4_fg1 epoch")
+    parser.add_argument("--raw-frames", action="store_true",
+                        help="Read the cached frames from raw copies made once beside the PNGs (about 1 MB a frame) "
+                             "instead of decoding the PNGs every epoch: the same pixels, a faster data loader")
     parser.add_argument("--no-keep-epochs", dest="keep_epochs", action="store_false",
                         help="Do not keep every scored epoch's weights as epochs/epoch_NNN.npz (.pt) in --run-dir (31 MB each, "
                              "about 1.2 GB for 40 scored epochs; kept by default so any epoch can be re-scored with "
@@ -1039,6 +1052,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.self_test:
         self_test()
         return 0
+    if args.val_every < 1:
+        print("[error] --val-every must be at least 1", file=sys.stderr)
+        return 1
     if args.score_every < 1:
         print("[error] --score-every must be at least 1", file=sys.stderr)
         return 1

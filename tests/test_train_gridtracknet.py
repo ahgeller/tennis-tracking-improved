@@ -507,6 +507,34 @@ def stripe_centre(images: torch.Tensor) -> float:
     return float((red * columns).sum() / red.sum()) * 1920 / training.WIDTH
 
 
+def test_raw_frame_copies_and_the_per_plane_read_give_the_very_floats_the_old_read_gave(tmp_path):
+    """--raw-frames reads bytes instead of decoding PNGs, and the frames are divided plane by plane
+    into place: both must hand the network the floats it always got, flipped or not."""
+    from finetune.training.frame_cache import RAW_BYTES, raw_path, write_raw_copies
+    unit = unit_on_disk(tmp_path)
+    noise = np.random.default_rng(0).integers(0, 256, (training.HEIGHT, training.WIDTH, 3), dtype=np.uint8)
+    cv2.imwrite(str(tmp_path / unit["frames"][1]), noise)                # every pixel value, every channel
+
+    def old_way(flip):
+        frames = []
+        for relative in unit["frames"]:
+            image = cv2.cvtColor(cv2.imread(str(tmp_path / relative), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+            frames.append(np.moveaxis(cv2.flip(image, 1) if flip else image, -1, 0))
+        return np.concatenate(frames).astype(np.float32) / 255.0
+
+    write_raw_copies(tmp_path, [unit], workers=2)
+    assert all(raw_path(tmp_path / relative).stat().st_size == RAW_BYTES for relative in unit["frames"])
+    for raw in (False, True):
+        dataset = UnitDataset(tmp_path, [unit], augment=False, raw_frames=raw)
+        for flip in (False, True):
+            read = dataset.read_frames(unit, flip)
+            assert read.dtype == np.float32 and read.flags.c_contiguous and np.array_equal(read, old_way(flip))
+
+    raw_path(tmp_path / unit["frames"][0]).write_bytes(b"cut short")     # a copy that is not whole is made again
+    write_raw_copies(tmp_path, [unit], workers=1)
+    assert np.array_equal(UnitDataset(tmp_path, [unit], augment=False, raw_frames=True).read_frames(unit, False), old_way(False))
+
+
 def decoded_x(target: torch.Tensor, frame: int = 0) -> float:
     row, col = np.argwhere(target[frame * 3].numpy() == 1)[0]
     return (col + float(target[frame * 3 + 1, row, col])) * 1920 / training.GRID_COLS
@@ -688,6 +716,16 @@ def scripted_run(tmp_path, argv, train_losses, val_losses, scored, scoring=True,
         selection = training.fit(args, model, None, object() if validate else None, optimizer, scaler, torch.device("cpu"),
                                  score if scoring else None, progress)
     return args, selection, calls
+
+
+def test_val_every_measures_the_validation_loss_on_its_epochs_and_the_last_alone(tmp_path):
+    """--val-every 2 over 5 epochs: the loss is measured after epochs 2, 4 and 5 and the other rows
+    leave it empty, while every epoch is still scored and the winner still follows the metric."""
+    args, selection, calls = scripted_run(tmp_path, ["--epochs", "5", "--val-every", "2"], [0.5] * 5,
+                                          [0.3, 0.2, 0.1], [0.1, 0.9, 0.2, 0.3, 0.4])
+    rows = results_of(args.run_dir)
+    assert [row["val_loss"] != "" for row in rows] == [False, True, False, True, True]
+    assert len(calls) == 5 and selection.best_epoch == 2
 
 
 def results_of(run_dir):

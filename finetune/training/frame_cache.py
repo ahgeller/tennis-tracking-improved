@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Set, TypedDict
 
 import cv2
 
-from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, resize_to_model
+from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, HEIGHT, WIDTH, resize_to_model
 from tennis_tracker.frame_rate import require_phase_stride
 from finetune.data.fileio import write_atomic
 from finetune.data.labels import LabelPoint, read_labels
@@ -258,6 +258,46 @@ def prepare_data(clips: List[Clip], data_dir: Path, val_clips: List[str], rebuil
     if not manifest["train"]:
         raise ValueError("Need labelled clips in the training split")
     return manifest
+
+
+# --------------------------------------------------------------------------- raw copies (--raw-frames)
+
+RAW_SUFFIX = ".bgr"            # a cached frame's raw copy: its 432x768x3 BGR bytes, beside the PNG
+RAW_BYTES = HEIGHT * WIDTH * 3
+
+
+def raw_path(frame: Path) -> Path:
+    """Where a cached frame's raw copy is kept: beside its PNG, so whatever removes a clip's
+    frames (``prepare_clip`` on a changed video, ``--rebuild-data``) removes the copies too."""
+    return frame.with_suffix(RAW_SUFFIX)
+
+
+def write_raw_copy(frame: Path) -> bool:
+    """Decode one cached PNG and write its pixels as a raw copy when a whole one is not there yet;
+    True when it wrote. A PNG that cannot be read is a FileNotFoundError."""
+    target = raw_path(frame)
+    if target.is_file() and target.stat().st_size == RAW_BYTES:
+        return False
+    image = cv2.imread(str(frame), cv2.IMREAD_COLOR)
+    if image is None:
+        raise FileNotFoundError(frame)
+    if image.shape != (HEIGHT, WIDTH, 3):
+        raise ValueError(f"{frame} is {image.shape[1]}x{image.shape[0]}, not the cache's {WIDTH}x{HEIGHT}")
+    partial = target.with_suffix(RAW_SUFFIX + ".part")
+    partial.write_bytes(image.tobytes())
+    partial.replace(target)                # whole or not there: the size check above trusts the name
+    return True
+
+
+def write_raw_copies(data_dir: Path, units: List[TrainingUnit], workers: int) -> None:
+    """A raw copy of every frame `units` read, made once from the PNGs (about 1 MB a frame, three
+    to four times the PNG), so an epoch reads bytes and decodes nothing: the PNG decode was 44 ms
+    of the 156 ms one training unit costs a data-loading process."""
+    frames = sorted({data_dir / relative for unit in units for relative in unit["frames"]})
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        written = sum(pool.map(write_raw_copy, frames))
+    print(f"[data] raw copies of {len(frames)} frames ready in {time.perf_counter() - started:.0f}s ({written} written)")
 
 
 PSEUDO_CACHE = "pseudo"        # the pseudo-labelled clips' frames, under the trainer's cache root
