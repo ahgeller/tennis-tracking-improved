@@ -7,7 +7,7 @@ from ball_in_play_selector import PackedMask
 
 from tennis_tracker.config import Config
 from tennis_tracker.pass1 import (
-    _MIB, FrameCache, Pass1Result, _clear_boxes, _erase_ghosts_in_frame, _new_frame_cache, cache_frame_capacity,
+    _MIB, FrameCache, Pass1Result, _clear_boxes, erase_ghosts_in_frame, _new_frame_cache, cache_frame_capacity,
     erase_ghost_rois,
 )
 from tennis_tracker.run_context import VideoInfo
@@ -83,11 +83,11 @@ def test_clear_boxes_reports_only_boxes_that_held_motion():
 def test_erase_ghosts_in_frame_repacks_only_a_frame_that_changed():
     result = _result([[(5, 5, 9, 9)], [(5, 5, 9, 9)]], [[(20, 20, 26, 26)], [(4, 4, 10, 10)]])
     before = result.raw_motions[0]
-    assert _erase_ghosts_in_frame(result, 0, result.ghost_rois[0]) is False
+    assert erase_ghosts_in_frame(result, 0, result.ghost_rois[0]) is False
     assert result.raw_motions[0] is before
-    assert _erase_ghosts_in_frame(result, 1, result.ghost_rois[1]) is True
+    assert erase_ghosts_in_frame(result, 1, result.ghost_rois[1]) is True
     assert all(packed is None or not packed.unpack().any() for packed in (result.raw_motions[1], result.boost_masks[1]))
-    assert _erase_ghosts_in_frame(Pass1Result(), 0, [(0, 0, 1, 1)]) is False       # no masks at all
+    assert erase_ghosts_in_frame(Pass1Result(), 0, [(0, 0, 1, 1)]) is False       # no masks at all
 
 
 # --------------------------------------------------------------------------- the pass-2 frame cache

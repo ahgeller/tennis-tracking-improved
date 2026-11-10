@@ -237,16 +237,19 @@ class PlayerDetector:
         return dict(self.slots)
 
 
-def interpolate_player_boxes(boxes: Sequence[Dict[int, List[float]]],
-                             tracked: Sequence[bool]) -> List[Dict[int, List[float]]]:
+def interpolate_player_boxes(boxes: Sequence[Dict[int, List[float]]], tracked: Sequence[bool],
+                             positions: Optional[Sequence[int]] = None) -> List[Dict[int, List[float]]]:
     """The per-frame player boxes with every frame the tracker skipped (``tracked`` False)
     filled from the tracked frames around it.
 
     A player tracked on both sides of a gap moves linearly between its two boxes; one tracked on
     one side only keeps the box of the nearer tracked frame that has it (a tie goes to the earlier
     one), so a track that starts or ends inside the gap appears or vanishes half way through it.
-    Frames before the first or after the last tracked frame copy that frame.
+    Frames before the first or after the last tracked frame copy that frame.  ``positions`` puts
+    each frame on the source's time line (the live tracker's source frame indices, which skip the
+    frames it dropped); without it the frames are one apart.
     """
+    at = positions if positions is not None else range(len(boxes))
     keys = [index for index, is_tracked in enumerate(tracked) if is_tracked]
     if not keys:
         return [{} for _ in boxes]
@@ -258,7 +261,7 @@ def interpolate_player_boxes(boxes: Sequence[Dict[int, List[float]]],
     for a, b in zip(keys, keys[1:]):
         before, after = boxes[a], boxes[b]
         for index in range(a + 1, b):
-            t = (index - a) / (b - a)
+            t = (at[index] - at[a]) / (at[b] - at[a])
             nearer = before if t <= 0.5 else after
             filled: Dict[int, List[float]] = {}
             for track_id in list(before) + [key for key in after if key not in before]:

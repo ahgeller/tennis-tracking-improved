@@ -296,27 +296,30 @@ def last_valid_court_keypoints(kps_by_frame: Sequence[Optional[CourtKeypoints]],
     return None
 
 
-def build_court_polygon(all_court_kps: Sequence[Optional[CourtKeypoints]]) -> Tuple[Optional[np.ndarray], Optional[CourtKeypoints]]:
+def build_court_polygon(all_court_kps: Sequence[Optional[CourtKeypoints]],
+                        quiet: bool = False) -> Tuple[Optional[np.ndarray], Optional[CourtKeypoints]]:
     """The court polygon from the last frame with valid keypoints, and those keypoints.
 
     Prefers the ordered four-corner polygon; falls back to the convex hull of
-    every detected point.  Reports what it built on stdout.
+    every detected point.  Reports what it built on stdout unless `quiet` (a live stream
+    rebuilds it at every court refresh).
     """
+    report = (lambda _message: None) if quiet else print
     last_kps = last_valid_court_keypoints(all_court_kps)
     if last_kps is None:
-        print("[court polygon] No court keypoints found")
+        report("[court polygon] No court keypoints found")
         return None, None
 
     court_poly = build_ordered_court_polygon(last_kps)
     if court_poly is not None:
         tl, bl, br, tr = (court_poly[i, 0].tolist() for i in range(4))
-        print(f"[court polygon] Ordered corners [0,2,3,1]: TL={tl}, BL={bl}, BR={br}, TR={tr}")
+        report(f"[court polygon] Ordered corners [0,2,3,1]: TL={tl}, BL={bl}, BR={br}, TR={tr}")
         bx, by, bw, bh = cv2.boundingRect(court_poly)
-        print(f"[court polygon] bbox=({bx},{by},{bw}x{bh})")
+        report(f"[court polygon] bbox=({bx},{by},{bw}x{bh})")
         test_cx = bx + bw / 2.0
         test_cy = by + bh / 2.0
         test_dist = cv2.pointPolygonTest(court_poly, (test_cx, test_cy), True)
-        print(f"[court polygon] Center ({test_cx:.0f},{test_cy:.0f}) dist={test_dist:.1f} (positive=inside)")
+        report(f"[court polygon] Center ({test_cx:.0f},{test_cy:.0f}) dist={test_dist:.1f} (positive=inside)")
         return court_poly, last_kps
 
     pts = [
@@ -327,8 +330,8 @@ def build_court_polygon(all_court_kps: Sequence[Optional[CourtKeypoints]]) -> Tu
     if len(pts) >= 4:
         court_poly = cv2.convexHull(np.array(pts, dtype=np.float32).reshape(-1, 1, 2))
         bx, by, bw, bh = cv2.boundingRect(court_poly)
-        print(f"[court polygon] Fallback hull ({len(pts)} points), bbox=({bx},{by},{bw}x{bh})")
+        report(f"[court polygon] Fallback hull ({len(pts)} points), bbox=({bx},{by},{bw}x{bh})")
         return court_poly, last_kps
 
-    print(f"[court polygon] Not enough valid points ({len(pts)}), skipping")
+    report(f"[court polygon] Not enough valid points ({len(pts)}), skipping")
     return None, last_kps

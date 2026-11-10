@@ -2,7 +2,8 @@
 
 ## Purpose and entry points
 
-This is an offline GPU tennis-video tracker. `clean_tracker.py` runs detection,
+This is a GPU tennis-video tracker, offline by default and live with `--live` or
+`--camera` (`tennis_tracker/live/`, below). `clean_tracker.py` runs detection,
 selection and optional rendering (`--weights` points it at other ball-detector
 weights, `.npz` or `.pt`; the default, `models/candidates/stream_s4_fg1_e46.pt`, is the
 `stream_s4` network at 0.38 (`candidates/stream_s4_e60.pt`, the default before
@@ -108,6 +109,20 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   motion masks and ROI tracking; `motion_gpu.py` builds the same masks, bit for
   bit, with two NVRTC kernels (`Config.motion_kernels`; the PyTorch ops in
   `motion.py` are the reference and the fallback).
+- `tennis_tracker/live/`: the live tracker (`clean_tracker.py --live`, `--camera`): frames in one at
+  a time, each frame's ball out a fixed delay later, the offline stages unchanged. `pipeline.py`
+  drives them (`run_live`; its `region_for` gate, called in `_Pump._push_ball` where a frame
+  reaches the ball model, is the Phase C seam); `source.py` is the frame source and its drop policy; `fixed_lag.py` re-runs the
+  unchanged selector over a sliding window and commits frames `delay` old (`delay` None: the
+  offline answer, exactly); `evidence.py` records the selector's input so
+  `tools/live_lag_sweep.py` (on `train`) replays another lag on the CPU; `selector_process.py`
+  runs the selector in a child process. The prepass is fed through
+  `GridTrackNetBallDetector.open_stream` (`PrepassStream`, which `_prepass` also runs).
+  Pass 1 hands each committed frame on through `Pass1Collector.committed` once its player
+  boxes are final (`pass1.PlayerBoxHold`): at 60 FPS a frame the player tracker skipped
+  reaches the hook one frame late, with the next tracked frame, its boxes interpolated by
+  source index (`Pass1Collector.source_position`, so dropped frames count).
+  `audit/records/opt_live.md` has the measurements and what is not live yet.
 - `tennis_tracker/court/`: `court_geometry.py`, keypoints, side guides, polygon,
   homography; the court-event stages, each reading one `CourtScene`:
   `court_scene.py` (`CourtScene`, the event types and the player-box queries),

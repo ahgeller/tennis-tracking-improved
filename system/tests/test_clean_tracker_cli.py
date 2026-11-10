@@ -1,6 +1,7 @@
 """clean_tracker.main: the command line becomes a Config; run() and the self-test are patched out."""
 import os
 from unittest.mock import Mock, patch
+from pathlib import Path
 
 import pytest
 
@@ -159,3 +160,34 @@ def test_failed_self_test_reports_its_status(capsys):
     with patch.object(clean_tracker, "_self_test", return_value=1):
         assert clean_tracker.main(["--self-test"]) == 1
     assert "passed" not in capsys.readouterr().out
+
+
+def test_the_live_flags_reach_the_live_tracker(tmp_path):
+    """--live (or --camera) runs the live tracker with the options asked for, and writes no video."""
+    from tennis_tracker.live.source import DropPolicy
+    run_live = Mock()
+    with patch.object(clean_tracker, "run_live", run_live), patch.object(clean_tracker, "run") as run, \
+         patch.object(clean_tracker, "OUTPUT", tmp_path / "out"):
+        assert clean_tracker.main(["-i", str(tmp_path / "in.mp4"), "--live", "--pace", "fast", "--live-delay", "1.5",
+                                   "--live-history", "3", "--live-every", "0.2", "--live-drop", "never",
+                                   "--record-evidence", "--live-selector-inline"]) == 0
+        assert clean_tracker.main(["--camera", "1", "--live-delay", "clip"]) == 0
+    assert run.call_count == 0 and run_live.call_count == 2
+    (cfg, options), (_, camera) = run_live.call_args_list[0].args, run_live.call_args_list[1].args
+    assert not cfg.save_tracking_video
+    assert (options.pacing, options.delay_s, options.history_s, options.every_s) == ("fast", 1.5, 3.0, 0.2)
+    assert options.drop is DropPolicy.NEVER and options.record_evidence and not options.selector_process
+    assert camera.camera == 1 and camera.delay_s is None and camera.selector_process
+
+
+def test_a_camera_run_writes_its_own_json_and_is_never_paced_fast(tmp_path, capsys):
+    """A camera's JSON does not go over a file run's default one; --pace fast with a camera is refused."""
+    run_live = Mock()
+    with patch.object(clean_tracker, "run_live", run_live), patch.object(clean_tracker, "OUTPUT", tmp_path / "out"):
+        assert clean_tracker.main(["--camera", "2", "--camera-fps", "59.94"]) == 0
+        cfg, options = run_live.call_args.args
+        assert Path(cfg.tracking_json) == tmp_path / "out" / f"camera2_live{clean_tracker.TRACKING_JSON_SUFFIX}"
+        assert options.camera_fps == 59.94
+        with pytest.raises(SystemExit):
+            clean_tracker.main(["--camera", "0", "--pace", "fast"])
+    assert "a camera is realtime" in capsys.readouterr().err

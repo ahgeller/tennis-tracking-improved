@@ -374,7 +374,7 @@ JSON_ONLY_OVERRIDES = dict(
 def open_inputs(cfg: Config):
     """What ``pipeline.run`` opens before pass 1: the run's setup, its ball detector and inputs."""
     setup = pipeline._setup_run(cfg)
-    return pipeline._open_inputs(setup, pipeline._build_ball_detector(setup.cfg))
+    return pipeline._open_inputs(setup, pipeline.build_ball_detector(setup.cfg))
 
 
 def make_config(tmp_path: Path, clip: Path, **overrides) -> Config:
@@ -886,3 +886,72 @@ def test_players_are_detected_every_other_frame_from_60_fps_and_interpolated_bet
     for frame, boxes in enumerate(result.player_boxes):
         shift = 2.0 * min(frame, last_tracked)          # after the last tracked frame, its box is held
         assert boxes == {1: [10.0 + shift, 20.0, 30.0 + shift, 60.0]}, frame
+
+
+def _handing_on(handed: List[Tuple[int, Dict[int, List[float]], List[Any]]]) -> type:
+    """Pass 1's collector recording in `handed` what the commit hook is handed: each frame, its
+    player boxes as they stand at that moment, and the ghosts that came with it (what the live
+    tracker feeds on)."""
+
+    class HandedOn(pass1.Pass1Collector):
+        def committed(self, frame_index, ghosts):
+            handed.append((frame_index, copy.deepcopy(self.result.player_boxes[frame_index]), list(ghosts)))
+
+    return HandedOn
+
+
+@pytest.mark.parametrize("fps", [30.0, 60.0])
+def test_the_commit_hook_gets_every_frame_in_order_with_its_final_player_boxes(tmp_path, monkeypatch, fake_cuda, fps):
+    """A frame the player tracker skips is handed on with the next one it runs on, its boxes
+    already interpolated: the hook sees the boxes the run returns, frame by frame, in order."""
+    path = tmp_path / f"rally_{fps:g}fps.avi"
+    write_lossless_clip(path, synthetic_frames(), fps=fps)
+    install_fakes(monkeypatch)
+    handed: List[Tuple[int, Dict[int, List[float]], List[Any]]] = []
+    monkeypatch.setattr(pipeline, "PlayerDetector", _ScheduledPlayers)
+    monkeypatch.setattr(pass1, "Pass1Collector", _handing_on(handed))
+    result = pipeline.run(make_config(tmp_path, path, **JSON_ONLY_OVERRIDES))
+    assert [frame for frame, _, _ in handed] == list(range(FRAMES))
+    assert [boxes for _, boxes, _ in handed] == result.player_boxes
+
+
+class _Hold:
+    """A ``PlayerBoxHold`` over its own lists, recording each frame it hands on with its box's x."""
+
+    def __init__(self, positions):
+        self.boxes, self.tracked, self.handed = [], [], []
+        self.hold = pass1.PlayerBoxHold(self._hand_on, positions.__getitem__)
+
+    def _hand_on(self, frame, ghosts):
+        self.handed.append((frame, self.boxes[frame][7][0], ghosts))
+
+    def add(self, frame, tracked, x):
+        self.boxes.append({7: [x, 0.0, x + 1.0, 2.0]})
+        self.tracked.append(tracked)
+        ghosts = [(frame - 1, (frame, 0, frame + 1, 1))] if frame else []
+        self.hold.add(frame, ghosts, self.boxes, self.tracked)
+
+
+def test_a_skipped_frame_is_held_with_its_ghosts_until_the_next_tracked_frame():
+    """On a schedule of every third frame the skipped frames come out with the next tracked one, in
+    order, each with the ghosts found as it was committed and its box interpolated; the tail comes
+    out with ``release`` and keeps what it held."""
+    hold = _Hold(positions=range(5))
+    calls = []
+    for frame, tracked in enumerate([True, False, False, True, False]):
+        hold.add(frame, tracked, float(frame) if tracked else -1.0)     # a skipped frame holds a placeholder
+        calls.append([handed[0] for handed in hold.handed])
+    assert calls == [[0], [0], [0], [0, 1, 2, 3], [0, 1, 2, 3]]
+    hold.hold.release()
+    assert [frame for frame, _, _ in hold.handed] == [0, 1, 2, 3, 4]
+    assert [ghosts for _, _, ghosts in hold.handed] == [[]] + [[(f - 1, (f, 0, f + 1, 1))] for f in range(1, 5)]
+    assert [x for _, x, _ in hold.handed] == pytest.approx([0.0, 1.0, 2.0, 3.0, -1.0])
+
+
+def test_held_boxes_are_interpolated_by_source_position_across_dropped_frames():
+    """The live tracker numbers the frames it keeps 0, 1, 2...; with source frames 1 and 2 dropped,
+    a held frame between tracked frames at source 0 and 4 sits three quarters of the way."""
+    hold = _Hold(positions=[0, 3, 4, 5, 6])
+    for frame, (tracked, x) in enumerate([(True, 0.0), (False, -1.0), (True, 8.0), (False, -1.0), (True, 12.0)]):
+        hold.add(frame, tracked, x)
+    assert [x for _, x, _ in hold.handed] == pytest.approx([0.0, 6.0, 8.0, 10.0, 12.0])

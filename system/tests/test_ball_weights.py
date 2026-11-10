@@ -38,7 +38,7 @@ def test_the_pipeline_refuses_missing_default_weights_with_that_error(tmp_path, 
     missing = tmp_path / "candidates" / "stream_s4_fg1_e46.pt"
     monkeypatch.setattr(ball_weights, "KNOWN", (STREAM_S4_WEIGHTS._replace(path=missing), HEATMAP_S4_WEIGHTS))
     with pytest.raises(FileNotFoundError, match="stream_s4 ball detector") as info:
-        pipeline._build_ball_detector(Config(model_path=str(missing)))
+        pipeline.build_ball_detector(Config(model_path=str(missing)))
     assert "--weights models/ball_detector.pt" in str(info.value)
 
 

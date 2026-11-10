@@ -9,7 +9,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from typing import Dict, NamedTuple, Optional
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 import cv2
 import torch
@@ -36,7 +36,7 @@ from .render.summaries import print_selector_track_summary, print_timing_summary
 from .utils import EncoderChoice, choose_encoder, detect_device, print_platform_report, resolve_runtime
 from .video_io import check_writable_video_path
 
-_DEFAULT_FPS = 24.0                 # when the container reports none
+DEFAULT_FPS = 24.0                  # when the container (or a camera) reports none
 PREPASS_WEIGHTS = frozenset(WEIGHTS_SUFFIX.values())     # the suffixes the five-frame prepass detector loads
 # The display path interpolates across at least this much time, within these frame bounds.
 _DISPLAY_PATH_GAP_SECONDS = 0.60
@@ -102,7 +102,7 @@ def validate_io_paths(cfg: Config) -> Path:
     return input_path
 
 
-def _build_ball_detector(cfg: Config) -> BallDetectorBackend:
+def build_ball_detector(cfg: Config) -> BallDetectorBackend:
     """The five-frame prepass detector for ``.npz`` (GridTrackNet) or ``.pt`` (HeatmapNet)
     weights, else the TensorRT engine next to ``model_path``."""
     model_path = Path(cfg.model_path).expanduser().resolve()
@@ -147,6 +147,33 @@ class _EncoderProbe:
         return self._choice
 
 
+def open_cuda_device(cfg: Config) -> Tuple[Config, torch.device]:
+    """The config resolved for its CUDA device (``utils.resolve_runtime``, no video encoder chosen)
+    and the device; a RuntimeError without one. The caller's Config is not changed. The run owns
+    the process: cuDNN autotunes the fixed-shape convolutions."""
+    device_str, _ = detect_device(cfg.device)
+    if not str(device_str).isdigit():
+        raise RuntimeError("The tracking runtime requires an NVIDIA CUDA device index such as --device 0.")
+    device_index = int(device_str)
+    if not torch.cuda.is_available() or device_index >= torch.cuda.device_count():
+        raise RuntimeError(f"CUDA device {device_index} is unavailable.")
+    cfg, _ = resolve_runtime(cfg, str(device_index), writes_video=False)
+    torch.backends.cudnn.benchmark = True
+    return cfg, torch.device(f"cuda:{device_index}")
+
+
+def video_info(path: Path, capture: Any, fps: Optional[float] = None) -> VideoInfo:
+    """An opened capture's geometry and rate (`fps` when given, else the container's, else
+    ``DEFAULT_FPS``)."""
+    return VideoInfo(
+        path=path,
+        fps=fps or capture.get(cv2.CAP_PROP_FPS) or DEFAULT_FPS,
+        width=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+        height=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        frame_count_hint=max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT))),
+    )
+
+
 class _RunSetup(NamedTuple):
     """What a run settles before its detectors are built (``_setup_run``)."""
     cfg: Config                     # with the runtime resolved
@@ -167,21 +194,12 @@ def _setup_run(cfg: Config) -> _RunSetup:
     if cfg.player_model_path:
         prefetch_bytetrack()        # overlaps boxmot's import with everything below
 
-    device_str, _ = detect_device(cfg.device)
-    if not str(device_str).isdigit():
-        raise RuntimeError("The tracking runtime requires an NVIDIA CUDA device index such as --device 0.")
-    device_index = int(device_str)
-    if not torch.cuda.is_available() or device_index >= torch.cuda.device_count():
-        raise RuntimeError(f"CUDA device {device_index} is unavailable.")
-    # The caller's Config is not changed. A run that writes no video gets no encoder: FFmpeg is
-    # not probed or dry-run for it. A run that does probes on a thread (FFmpeg's encoder list and an
-    # NVENC dry run, ~0.4 s of subprocesses) while the detectors are built; the platform report
-    # follows once the choice is in.
-    cfg, _ = resolve_runtime(cfg, str(device_index), writes_video=False)
+    # A run that writes no video gets no encoder: FFmpeg is not probed or dry-run for it. A run that
+    # does probes on a thread (FFmpeg's encoder list and an NVENC dry run, ~0.4 s of subprocesses)
+    # while the detectors are built; the platform report follows once the choice is in.
+    cfg, device = open_cuda_device(cfg)
     encoder_probe = _EncoderProbe(cfg) if _video_outputs(cfg) else None
-    # The run owns the process: let cuDNN autotune the fixed-shape convolutions.
-    torch.backends.cudnn.benchmark = True
-    return _RunSetup(cfg, input_path, torch.device(f"cuda:{device_index}"), encoder_probe, timing, started_at, init_t0)
+    return _RunSetup(cfg, input_path, device, encoder_probe, timing, started_at, init_t0)
 
 
 def _open_inputs(setup: _RunSetup, detector: BallDetectorBackend) -> RunContext:
@@ -192,13 +210,7 @@ def _open_inputs(setup: _RunSetup, detector: BallDetectorBackend) -> RunContext:
     try:
         if not cap.isOpened():
             raise RuntimeError(f"Could not open input video: {input_path}")
-        video = VideoInfo(
-            path=input_path,
-            fps=cap.get(cv2.CAP_PROP_FPS) or _DEFAULT_FPS,
-            width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-            frame_count_hint=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
-        )
+        video = video_info(input_path, cap)
         print(f"[init] Video: {video.width}x{video.height} @ {video.fps:.1f}fps, ~{video.frame_count_hint} frames")
         # A prepass on a worker thread starts after the court and player engines are built and the
         # player engine's CUDA graph is captured: a capture is invalidated by CUDA work from another
@@ -282,7 +294,7 @@ def _select(ctx: RunContext, pass1: Pass1Result) -> Selection:
     return Selection(per_frame, chosen_track, all_tracks, court_polygon, last_kps, display_path)
 
 
-def _court_events(ctx: RunContext, pass1: Pass1Result, selection: Selection) -> CourtEvents:
+def compute_court_events(ctx: RunContext, pass1: Pass1Result, selection: Selection) -> CourtEvents:
     """Bounces, contacts and rally legs for the minimap and the tracking JSON; not computed
     when neither ``cfg.court_events`` nor ``cfg.draw_court_minimap`` asks for them."""
     cfg, video = ctx.cfg, ctx.video
@@ -314,21 +326,8 @@ def _finish(ctx: RunContext, pass1: Pass1Result, selection: Selection, events: C
     """Assemble the result, write it as the tracking JSON and report what was produced."""
     cfg = ctx.cfg
     n = pass1.frame_count
-    elapsed = ctx.elapsed()
-    result = RunResult(
-        per_frame=list(selection.per_frame),
-        chosen_track=selection.chosen_track,
-        all_tracks=list(selection.all_tracks),
-        frame_count=n,
-        court_keypoints=list(pass1.court_keypoints),
-        player_boxes=list(pass1.player_boxes),
-        last_valid_court_keypoints=last_valid_court_keypoints(pass1.court_keypoints),
-        elapsed_sec=elapsed,
-        timing=dict(ctx.timing.values),
-        pass2_frames_rendered=rendered,
-        outputs=_written_outputs(cfg),
-        court_events=events,
-    )
+    result = assemble_result(ctx, pass1, selection, events, n, rendered, _written_outputs(cfg))
+    elapsed = result.elapsed_sec
     if cfg.tracking_json:
         write_tracking_json(ctx, pass1, result)
     filled = result.filled_frames
@@ -341,18 +340,38 @@ def _finish(ctx: RunContext, pass1: Pass1Result, selection: Selection, events: C
     return result
 
 
+def assemble_result(ctx: RunContext, pass1: Pass1Result, selection: Selection, events: CourtEvents,
+                    frame_count: int, rendered: int, outputs: Dict[str, Path]) -> RunResult:
+    """The run's ``RunResult``: the selection, pass 1's court keypoints and player boxes, the time
+    so far and the outputs."""
+    return RunResult(
+        per_frame=list(selection.per_frame),
+        chosen_track=selection.chosen_track,
+        all_tracks=list(selection.all_tracks),
+        frame_count=frame_count,
+        court_keypoints=list(pass1.court_keypoints),
+        player_boxes=list(pass1.player_boxes),
+        last_valid_court_keypoints=last_valid_court_keypoints(pass1.court_keypoints),
+        elapsed_sec=ctx.elapsed(),
+        timing=dict(ctx.timing.values),
+        pass2_frames_rendered=rendered,
+        outputs=outputs,
+        court_events=events,
+    )
+
+
 def run(cfg: Config) -> RunResult:
     """Track the ball through ``cfg.input_video``, write the configured outputs
     and return what was found (see ``RunResult``)."""
     setup = _setup_run(cfg)
-    detector = _build_ball_detector(setup.cfg)
+    detector = build_ball_detector(setup.cfg)
     try:    # whatever ends the run (an init failure, Ctrl-C, an error), a prepass process is stopped
         ctx = _open_inputs(setup, detector)
         pass1 = collect_pass1(ctx)
         detector.finish_prepass()           # a prepass process exits while the selector runs
         erase_ghost_rois(pass1)
         selection = _select(ctx, pass1)
-        events = _court_events(ctx, pass1, selection)
+        events = compute_court_events(ctx, pass1, selection)
         rendered = render_pass2(ctx, pass1, selection, events)
         return _finish(ctx, pass1, selection, events, rendered)
     finally:

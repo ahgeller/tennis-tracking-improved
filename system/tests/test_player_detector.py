@@ -136,6 +136,17 @@ def test_interpolation_moves_tracked_players_linearly_across_skipped_frames():
     assert out[1] == a and out[5] == b and boxes[2] == {}    # tracked frames kept, input untouched
 
 
+def test_interpolated_boxes_are_weighted_by_the_frames_positions():
+    """With source positions (the live tracker's, which skip dropped frames) a skipped frame moves
+    in proportion to where it sits between the tracked frames, and the nearer-frame rule uses them."""
+    boxes = [{1: [0.0, 0.0, 10.0, 10.0], 2: [5.0, 5.0, 6.0, 6.0]}, {}, {1: [8.0, 0.0, 18.0, 10.0]}]
+    tracked = [True, False, True]
+    assert interpolate_player_boxes(boxes, tracked, [0, 1, 2])[1] == {1: [4.0, 0.0, 14.0, 10.0], 2: [5.0, 5.0, 6.0, 6.0]}
+    filled = interpolate_player_boxes(boxes, tracked, [0, 3, 4])[1]
+    assert filled == {1: [6.0, 0.0, 16.0, 10.0]}            # 3/4 of the way: player 2 has vanished
+    assert interpolate_player_boxes(boxes, tracked, [0, 1, 2]) == interpolate_player_boxes(boxes, tracked)
+
+
 def test_interpolation_with_every_frame_tracked_or_none_tracked():
     boxes = [{1: [0.0, 0.0, 1.0, 1.0]}, {1: [2.0, 2.0, 3.0, 3.0]}]
     assert interpolate_player_boxes(boxes, [True, True]) == boxes

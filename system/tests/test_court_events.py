@@ -258,7 +258,7 @@ def test_court_event_stage_runs_the_model_contacts_and_legs(bounce_model, capsys
     )
     pass1 = SimpleNamespace(player_boxes=[player] * len(track), court_keypoints=[KEYPOINTS] * len(track))
     selection = SimpleNamespace(per_frame=track)
-    events = pipeline._court_events(ctx, pass1, selection)
+    events = pipeline.compute_court_events(ctx, pass1, selection)
     out = capsys.readouterr().out
     assert isinstance(events, CourtEvents) and events.computed
     assert [bounce.frame for bounce in events.bounces] == [15] and events.contacts == []
@@ -272,13 +272,13 @@ def test_court_event_stage_runs_the_model_contacts_and_legs(bounce_model, capsys
     # Off, the stage neither loads the model nor prints; either flag alone turns it on.
     FakeBounceModel.loaded = []
     ctx.cfg.draw_court_minimap = False
-    assert pipeline._court_events(ctx, pass1, selection) == CourtEvents()
+    assert pipeline.compute_court_events(ctx, pass1, selection) == CourtEvents()
     assert FakeBounceModel.loaded == [] and capsys.readouterr().out == ""
     ctx.cfg.court_events = True
-    assert pipeline._court_events(ctx, pass1, selection) == events
+    assert pipeline.compute_court_events(ctx, pass1, selection) == events
     ctx.cfg.bounce_model_path = None
     with pytest.raises(RuntimeError, match="bounce_model_path"):
-        pipeline._court_events(ctx, pass1, selection)
+        pipeline.compute_court_events(ctx, pass1, selection)
 
 
 # What ``--court`` adds to the golden clip's tracking JSON: the stages run and find nothing.

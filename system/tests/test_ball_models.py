@@ -72,16 +72,16 @@ def test_the_pipeline_builder_sends_both_weights_suffixes_to_the_prepass_detecto
     weights.write_bytes(b"placeholder")
     cfg = Config(model_path=str(weights))
     with patch.object(pipeline, "GridTrackNetBallDetector", return_value="prepass") as detector:
-        assert pipeline._build_ball_detector(cfg) == "prepass"
+        assert pipeline.build_ball_detector(cfg) == "prepass"
     detector.assert_called_once_with(str(weights.resolve()), cfg)
     with pytest.raises(FileNotFoundError, match="Ball-detector weights not found"):
-        pipeline._build_ball_detector(Config(model_path=str(tmp_path / f"missing{suffix}")))
+        pipeline.build_ball_detector(Config(model_path=str(tmp_path / f"missing{suffix}")))
 
 
 def test_the_pipeline_builder_still_resolves_an_engine_beside_other_paths(tmp_path):
     with patch.object(pipeline, "resolve_engine_path", return_value=None):
         with pytest.raises(RuntimeError, match="Expected a .engine file"):
-            pipeline._build_ball_detector(Config(model_path=str(tmp_path / "ball.onnx")))
+            pipeline.build_ball_detector(Config(model_path=str(tmp_path / "ball.onnx")))
 
 
 def test_the_prepass_detector_warms_up_with_the_models_channel_count(capsys):
