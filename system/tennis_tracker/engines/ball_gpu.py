@@ -301,6 +301,41 @@ class StreamHalves:
     stream: Optional[Any] = None
 
 
+def estimate_shift(frame: torch.Tensor, previous: torch.Tensor, radius: int) -> Tuple[int, int]:
+    """The integer camera translation ``(dx, dy)`` from `previous` to `frame` (both ``(3, H, W)``):
+    the shift within `radius` px whose moved `previous` differs least, in mean absolute luma, from
+    `frame` over the frame less a `radius` margin (every candidate compares the same pixels; ties go
+    to the smaller shift, zero first). An exhaustive search: the shifts a pan makes between two
+    frames of a phase are a few pixels, and the search is a handful of reductions on the device."""
+    if radius < 1:
+        return 0, 0
+    luma_frame = frame.float().mean(dim=0)
+    luma_previous = previous.float().mean(dim=0)
+    height, width = luma_frame.shape
+    inner = luma_frame[radius:height - radius, radius:width - radius]
+    candidates = sorted(((dx * dx + dy * dy, dx, dy) for dy in range(-radius, radius + 1) for dx in range(-radius, radius + 1)))
+    residuals = torch.stack([
+        (inner - luma_previous[radius - dy:height - radius - dy, radius - dx:width - radius - dx]).abs().mean()
+        for _, dx, dy in candidates])
+    _, dx, dy = candidates[int(residuals.argmin())]
+    return dx, dy
+
+
+def aligned_previous(frame: torch.Tensor, previous: torch.Tensor, shift: Tuple[int, int]) -> torch.Tensor:
+    """`previous` moved by `shift` ``(dx, dy)`` so that it lines up with `frame`: pixel ``(y, x)`` of
+    the result is ``previous[y - dy, x - dx]``, and the strip the move uncovers is filled from `frame`
+    itself, so the difference fields there are zero rather than a false edge. A zero shift returns
+    `previous` as it is."""
+    dx, dy = shift
+    if dx == 0 and dy == 0:
+        return previous
+    height, width = frame.shape[-2:]
+    out = frame.clone()
+    out[..., max(0, dy):height + min(0, dy), max(0, dx):width + min(0, dx)] = \
+        previous[..., max(0, -dy):height + min(0, -dy), max(0, -dx):width + min(0, -dx)]
+    return out
+
+
 class TransitionRing:
     """One clip's transitions for ``StreamHalves`` (see the module docstring). ``push(frame, phase)``
     takes each decoded frame's model input in order and returns the sequence number of the transition
@@ -309,12 +344,16 @@ class TransitionRing:
     to ``batch`` units, each given as its five frames' values from ``push`` (the first is not read),
     padded with copies of the last unit as a static batch is. Transition ``n`` lives in slot
     ``n % slots``; a unit whose transition was overwritten before it was decoded is a RuntimeError
-    (``transition_slots`` sizes the ring so the prepass never does that)."""
+    (``transition_slots`` sizes the ring so the prepass never does that). With `align_radius` above
+    0 (``Config.ball_transition_align_px``) each transition's previous frame is first moved by the
+    camera translation ``estimate_shift`` finds within that radius (``aligned_previous``), so a pan
+    leaves no difference field of its own; the frame the encoder sees as current is untouched."""
 
-    def __init__(self, halves: StreamHalves, slots: int, phases: int):
+    def __init__(self, halves: StreamHalves, slots: int, phases: int, align_radius: int = 0):
         self.halves = halves
         self.batch = int(halves.batch)
         self.slots = int(slots)
+        self.align_radius = int(align_radius)
         if self.slots < FRAMES_PER_UNIT - 1:
             raise ValueError(f"TransitionRing needs at least {FRAMES_PER_UNIT - 1} slots, not {slots}")
         self.previous: List[Optional[torch.Tensor]] = [None] * int(phases)
@@ -333,6 +372,8 @@ class TransitionRing:
             self.frames = torch.empty((self.batch, *frame.shape), dtype=frame.dtype, device=frame.device)
             self.before = torch.empty_like(self.frames)
         assert self.before is not None
+        if self.align_radius:
+            previous = aligned_previous(frame, previous, estimate_shift(frame, previous, self.align_radius))
         row = self.pushed - self.encoded
         self.frames[row].copy_(frame)
         self.before[row].copy_(previous)

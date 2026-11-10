@@ -1,0 +1,25 @@
+{
+ "det": {
+  "hit": 8021,
+  "unlabelled": 3652,
+  "loc": 54,
+  "bridged": 22,
+  "wrong": 2,
+  "false": 4
+ },
+ "motion": {
+  "hit": 83,
+  "loc": 13,
+  "unlabelled": 46,
+  "wrong": 4,
+  "false": 12,
+  "bridged": 24
+ },
+ "interp": {
+  "loc": 3,
+  "hit": 7,
+  "bridged": 33,
+  "unlabelled": 20,
+  "wrong": 4
+ }
+}

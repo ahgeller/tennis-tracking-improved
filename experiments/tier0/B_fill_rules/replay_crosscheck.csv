@@ -1,0 +1,4 @@
+rule,group,vis,hits,recall,wrong,invis,fa,bridged,false
+replay_chain,all,8515,8047,0.945,7,518,64,60,4
+replay_chain-interp,all,8515,8023,0.9422,2,518,26,22,4
+replay_nofill,all,8515,8023,0.9422,2,518,26,22,4

@@ -1,0 +1,238 @@
+[11/01/2026-10:06:23] [TRT] [I] Loaded engine size: 3 MiB
+[11/01/2026-10:06:23] [TRT] [I] [MemUsageChange] TensorRT-managed allocation in IExecutionContext creation: CPU +0, GPU +48, now: CPU 0, GPU 51 (MiB)
+[11/01/2026-10:06:23] [TRT] [W] WARNING The logger passed into createInferRuntime differs from one already registered for an existing builder, runtime, or refitter. So the current new logger is ignored, and TensorRT will use the existing one which is returned by nvinfer1::getLogger() instead.
+[11/01/2026-10:06:23] [TRT] [I] Loaded engine size: 0 MiB
+[11/01/2026-10:06:23] [TRT] [I] [MemUsageChange] TensorRT-managed allocation in IExecutionContext creation: CPU +0, GPU +41, now: CPU 0, GPU 92 (MiB)
+[archive] C:\Users\Andrew\Desktop\clean_version\optimization_test\phases\tests_AE\finetune (24 clips, mixed_v1)
+[detector] stream_s4 TensorRT FP16 encoder and decoder streaming, 4 a call, 192x108 grid (confidence=0.00, device=cuda:0, a unit every 1 frame(s))
+
+##### baseline: ball_transition_align_px=0
+[detector] NVDEC's colour conversion does not reproduce OpenCV's pixels for C:\Users\Andrew\Desktop\clean_version\optimization_test\phases\tests_AE\finetune\videos\grid_match8.mp4; the prepass decodes on the CPU
+[detector] GridTrackNet prepass: 1103 source frames, 1103 detections, 274 batched calls across 2 phase(s) in 4.2s (264.2 source fps, opencv decode)
+[detector] GridTrackNet prepass: the container reported 1325 frames, 1103 decoded; the decoded count is used
+[baseline] grid_match8: 1325 frames in 4.8s
+[detector] NVDEC's colour conversion does not reproduce OpenCV's pixels for C:\Users\Andrew\Desktop\clean_version\optimization_test\phases\tests_AE\finetune\videos\grid_match16.mp4; the prepass decodes on the CPU
+[detector] GridTrackNet prepass: 916 source frames, 916 detections, 227 batched calls across 2 phase(s) in 3.9s (236.4 source fps, opencv decode)
+[detector] GridTrackNet prepass: the container reported 1217 frames, 916 decoded; the decoded count is used
+[baseline] grid_match16: 1217 frames in 4.7s
+[detector] GridTrackNet prepass: 794 source frames, 794 detections, 198 batched calls across 1 phase(s) in 0.9s (855.3 source fps, nvdec decode)
+[detector] GridTrackNet prepass: the container reported 795 frames, 794 decoded; the decoded count is used
+[baseline] grid_match22: 795 frames in 1.2s
+[detector] GridTrackNet prepass: 689 source frames, 689 detections, 171 batched calls across 2 phase(s) in 0.8s (845.9 source fps, nvdec decode)
+[baseline] video1: 689 frames in 1.1s
+[detector] GridTrackNet prepass: 802 source frames, 802 detections, 199 batched calls across 2 phase(s) in 0.8s (1008.6 source fps, nvdec decode)
+[baseline] video2: 802 frames in 1.2s
+[detector] GridTrackNet prepass: 867 source frames, 867 detections, 215 batched calls across 2 phase(s) in 1.0s (826.9 source fps, nvdec decode)
+[baseline] video3: 867 frames in 1.3s
+[detector] GridTrackNet prepass: 998 source frames, 998 detections, 248 batched calls across 2 phase(s) in 1.1s (882.6 source fps, nvdec decode)
+[baseline] video4: 998 frames in 1.4s
+[detector] GridTrackNet prepass: 357 source frames, 357 detections, 88 batched calls across 2 phase(s) in 0.5s (741.3 source fps, nvdec decode)
+[baseline] video5: 357 frames in 0.8s
+[detector] GridTrackNet prepass: 956 source frames, 956 detections, 237 batched calls across 2 phase(s) in 1.0s (947.7 source fps, nvdec decode)
+[baseline] video6: 956 frames in 1.3s
+[detector] GridTrackNet prepass: 773 source frames, 773 detections, 192 batched calls across 2 phase(s) in 0.8s (975.9 source fps, nvdec decode)
+[baseline] video7: 773 frames in 1.1s
+[detector] GridTrackNet prepass: 513 source frames, 513 detections, 128 batched calls across 1 phase(s) in 0.6s (874.8 source fps, nvdec decode)
+[baseline] video8: 513 frames in 0.9s
+[detector] GridTrackNet prepass: 627 source frames, 627 detections, 155 batched calls across 2 phase(s) in 0.7s (859.7 source fps, nvdec decode)
+[baseline] video9: 627 frames in 1.0s
+[detector] GridTrackNet prepass: 226 source frames, 226 detections, 56 batched calls across 1 phase(s) in 0.3s (747.6 source fps, nvdec decode)
+[detector] GridTrackNet prepass: the container reported 227 frames, 226 decoded; the decoded count is used
+[baseline] video10: 227 frames in 0.6s
+[detector] GridTrackNet prepass: 598 source frames, 598 detections, 149 batched calls across 1 phase(s) in 0.9s (642.8 source fps, nvdec decode)
+[baseline] video17: 598 frames in 1.2s
+[detector] GridTrackNet prepass: 485 source frames, 485 detections, 121 batched calls across 1 phase(s) in 0.7s (670.5 source fps, nvdec decode)
+[baseline] video18: 485 frames in 1.1s
+[detector] GridTrackNet prepass: 112 source frames, 112 detections, 27 batched calls across 1 phase(s) in 0.3s (438.0 source fps, nvdec decode)
+[baseline] video19: 112 frames in 0.6s
+[detector] GridTrackNet prepass: 102 source frames, 102 detections, 25 batched calls across 1 phase(s) in 0.3s (393.1 source fps, nvdec decode)
+[baseline] video20: 102 frames in 0.6s
+[detector] GridTrackNet prepass: 225 source frames, 225 detections, 56 batched calls across 1 phase(s) in 0.4s (546.0 source fps, nvdec decode)
+[baseline] video21: 225 frames in 0.7s
+[detector] GridTrackNet prepass: 233 source frames, 233 detections, 58 batched calls across 1 phase(s) in 0.3s (732.8 source fps, nvdec decode)
+[baseline] video22: 233 frames in 0.7s
+[detector] GridTrackNet prepass: 483 source frames, 483 detections, 120 batched calls across 1 phase(s) in 0.5s (958.2 source fps, nvdec decode)
+[baseline] video23: 483 frames in 0.8s
+[detector] GridTrackNet prepass: 128 source frames, 128 detections, 31 batched calls across 1 phase(s) in 0.3s (481.0 source fps, nvdec decode)
+[baseline] video43: 128 frames in 0.6s
+[detector] GridTrackNet prepass: 202 source frames, 202 detections, 50 batched calls across 1 phase(s) in 0.3s (784.7 source fps, nvdec decode)
+[baseline] video44: 202 frames in 0.5s
+[detector] GridTrackNet prepass: 47 source frames, 47 detections, 11 batched calls across 1 phase(s) in 0.1s (371.5 source fps, nvdec decode)
+[baseline] video45: 47 frames in 0.4s
+[detector] GridTrackNet prepass: 901 source frames, 901 detections, 225 batched calls across 1 phase(s) in 0.9s (1033.8 source fps, nvdec decode)
+[baseline] video46: 901 frames in 1.2s
+[11/01/2026-10:06:54] [TRT] [W] WARNING The logger passed into createInferRuntime differs from one already registered for an existing builder, runtime, or refitter. So the current new logger is ignored, and TensorRT will use the existing one which is returned by nvinfer1::getLogger() instead.
+[11/01/2026-10:06:54] [TRT] [I] Loaded engine size: 3 MiB
+[11/01/2026-10:06:54] [TRT] [I] [MemUsageChange] TensorRT-managed allocation in IExecutionContext creation: CPU +0, GPU +48, now: CPU 0, GPU 143 (MiB)
+[11/01/2026-10:06:54] [TRT] [W] WARNING The logger passed into createInferRuntime differs from one already registered for an existing builder, runtime, or refitter. So the current new logger is ignored, and TensorRT will use the existing one which is returned by nvinfer1::getLogger() instead.
+[11/01/2026-10:06:54] [TRT] [I] Loaded engine size: 0 MiB
+[11/01/2026-10:06:54] [TRT] [I] [MemUsageChange] TensorRT-managed allocation in IExecutionContext creation: CPU +0, GPU +40, now: CPU 0, GPU 184 (MiB)
+
+=== baseline: threshold sweep (all clips pooled) ===
+conf>=0.30     vis=8515 recall=0.965 wrong=0.006 miss=0.021 | invis=518 falseAlarm=0.195 (101/518: bridged=55 false=46) | med=0.8px p90=2.2px
+conf>=0.40     vis=8515 recall=0.952 wrong=0.005 miss=0.037 | invis=518 falseAlarm=0.106 (55/518: bridged=31 false=24) | med=0.7px p90=2.1px
+conf>=0.42     vis=8515 recall=0.948 wrong=0.005 miss=0.041 | invis=518 falseAlarm=0.083 (43/518: bridged=22 false=21) | med=0.7px p90=2.1px
+conf>=0.50     vis=8515 recall=0.930 wrong=0.004 miss=0.062 | invis=518 falseAlarm=0.052 (27/518: bridged=13 false=14) | med=0.7px p90=2.0px
+
+=== baseline: per clip at conf>=0.40 ===
+grid_match8    vis= 528 recall=0.936 wrong=0.009 miss=0.045 | invis= 22 falseAlarm=0.227 (5/22: bridged=5 false=0) | med=1.0px p90=3.3px
+grid_match16   vis= 442 recall=0.857 wrong=0.043 miss=0.100 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=2.0px
+grid_match22   vis= 622 recall=0.904 wrong=0.003 miss=0.055 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.5px
+video1         vis= 322 recall=0.975 wrong=0.000 miss=0.025 | invis= 23 falseAlarm=0.261 (6/23: bridged=6 false=0) | med=0.6px p90=1.6px
+video2         vis= 384 recall=0.984 wrong=0.000 miss=0.013 | invis= 17 falseAlarm=0.000 (0/17: bridged=0 false=0) | med=0.7px p90=1.8px
+video3         vis= 408 recall=0.931 wrong=0.002 miss=0.061 | invis= 26 falseAlarm=0.115 (3/26: bridged=2 false=1) | med=0.6px p90=1.6px
+video4         vis= 487 recall=0.994 wrong=0.004 miss=0.002 | invis= 12 falseAlarm=0.833 (10/12: bridged=0 false=10) | med=0.6px p90=1.3px
+video5         vis= 169 recall=0.941 wrong=0.000 miss=0.059 | invis= 10 falseAlarm=0.000 (0/10: bridged=0 false=0) | med=0.8px p90=1.9px
+video6         vis= 455 recall=0.976 wrong=0.000 miss=0.020 | invis= 23 falseAlarm=0.043 (1/23: bridged=1 false=0) | med=0.6px p90=1.4px
+video7         vis= 382 recall=0.963 wrong=0.003 miss=0.029 | invis=  5 falseAlarm=0.400 (2/5: bridged=0 false=2) | med=0.6px p90=1.4px
+video8         vis= 501 recall=0.970 wrong=0.002 miss=0.028 | invis= 12 falseAlarm=0.083 (1/12: bridged=1 false=0) | med=0.7px p90=1.4px
+video9         vis= 246 recall=0.919 wrong=0.037 miss=0.045 | invis= 68 falseAlarm=0.059 (4/68: bridged=2 false=2) | med=0.6px p90=1.5px
+video10        vis= 215 recall=0.963 wrong=0.000 miss=0.023 | invis= 11 falseAlarm=0.000 (0/11: bridged=0 false=0) | med=0.5px p90=1.6px
+video17        vis= 585 recall=0.979 wrong=0.000 miss=0.014 | invis= 13 falseAlarm=0.154 (2/13: bridged=1 false=1) | med=0.8px p90=2.0px
+video18        vis= 474 recall=0.958 wrong=0.002 miss=0.036 | invis= 11 falseAlarm=0.364 (4/11: bridged=2 false=2) | med=0.8px p90=1.7px
+video19        vis= 111 recall=1.000 wrong=0.000 miss=0.000 | invis=  1 falseAlarm=0.000 (0/1: bridged=0 false=0) | med=0.7px p90=2.1px
+video20        vis=  92 recall=0.880 wrong=0.000 miss=0.109 | invis= 10 falseAlarm=0.300 (3/10: bridged=3 false=0) | med=0.8px p90=1.9px
+video21        vis= 219 recall=0.991 wrong=0.000 miss=0.009 | invis=  6 falseAlarm=0.333 (2/6: bridged=1 false=1) | med=0.8px p90=1.7px
+video22        vis= 224 recall=0.960 wrong=0.000 miss=0.040 | invis=  9 falseAlarm=0.222 (2/9: bridged=2 false=0) | med=1.1px p90=2.0px
+video23        vis= 430 recall=0.979 wrong=0.000 miss=0.021 | invis= 53 falseAlarm=0.019 (1/53: bridged=0 false=1) | med=0.8px p90=1.9px
+video43        vis= 124 recall=0.871 wrong=0.000 miss=0.129 | invis=  4 falseAlarm=0.000 (0/4: bridged=0 false=0) | med=1.4px p90=4.7px
+video44        vis= 198 recall=0.960 wrong=0.000 miss=0.030 | invis=  4 falseAlarm=0.000 (0/4: bridged=0 false=0) | med=1.1px p90=3.1px
+video45        vis=  46 recall=0.978 wrong=0.000 miss=0.022 | invis=  1 falseAlarm=0.000 (0/1: bridged=0 false=0) | med=1.2px p90=2.5px
+video46        vis= 851 recall=0.957 wrong=0.001 miss=0.038 | invis= 50 falseAlarm=0.100 (5/50: bridged=5 false=0) | med=1.1px p90=3.4px
+macro          vis=8515 recall=0.951 wrong=0.004 miss=0.040 | invis=518 falseAlarm=0.157 (55/518: bridged=31 false=24) | med=0.8px p90=2.2px
+source=custom  vis=3569 recall=0.966 wrong=0.004 miss=0.028 | invis=207 falseAlarm=0.130 (27/207: bridged=12 false=15) | med=0.6px p90=1.5px
+source=grid    vis=1592 recall=0.901 wrong=0.016 miss=0.064 | invis=149 falseAlarm=0.060 (9/149: bridged=5 false=4) | med=0.9px p90=3.5px
+source=prof    vis=3354 recall=0.963 wrong=0.001 miss=0.033 | invis=162 falseAlarm=0.117 (19/162: bridged=14 false=5) | med=0.9px p90=2.4px
+baseline: mean offset on hits dx=+0.13px dy=-0.05px (n=8119)
+[detector] stream_s4 TensorRT FP16 encoder and decoder streaming, 4 a call, 192x108 grid (confidence=0.00, device=cuda:0, a unit every 1 frame(s))
+
+##### aligned3: ball_transition_align_px=3
+[detector] NVDEC's colour conversion does not reproduce OpenCV's pixels for C:\Users\Andrew\Desktop\clean_version\optimization_test\phases\tests_AE\finetune\videos\grid_match8.mp4; the prepass decodes on the CPU
+[detector] GridTrackNet prepass: 1103 source frames, 1103 detections, 274 batched calls across 2 phase(s) in 13.9s (79.3 source fps, opencv decode)
+[detector] GridTrackNet prepass: the container reported 1325 frames, 1103 decoded; the decoded count is used
+[aligned3] grid_match8: 1325 frames in 14.6s
+[detector] NVDEC's colour conversion does not reproduce OpenCV's pixels for C:\Users\Andrew\Desktop\clean_version\optimization_test\phases\tests_AE\finetune\videos\grid_match16.mp4; the prepass decodes on the CPU
+[detector] GridTrackNet prepass: 916 source frames, 916 detections, 227 batched calls across 2 phase(s) in 6.5s (140.8 source fps, opencv decode)
+[detector] GridTrackNet prepass: the container reported 1217 frames, 916 decoded; the decoded count is used
+[aligned3] grid_match16: 1217 frames in 7.3s
+[detector] GridTrackNet prepass: 794 source frames, 794 detections, 198 batched calls across 1 phase(s) in 3.8s (210.4 source fps, nvdec decode)
+[detector] GridTrackNet prepass: the container reported 795 frames, 794 decoded; the decoded count is used
+[aligned3] grid_match22: 795 frames in 4.0s
+[detector] GridTrackNet prepass: 689 source frames, 689 detections, 171 batched calls across 2 phase(s) in 3.6s (193.7 source fps, nvdec decode)
+[aligned3] video1: 689 frames in 3.8s
+[detector] GridTrackNet prepass: 802 source frames, 802 detections, 199 batched calls across 2 phase(s) in 5.5s (144.7 source fps, nvdec decode)
+[aligned3] video2: 802 frames in 5.8s
+[detector] GridTrackNet prepass: 867 source frames, 867 detections, 215 batched calls across 2 phase(s) in 4.1s (211.3 source fps, nvdec decode)
+[aligned3] video3: 867 frames in 4.3s
+[detector] GridTrackNet prepass: 998 source frames, 998 detections, 248 batched calls across 2 phase(s) in 4.8s (209.2 source fps, nvdec decode)
+[aligned3] video4: 998 frames in 5.0s
+[detector] GridTrackNet prepass: 357 source frames, 357 detections, 88 batched calls across 2 phase(s) in 1.4s (253.2 source fps, nvdec decode)
+[aligned3] video5: 357 frames in 1.6s
+[detector] GridTrackNet prepass: 956 source frames, 956 detections, 237 batched calls across 2 phase(s) in 4.2s (226.8 source fps, nvdec decode)
+[aligned3] video6: 956 frames in 4.4s
+[detector] GridTrackNet prepass: 773 source frames, 773 detections, 192 batched calls across 2 phase(s) in 3.3s (236.9 source fps, nvdec decode)
+[aligned3] video7: 773 frames in 3.5s
+[detector] GridTrackNet prepass: 513 source frames, 513 detections, 128 batched calls across 1 phase(s) in 2.2s (238.5 source fps, nvdec decode)
+[aligned3] video8: 513 frames in 2.4s
+[detector] GridTrackNet prepass: 627 source frames, 627 detections, 155 batched calls across 2 phase(s) in 3.0s (210.3 source fps, nvdec decode)
+[aligned3] video9: 627 frames in 3.2s
+[detector] GridTrackNet prepass: 226 source frames, 226 detections, 56 batched calls across 1 phase(s) in 0.9s (249.8 source fps, nvdec decode)
+[detector] GridTrackNet prepass: the container reported 227 frames, 226 decoded; the decoded count is used
+[aligned3] video10: 227 frames in 1.1s
+[detector] GridTrackNet prepass: 598 source frames, 598 detections, 149 batched calls across 1 phase(s) in 2.2s (268.3 source fps, nvdec decode)
+[aligned3] video17: 598 frames in 2.4s
+[detector] GridTrackNet prepass: 485 source frames, 485 detections, 121 batched calls across 1 phase(s) in 1.8s (264.3 source fps, nvdec decode)
+[aligned3] video18: 485 frames in 2.0s
+[detector] GridTrackNet prepass: 112 source frames, 112 detections, 27 batched calls across 1 phase(s) in 0.5s (229.7 source fps, nvdec decode)
+[aligned3] video19: 112 frames in 0.7s
+[detector] GridTrackNet prepass: 102 source frames, 102 detections, 25 batched calls across 1 phase(s) in 0.4s (240.1 source fps, nvdec decode)
+[aligned3] video20: 102 frames in 0.6s
+[detector] GridTrackNet prepass: 225 source frames, 225 detections, 56 batched calls across 1 phase(s) in 0.9s (260.4 source fps, nvdec decode)
+[aligned3] video21: 225 frames in 1.0s
+[detector] GridTrackNet prepass: 233 source frames, 233 detections, 58 batched calls across 1 phase(s) in 0.9s (254.6 source fps, nvdec decode)
+[aligned3] video22: 233 frames in 1.1s
+[detector] GridTrackNet prepass: 483 source frames, 483 detections, 120 batched calls across 1 phase(s) in 2.1s (229.1 source fps, nvdec decode)
+[aligned3] video23: 483 frames in 2.3s
+[detector] GridTrackNet prepass: 128 source frames, 128 detections, 31 batched calls across 1 phase(s) in 0.5s (248.6 source fps, nvdec decode)
+[aligned3] video43: 128 frames in 0.7s
+[detector] GridTrackNet prepass: 202 source frames, 202 detections, 50 batched calls across 1 phase(s) in 0.8s (245.1 source fps, nvdec decode)
+[aligned3] video44: 202 frames in 1.0s
+[detector] GridTrackNet prepass: 47 source frames, 47 detections, 11 batched calls across 1 phase(s) in 0.2s (223.5 source fps, nvdec decode)
+[aligned3] video45: 47 frames in 0.4s
+[detector] GridTrackNet prepass: 901 source frames, 901 detections, 225 batched calls across 1 phase(s) in 3.3s (269.1 source fps, nvdec decode)
+[aligned3] video46: 901 frames in 3.5s
+
+=== aligned3: threshold sweep (all clips pooled) ===
+conf>=0.30     vis=8515 recall=0.966 wrong=0.006 miss=0.020 | invis=518 falseAlarm=0.195 (101/518: bridged=55 false=46) | med=0.8px p90=2.2px
+conf>=0.40     vis=8515 recall=0.953 wrong=0.005 miss=0.035 | invis=518 falseAlarm=0.108 (56/518: bridged=32 false=24) | med=0.8px p90=2.1px
+conf>=0.42     vis=8515 recall=0.949 wrong=0.005 miss=0.040 | invis=518 falseAlarm=0.083 (43/518: bridged=22 false=21) | med=0.7px p90=2.1px
+conf>=0.50     vis=8515 recall=0.931 wrong=0.004 miss=0.061 | invis=518 falseAlarm=0.052 (27/518: bridged=13 false=14) | med=0.7px p90=2.0px
+
+=== aligned3: per clip at conf>=0.40 ===
+grid_match8    vis= 528 recall=0.953 wrong=0.009 miss=0.028 | invis= 22 falseAlarm=0.273 (6/22: bridged=6 false=0) | med=1.1px p90=3.6px
+grid_match16   vis= 442 recall=0.857 wrong=0.043 miss=0.100 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=2.0px
+grid_match22   vis= 622 recall=0.904 wrong=0.003 miss=0.055 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.5px
+video1         vis= 322 recall=0.975 wrong=0.000 miss=0.025 | invis= 23 falseAlarm=0.261 (6/23: bridged=6 false=0) | med=0.6px p90=1.6px
+video2         vis= 384 recall=0.984 wrong=0.000 miss=0.013 | invis= 17 falseAlarm=0.000 (0/17: bridged=0 false=0) | med=0.7px p90=1.8px
+video3         vis= 408 recall=0.931 wrong=0.002 miss=0.061 | invis= 26 falseAlarm=0.115 (3/26: bridged=2 false=1) | med=0.6px p90=1.6px
+video4         vis= 487 recall=0.994 wrong=0.004 miss=0.002 | invis= 12 falseAlarm=0.833 (10/12: bridged=0 false=10) | med=0.6px p90=1.3px
+video5         vis= 169 recall=0.941 wrong=0.000 miss=0.059 | invis= 10 falseAlarm=0.000 (0/10: bridged=0 false=0) | med=0.8px p90=1.9px
+video6         vis= 455 recall=0.976 wrong=0.000 miss=0.020 | invis= 23 falseAlarm=0.043 (1/23: bridged=1 false=0) | med=0.6px p90=1.4px
+video7         vis= 382 recall=0.963 wrong=0.003 miss=0.029 | invis=  5 falseAlarm=0.400 (2/5: bridged=0 false=2) | med=0.6px p90=1.4px
+video8         vis= 501 recall=0.970 wrong=0.002 miss=0.028 | invis= 12 falseAlarm=0.083 (1/12: bridged=1 false=0) | med=0.7px p90=1.4px
+video9         vis= 246 recall=0.919 wrong=0.037 miss=0.045 | invis= 68 falseAlarm=0.059 (4/68: bridged=2 false=2) | med=0.6px p90=1.5px
+video10        vis= 215 recall=0.963 wrong=0.000 miss=0.023 | invis= 11 falseAlarm=0.000 (0/11: bridged=0 false=0) | med=0.5px p90=1.6px
+video17        vis= 585 recall=0.979 wrong=0.000 miss=0.014 | invis= 13 falseAlarm=0.154 (2/13: bridged=1 false=1) | med=0.8px p90=2.0px
+video18        vis= 474 recall=0.958 wrong=0.002 miss=0.036 | invis= 11 falseAlarm=0.364 (4/11: bridged=2 false=2) | med=0.8px p90=1.7px
+video19        vis= 111 recall=1.000 wrong=0.000 miss=0.000 | invis=  1 falseAlarm=0.000 (0/1: bridged=0 false=0) | med=0.7px p90=2.1px
+video20        vis=  92 recall=0.880 wrong=0.000 miss=0.109 | invis= 10 falseAlarm=0.300 (3/10: bridged=3 false=0) | med=0.8px p90=1.9px
+video21        vis= 219 recall=0.991 wrong=0.000 miss=0.009 | invis=  6 falseAlarm=0.333 (2/6: bridged=1 false=1) | med=0.8px p90=1.7px
+video22        vis= 224 recall=0.960 wrong=0.000 miss=0.040 | invis=  9 falseAlarm=0.222 (2/9: bridged=2 false=0) | med=1.1px p90=2.0px
+video23        vis= 430 recall=0.979 wrong=0.000 miss=0.021 | invis= 53 falseAlarm=0.019 (1/53: bridged=0 false=1) | med=0.8px p90=1.9px
+video43        vis= 124 recall=0.871 wrong=0.000 miss=0.129 | invis=  4 falseAlarm=0.000 (0/4: bridged=0 false=0) | med=1.4px p90=4.7px
+video44        vis= 198 recall=0.960 wrong=0.000 miss=0.030 | invis=  4 falseAlarm=0.000 (0/4: bridged=0 false=0) | med=1.1px p90=3.1px
+video45        vis=  46 recall=0.978 wrong=0.000 miss=0.022 | invis=  1 falseAlarm=0.000 (0/1: bridged=0 false=0) | med=1.2px p90=2.5px
+video46        vis= 851 recall=0.957 wrong=0.001 miss=0.038 | invis= 50 falseAlarm=0.100 (5/50: bridged=5 false=0) | med=1.1px p90=3.4px
+macro          vis=8515 recall=0.952 wrong=0.004 miss=0.039 | invis=518 falseAlarm=0.159 (56/518: bridged=32 false=24) | med=0.8px p90=2.2px
+source=custom  vis=3569 recall=0.966 wrong=0.004 miss=0.028 | invis=207 falseAlarm=0.130 (27/207: bridged=12 false=15) | med=0.6px p90=1.5px
+source=grid    vis=1592 recall=0.907 wrong=0.016 miss=0.058 | invis=149 falseAlarm=0.067 (10/149: bridged=6 false=4) | med=0.9px p90=3.5px
+source=prof    vis=3354 recall=0.963 wrong=0.001 miss=0.033 | invis=162 falseAlarm=0.117 (19/162: bridged=14 false=5) | med=0.9px p90=2.4px
+aligned3: mean offset on hits dx=+0.13px dy=-0.05px (n=8128)
+
+=== baseline: per source and the grid clips ===
+custom@0.42    vis=3569 recall=0.963 wrong=0.004 miss=0.030 | invis=207 falseAlarm=0.106 (22/207: bridged=7 false=15) | med=0.6px p90=1.5px
+grid@0.42      vis=1592 recall=0.897 wrong=0.016 miss=0.070 | invis=149 falseAlarm=0.047 (7/149: bridged=3 false=4) | med=0.9px p90=3.5px
+prof@0.42      vis=3354 recall=0.957 wrong=0.001 miss=0.039 | invis=162 falseAlarm=0.086 (14/162: bridged=12 false=2) | med=0.9px p90=2.4px
+grid_match8@0.42 vis= 528 recall=0.930 wrong=0.009 miss=0.051 | invis= 22 falseAlarm=0.136 (3/22: bridged=3 false=0) | med=1.0px p90=3.3px
+grid_match16@0.42 vis= 442 recall=0.851 wrong=0.043 miss=0.106 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=1.8px
+grid_match22@0.42 vis= 622 recall=0.902 wrong=0.003 miss=0.059 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.3px
+ALL@0.42       vis=8515 recall=0.948 wrong=0.005 miss=0.041 | invis=518 falseAlarm=0.083 (43/518: bridged=22 false=21) | med=0.7px p90=2.1px
+custom@0.40    vis=3569 recall=0.966 wrong=0.004 miss=0.028 | invis=207 falseAlarm=0.130 (27/207: bridged=12 false=15) | med=0.6px p90=1.5px
+grid@0.40      vis=1592 recall=0.901 wrong=0.016 miss=0.064 | invis=149 falseAlarm=0.060 (9/149: bridged=5 false=4) | med=0.9px p90=3.5px
+prof@0.40      vis=3354 recall=0.963 wrong=0.001 miss=0.033 | invis=162 falseAlarm=0.117 (19/162: bridged=14 false=5) | med=0.9px p90=2.4px
+grid_match8@0.40 vis= 528 recall=0.936 wrong=0.009 miss=0.045 | invis= 22 falseAlarm=0.227 (5/22: bridged=5 false=0) | med=1.0px p90=3.3px
+grid_match16@0.40 vis= 442 recall=0.857 wrong=0.043 miss=0.100 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=2.0px
+grid_match22@0.40 vis= 622 recall=0.904 wrong=0.003 miss=0.055 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.5px
+ALL@0.40       vis=8515 recall=0.952 wrong=0.005 miss=0.037 | invis=518 falseAlarm=0.106 (55/518: bridged=31 false=24) | med=0.7px p90=2.1px
+
+=== aligned3: per source and the grid clips ===
+custom@0.42    vis=3569 recall=0.963 wrong=0.004 miss=0.030 | invis=207 falseAlarm=0.106 (22/207: bridged=7 false=15) | med=0.6px p90=1.5px
+grid@0.42      vis=1592 recall=0.903 wrong=0.016 miss=0.064 | invis=149 falseAlarm=0.047 (7/149: bridged=3 false=4) | med=0.9px p90=3.5px
+prof@0.42      vis=3354 recall=0.957 wrong=0.001 miss=0.039 | invis=162 falseAlarm=0.086 (14/162: bridged=12 false=2) | med=0.9px p90=2.4px
+grid_match8@0.42 vis= 528 recall=0.947 wrong=0.009 miss=0.034 | invis= 22 falseAlarm=0.136 (3/22: bridged=3 false=0) | med=1.1px p90=3.6px
+grid_match16@0.42 vis= 442 recall=0.851 wrong=0.043 miss=0.106 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=1.8px
+grid_match22@0.42 vis= 622 recall=0.902 wrong=0.003 miss=0.059 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.3px
+ALL@0.42       vis=8515 recall=0.949 wrong=0.005 miss=0.040 | invis=518 falseAlarm=0.083 (43/518: bridged=22 false=21) | med=0.7px p90=2.1px
+custom@0.40    vis=3569 recall=0.966 wrong=0.004 miss=0.028 | invis=207 falseAlarm=0.130 (27/207: bridged=12 false=15) | med=0.6px p90=1.5px
+grid@0.40      vis=1592 recall=0.907 wrong=0.016 miss=0.058 | invis=149 falseAlarm=0.067 (10/149: bridged=6 false=4) | med=0.9px p90=3.5px
+prof@0.40      vis=3354 recall=0.963 wrong=0.001 miss=0.033 | invis=162 falseAlarm=0.117 (19/162: bridged=14 false=5) | med=0.9px p90=2.4px
+grid_match8@0.40 vis= 528 recall=0.953 wrong=0.009 miss=0.028 | invis= 22 falseAlarm=0.273 (6/22: bridged=6 false=0) | med=1.1px p90=3.6px
+grid_match16@0.40 vis= 442 recall=0.857 wrong=0.043 miss=0.100 | invis= 16 falseAlarm=0.250 (4/16: bridged=0 false=4) | med=0.6px p90=2.0px
+grid_match22@0.40 vis= 622 recall=0.904 wrong=0.003 miss=0.055 | invis=111 falseAlarm=0.000 (0/111: bridged=0 false=0) | med=1.0px p90=4.5px
+ALL@0.40       vis=8515 recall=0.953 wrong=0.005 miss=0.035 | invis=518 falseAlarm=0.108 (56/518: bridged=32 false=24) | med=0.8px p90=2.1px
+
+paired at 0.42: aligned gained 9 hits, lost 0; labelled frames whose confidence moved: 119
+paired at 0.40: aligned gained 9 hits, lost 0; labelled frames whose confidence moved: 119
+
+CPU cost per transition: exhaustive integer search radius 3 at 768x432 (torch, 12 threads) 3.8 ms; OpenCV phaseCorrelate at 96x54 0.099 ms (plus the downscale)
+

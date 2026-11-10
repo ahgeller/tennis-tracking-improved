@@ -1,0 +1,25 @@
+
+=== baseline: per source and the grid clips ===
+grid@0.42      vis= 765 recall=0.973 wrong=0.000 miss=0.016 | invis= 12 falseAlarm=0.250 (3/12: bridged=3 false=0) | med=0.6px p90=1.8px
+grid_match85@0.42 vis= 473 recall=0.968 wrong=0.000 miss=0.023 | invis=  2 falseAlarm=0.500 (1/2: bridged=1 false=0) | med=0.6px p90=1.9px
+grid_match89@0.42 vis= 292 recall=0.979 wrong=0.000 miss=0.003 | invis= 10 falseAlarm=0.200 (2/10: bridged=2 false=0) | med=0.5px p90=1.5px
+ALL@0.42       vis= 765 recall=0.973 wrong=0.000 miss=0.016 | invis= 12 falseAlarm=0.250 (3/12: bridged=3 false=0) | med=0.6px p90=1.8px
+grid@0.40      vis= 765 recall=0.975 wrong=0.001 miss=0.012 | invis= 12 falseAlarm=0.417 (5/12: bridged=5 false=0) | med=0.6px p90=1.8px
+grid_match85@0.40 vis= 473 recall=0.973 wrong=0.002 miss=0.017 | invis=  2 falseAlarm=0.500 (1/2: bridged=1 false=0) | med=0.7px p90=2.0px
+grid_match89@0.40 vis= 292 recall=0.979 wrong=0.000 miss=0.003 | invis= 10 falseAlarm=0.400 (4/10: bridged=4 false=0) | med=0.5px p90=1.5px
+ALL@0.40       vis= 765 recall=0.975 wrong=0.001 miss=0.012 | invis= 12 falseAlarm=0.417 (5/12: bridged=5 false=0) | med=0.6px p90=1.8px
+
+=== aligned3: per source and the grid clips ===
+grid@0.42      vis= 765 recall=0.974 wrong=0.000 miss=0.014 | invis= 12 falseAlarm=0.250 (3/12: bridged=3 false=0) | med=0.6px p90=1.8px
+grid_match85@0.42 vis= 473 recall=0.970 wrong=0.000 miss=0.021 | invis=  2 falseAlarm=0.500 (1/2: bridged=1 false=0) | med=0.7px p90=1.9px
+grid_match89@0.42 vis= 292 recall=0.979 wrong=0.000 miss=0.003 | invis= 10 falseAlarm=0.200 (2/10: bridged=2 false=0) | med=0.5px p90=1.5px
+ALL@0.42       vis= 765 recall=0.974 wrong=0.000 miss=0.014 | invis= 12 falseAlarm=0.250 (3/12: bridged=3 false=0) | med=0.6px p90=1.8px
+grid@0.40      vis= 765 recall=0.974 wrong=0.000 miss=0.014 | invis= 12 falseAlarm=0.417 (5/12: bridged=5 false=0) | med=0.6px p90=1.8px
+grid_match85@0.40 vis= 473 recall=0.970 wrong=0.000 miss=0.021 | invis=  2 falseAlarm=0.500 (1/2: bridged=1 false=0) | med=0.7px p90=1.9px
+grid_match89@0.40 vis= 292 recall=0.979 wrong=0.000 miss=0.003 | invis= 10 falseAlarm=0.400 (4/10: bridged=4 false=0) | med=0.5px p90=1.5px
+ALL@0.40       vis= 765 recall=0.974 wrong=0.000 miss=0.014 | invis= 12 falseAlarm=0.417 (5/12: bridged=5 false=0) | med=0.6px p90=1.8px
+
+paired at 0.42: aligned gained 1 hits, lost 0; labelled frames whose confidence moved: 33
+paired at 0.40: aligned gained 1 hits, lost 2; labelled frames whose confidence moved: 33
+
+CPU cost per transition: exhaustive integer search radius 3 at 768x432 (torch, 12 threads) 3.4 ms; OpenCV phaseCorrelate at 96x54 0.081 ms (plus the downscale)

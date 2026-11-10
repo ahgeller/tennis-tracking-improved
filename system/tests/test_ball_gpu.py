@@ -180,3 +180,44 @@ def test_the_transition_ring_refuses_a_unit_whose_transition_was_overwritten():
         ring.decode([numbers[1:6]])
     with pytest.raises(ValueError, match="at least 4 slots"):
         TransitionRing(_identity_halves(2, []), slots=3, phases=1)
+
+
+def _moved(frame: torch.Tensor, dx: int, dy: int) -> torch.Tensor:
+    """`frame` (3, H, W) as the camera would see it after the picture moved by (dx, dy): the content
+    shifts, the uncovered strip is fresh noise."""
+    out = torch.rand_like(frame)
+    h, w = frame.shape[-2:]
+    out[:, max(0, dy):h + min(0, dy), max(0, dx):w + min(0, dx)] = frame[:, max(0, -dy):h + min(0, -dy), max(0, -dx):w + min(0, -dx)]
+    return out
+
+
+@pytest.mark.parametrize("dx, dy", [(0, 0), (2, -1), (-3, 3), (1, 0)])
+def test_a_pure_translation_leaves_no_difference_once_the_transition_is_aligned(dx, dy):
+    """A textured frame and the same picture moved by a few pixels: the estimate is the move, the
+    aligned previous frame equals the current one everywhere (the uncovered strip is filled from the
+    current frame), so streamnet.transition's two polarity fields are zero; a zero shift keeps the
+    previous frame as it is. Through the ring, the encoder receives the aligned pair."""
+    torch.manual_seed(0)
+    previous = torch.rand(3, 48, 64)
+    frame = _moved(previous, dx, dy)
+    assert ball_gpu.estimate_shift(frame, previous, radius=4) == (dx, dy)
+    aligned = ball_gpu.aligned_previous(frame, previous, (dx, dy))
+    assert torch.equal(aligned, frame) if (dx, dy) != (0, 0) else aligned is previous
+    assert float(torch.relu(frame - aligned).abs().max()) == 0.0 and float(torch.relu(aligned - frame).abs().max()) == 0.0
+    calls = []
+    ring = TransitionRing(_identity_halves(1, calls), slots=4, phases=1, align_radius=4)
+    ring.push(previous, 0)
+    ring.push(frame, 0)
+    frames, before = calls[0]
+    assert torch.equal(frames[0], frame) and torch.equal(before[0], frame if (dx, dy) != (0, 0) else previous)
+
+
+def test_an_unaligned_ring_and_a_zero_radius_pass_the_previous_frame_through():
+    torch.manual_seed(1)
+    previous, frame = torch.rand(3, 48, 64), torch.rand(3, 48, 64)
+    assert ball_gpu.estimate_shift(frame, previous, radius=0) == (0, 0)
+    calls = []
+    ring = TransitionRing(_identity_halves(1, calls), slots=4, phases=1)
+    ring.push(previous, 0)
+    ring.push(frame, 0)
+    assert torch.equal(calls[0][1][0], previous)
