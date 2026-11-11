@@ -63,3 +63,23 @@ def test_the_flag_is_recorded_and_refused_without_its_partners():
     assert training.main([*base, "--vis-only", "--from-scratch"]) == 1
     assert training.main([*base, "--vis-only", "--ema"]) == 1
     assert training.main([*base, "--vis-only", "--distill", "--teacher", "t.pt"]) == 1
+
+
+def test_the_notebook_has_a_vis_only_switch_inside_the_vis_head_branch_and_the_quickstart_a_row():
+    """VIS_ONLY sits beside the head's settings, passes --vis-only only with VIS_HEAD, refuses the
+    combinations the trainer refuses before the run starts, and the quickstart documents it."""
+    import ast
+    import json
+    from finetune.colab_zip import OPTIMIZATION_NOTEBOOK
+    cells = ["".join(c["source"]) for c in json.loads(OPTIMIZATION_NOTEBOOK.read_text(encoding="utf-8"))["cells"]
+             if c["cell_type"] == "code"]
+    settings = next(source for source in cells if source.startswith("#@title Training settings\n"))
+    ast.parse(settings)
+    assert "VIS_ONLY = False" in settings and "#@param" in settings.split("VIS_ONLY = False", 1)[1].split("\n", 1)[0]
+    branch = settings.split("if VIS_HEAD:", 1)[1].split("if TRAIN_DATA", 1)[0]
+    assert "'--vis-only'" in branch
+    for refused in ("MODE != 'finetune'", "DISTILL", "EMA"):
+        assert refused in branch.split("'--vis-only'", 1)[0]
+    assert "if VIS_ONLY and not VIS_HEAD" in settings
+    quickstart = (OPTIMIZATION_NOTEBOOK.parent / "COLAB_QUICKSTART.md").read_text(encoding="utf-8")
+    assert "`VIS_ONLY`" in quickstart and "--vis-only" in quickstart
