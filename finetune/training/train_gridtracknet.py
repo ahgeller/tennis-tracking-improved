@@ -695,7 +695,15 @@ def pick_winner(args: argparse.Namespace, clips: List[Clip], val_clips: List[str
         baseline = score_weights(args.weights, val_only, device)
         print(f"[eval] starting weights on {val_clips}: {baseline}")
         record["starting_weights"] = {"path": str(args.weights), "metrics": metrics_record(baseline)}
-        if not promotion_improves(trained, baseline):
+        if getattr(args, "vis_only", False):
+            # The detector is the start's to the bit, so the scores tie and the guard rail would hand back the start,
+            # which lacks the trained head: the winner is the head's latest epoch, with the detector check recorded.
+            winner = selection.best_path.with_name("last" + selection.best_path.suffix)
+            record["selected_by"] = "vis_only"
+            record["detector_unchanged"] = trained == baseline
+            print("[eval] --vis-only: the detector " + ("matches the starting weights" if trained == baseline
+                                                         else "does NOT match the starting weights") + f"; {winner.name} is the winner")
+        elif not promotion_improves(trained, baseline):
             winner, winner_stats = args.weights, baseline
     copy_atomic(winner, args.save)
     write_atomic(args.run_dir / "winner.json",

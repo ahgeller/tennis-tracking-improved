@@ -83,3 +83,30 @@ def test_the_notebook_has_a_vis_only_switch_inside_the_vis_head_branch_and_the_q
     assert "if VIS_ONLY and not VIS_HEAD" in settings
     quickstart = (OPTIMIZATION_NOTEBOOK.parent / "COLAB_QUICKSTART.md").read_text(encoding="utf-8")
     assert "`VIS_ONLY`" in quickstart and "--vis-only" in quickstart
+
+
+def test_a_vis_only_run_keeps_its_trained_head_as_the_winner_and_records_the_detector_check(tmp_path, capsys):
+    """The detector of a --vis-only run is the start's to the bit, so its held-out score ties the
+    start's and the fine-tune guard rail would hand back the start, which has no trained head. The
+    winner is the last epoch (the head's latest), and winner.json records whether the detector's
+    score equalled the start's."""
+    import json
+    from pathlib import Path
+    from unittest.mock import patch
+    run = tmp_path / "run"
+    run.mkdir()
+    for name in ("start.pt", "best.pt", "last.pt"):
+        (run / name).write_bytes(name.encode())
+    args = training.build_parser().parse_args(["--arch", "stream_s4", "--weights", str(run / "start.pt"), "--vis-head",
+                                               "--vis-only", "--run-dir", str(run), "--save", str(run / "winner.pt")])
+    same = training.metrics_of(0.93, 0.0, 0.04)
+    selection = training.Selection(run / "best.pt", 2, same, 1, 0.3)
+    clips = [("video10", Path("v10"), Path("c10"), "custom")]
+    with patch.object(training, "score_weights", return_value=same):
+        training.pick_winner(args, clips, ["video10"], selection, CPU)
+    winner = json.loads((run / "winner.json").read_text(encoding="utf-8"))
+    assert Path(winner["winner"]) == run / "last.pt" and winner["selected_by"] == "vis_only"
+    assert winner["detector_unchanged"] is True and (run / "winner.pt").read_bytes() == b"last.pt"
+    with patch.object(training, "score_weights", return_value=training.metrics_of(0.95, 0.0, 0.04)):
+        training.pick_winner(args, clips, ["video10"], selection, CPU)
+    assert json.loads((run / "winner.json").read_text(encoding="utf-8"))["detector_unchanged"] is False
