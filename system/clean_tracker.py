@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
-from tennis_tracker.ball_weights import KNOWN, UNKNOWN_CONF, operating_conf, unknown_weights_note
+from tennis_tracker.ball_weights import (KNOWN, UNKNOWN_CONF, operating_conf, operating_visibility_gate,
+                                         unknown_weights_note)
 from tennis_tracker.config import Config
 from tennis_tracker.paths import BOUNCE_MODEL, COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE, ROOT
 from tennis_tracker.live.fixed_lag import WHOLE_CLIP, parse_delay
@@ -43,6 +44,13 @@ def _parser() -> argparse.ArgumentParser:
                              + ", ".join(f"{known.conf:.2f} for {known.path.relative_to(ROOT).as_posix()}"
                                          for known in KNOWN)
                              + f", {UNKNOWN_CONF:.2f} for other weights)")
+    parser.add_argument("--visibility-gate", type=float, default=None,
+                        help="The probability below which the selector refuses to fill a gap on a frame the "
+                             "detector's visibility head calls empty; 0 turns it off (default: the one the weights "
+                             "were gated with: "
+                             + ", ".join(f"{known.visibility_gate:.2f} for {known.path.relative_to(ROOT).as_posix()}"
+                                         for known in KNOWN if known.visibility_gate)
+                             + ", off for other weights; weights without the head cannot run it)")
     parser.add_argument("--device", default="0")
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument("--court", action="store_true",
@@ -173,6 +181,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         player_model_path=str(PLAYER_ENGINE),
         court_model_path=str(COURT_ENGINE),
         conf=float(operating_conf(args.weights) if args.conf is None else args.conf),
+        ball_visibility_gate=float(operating_visibility_gate(args.weights) if args.visibility_gate is None
+                                   else args.visibility_gate),
         device=str(args.device),
         save_tracking_video=not (args.no_video or live),
         court_events=bool(args.court),

@@ -6,7 +6,8 @@ files here under these names (`tennis_tracker/paths.py` is where they are spelle
 
 | file | what it is | needed for |
 |---|---|---|
-| `candidates/stream_s4_fg1_e46.pt` | the default ball detector (a `stream_s4` record, run s4_fg1 epoch 46; run at 0.38) | every run, unless `--weights` names another |
+| `candidates/stream_s4_fg1_e46_peakhead.pt` | the default ball detector (a `stream_s4` record: run s4_fg1 epoch 46 with the peak visibility head of run s4_fg1_peak; run at 0.38 with the visibility gate at 0.40) | every run, unless `--weights` names another |
+| `candidates/stream_s4_fg1_e46.pt` | the same detector without the visibility head, the default from 2026-11-05 to 2026-11-10 (run at 0.38, no gate) | `--weights models/candidates/stream_s4_fg1_e46.pt` |
 | `candidates/stream_s4_e60.pt` | the previous default (a `stream_s4` record, epoch 60; run at 0.42) | `--weights models/candidates/stream_s4_e60.pt` |
 | `ball_detector.pt` | the heat-map ball detector (a `heatmap_s4` record; run at 0.40), the training workspace's model | `--weights models/ball_detector.pt` |
 | `player.engine` | TensorRT player detector | every run |

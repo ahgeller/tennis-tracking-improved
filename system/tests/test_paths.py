@@ -11,7 +11,8 @@ def test_assets_sit_under_the_repository_models_folder():
     for asset in (paths.HEATMAP_WEIGHTS, paths.PLAYER_ENGINE, paths.COURT_ENGINE, paths.BOUNCE_MODEL):
         assert asset.parent == paths.MODELS and asset.is_absolute()
     assert paths.STREAM_WEIGHTS.parent == paths.MODELS / "candidates" and paths.STREAM_WEIGHTS.is_absolute()
-    assert paths.BALL_WEIGHTS == paths.STREAM_WEIGHTS                   # the default ball detector
+    assert paths.STREAM_PEAK_WEIGHTS.parent == paths.MODELS / "candidates"
+    assert paths.BALL_WEIGHTS == paths.STREAM_PEAK_WEIGHTS              # the default ball detector
 
 
 def test_config_defaults_use_the_same_files():

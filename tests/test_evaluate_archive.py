@@ -99,7 +99,9 @@ def test_pipeline_mode_forwards_the_court_flag_the_weights_and_the_window_step_t
     assert other_weights[1]["model_path"] == tmp_path / "best.pt"
     assert with_court[1]["window_step"] is None and without[1]["window_step"] is None
     assert other_weights[1]["window_step"] == 5
-    assert gated[1]["visibility_gate"] == 0.3 and with_court[1]["visibility_gate"] == 0.0     # --visibility-gate, off without it
+    # --visibility-gate as given; without it the weights' own gate (0.40 for the default file, off for any other).
+    assert gated[1]["visibility_gate"] == 0.3 and with_court[1]["visibility_gate"] == 0.40
+    assert other_weights[1]["visibility_gate"] == 0.0
     assert "=== pipeline [gridtracknet] per clip ===" in capsys.readouterr().out
 
 

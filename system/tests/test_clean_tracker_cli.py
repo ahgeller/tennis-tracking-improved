@@ -9,7 +9,7 @@ import clean_tracker
 from clean_tracker import resolve_output_paths
 from tennis_tracker.ball_weights import HEATMAP_S4_WEIGHTS, STREAM_S4_E60_WEIGHTS, STREAM_S4_WEIGHTS, UNKNOWN_CONF
 from tennis_tracker.config import Config
-from tennis_tracker.paths import BALL_WEIGHTS, STREAM_WEIGHTS
+from tennis_tracker.paths import BALL_WEIGHTS, STREAM_PEAK_WEIGHTS, STREAM_WEIGHTS
 
 STREAM_CONF, HEATMAP_CONF = STREAM_S4_WEIGHTS.conf, HEATMAP_S4_WEIGHTS.conf
 
@@ -32,19 +32,27 @@ def test_cli_paths_reach_the_config_and_the_output_folder_is_made(tmp_path):
     assert status == 0                                             # no --annotations: nothing to validate
     assert cfg.input_video == str((tmp_path / "in.mp4").resolve())
     assert cfg.tracking_json == str((tmp_path / "t.json").resolve())
-    assert cfg.model_path.endswith("stream_s4_fg1_e46.pt")
+    assert cfg.model_path.endswith("stream_s4_fg1_e46_peakhead.pt")
     assert (tmp_path / "out").is_dir()
 
 
 def test_weights_default_to_stream_s4_and_another_path_reaches_the_config_as_given(tmp_path):
     """--weights feeds Config.model_path, whose record picks the detector: the default is the
-    stream_s4 file, and another path is passed through unchanged."""
-    assert BALL_WEIGHTS == STREAM_WEIGHTS
+    stream_s4 file with the visibility head, and another path is passed through unchanged. The
+    visibility gate follows the weights as the threshold does: the default file's own (0.40), off
+    for any other, and --visibility-gate overrides either."""
+    assert BALL_WEIGHTS == STREAM_PEAK_WEIGHTS
     assert clean_tracker._parser().get_default("weights") == str(BALL_WEIGHTS)
     _, cfg = _run_main(tmp_path, ["--weights", "runs/h1/best.pt", "--no-video"])
-    assert cfg.model_path == "runs/h1/best.pt"
+    assert cfg.model_path == "runs/h1/best.pt" and cfg.ball_visibility_gate == 0.0
     _, cfg = _run_main(tmp_path, ["--no-video"])
-    assert cfg.model_path == str(BALL_WEIGHTS)
+    assert cfg.model_path == str(BALL_WEIGHTS) and cfg.ball_visibility_gate == 0.40
+    _, cfg = _run_main(tmp_path, ["--no-video", "--visibility-gate", "0"])
+    assert cfg.ball_visibility_gate == 0.0
+    _, cfg = _run_main(tmp_path, ["--weights", str(STREAM_WEIGHTS), "--no-video"])
+    assert cfg.ball_visibility_gate == 0.0
+    _, cfg = _run_main(tmp_path, ["--weights", "runs/h1/peak.pt", "--visibility-gate", "0.3", "--no-video"])
+    assert cfg.ball_visibility_gate == 0.3
 
 
 @pytest.mark.parametrize("argv, conf", [

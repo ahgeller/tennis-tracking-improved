@@ -26,8 +26,9 @@ class Config:
     ball_class_name: Optional[str] = None
     # The default detector's gated threshold (ball_weights.py; a caller naming other weights passes theirs,
     # ball_weights.operating_conf). heatmap_s4 runs at 0.40 (0.50 until 2026-10-27: on mixed_v1 0.40 gave +92
-    # hits for +2 false alarms), stream_s4 at 0.38 (the s4_fg1 epoch-46 file; the epoch-60 file before it ran
-    # at 0.42: on mixed_v1 the new file at 0.38 keeps its 95 false alarms with recall 0.957 against 0.953).
+    # hits for +2 false alarms), stream_s4 at 0.38 (the s4_fg1 epoch-46 file, with or without the visibility
+    # head; the epoch-60 file before it ran at 0.42: on mixed_v1 the new file at 0.38 keeps its 95 false
+    # alarms with recall 0.957 against 0.953).
     conf: float = DEFAULT_CONF
     device: str = "auto"
     # Shift applied to GridTrackNet points, in px at 1080p (positive = down).
@@ -78,7 +79,9 @@ class Config:
     # frame (``visibility``). The streaming prepass computes the score from stream_s4 weights that
     # carry the head (``ball_detectors.require_visibility_head`` refuses any other); the unit prepass
     # that reads the head is on ``phase-vis-head2``, and ``replay_selector.py`` applies the gate to
-    # a recorded run's scores.
+    # a recorded run's scores. Like ``conf`` the gate belongs to the weights: 0 here, and a caller
+    # that names weights and no gate passes theirs (``ball_weights.operating_visibility_gate``, 0.40
+    # for the default file; ``clean_tracker.py``, ``headless`` and ``evaluate_archive.py`` do).
     ball_visibility_gate: float = 0.0
 
     # TensorRT
