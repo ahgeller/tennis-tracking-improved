@@ -337,7 +337,8 @@ def run_pipeline(models: List[str], clips: List[ClipPair], conf: Dict[str, Optio
                 from tennis_tracker.live.pipeline import run_live
                 config = headless_config(video_path, model_path=model_path, conf=threshold, device=device,
                                          tracking_json=json_path,
-                                         court_events=court_events, window_step=window_step)
+                                         court_events=court_events, window_step=window_step,
+                                         visibility_gate=visibility_gate)
                 result, _ = run_live(config, live)
                 payload = tracking_payload(result)
             else:

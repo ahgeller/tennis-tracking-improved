@@ -50,6 +50,7 @@ class Setting(NamedTuple):
     delay_s: Optional[float]     # None: the whole clip
     history_s: float
     every_s: float
+    visibility_gate: float = 0.0     # Config.ball_visibility_gate for the replay (the record must hold the scores)
 
     @property
     def label(self) -> str:
@@ -70,7 +71,8 @@ def replay_rows(evidence_path: Path, setting: Setting) -> Tuple[TrackingFrames, 
     """The tracking frames the fixed-lag selector commits over one recorded clip, its run count and
     the seconds the replay took."""
     recorded = load_evidence(evidence_path)
-    settings = LagSettings.at_fps(recorded.fps, setting.delay_s, setting.history_s, setting.every_s)
+    settings = LagSettings.at_fps(recorded.fps, setting.delay_s, setting.history_s, setting.every_s,
+                                  visibility_gate=setting.visibility_gate)
     started = time.perf_counter()
     selector = replay(recorded, settings)
     seconds = time.perf_counter() - started
@@ -119,6 +121,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--holdout", default="mixed_v1")
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--write-json", type=Path, help="Write each replay's tracking frames here")
+    parser.add_argument("--visibility-gate", type=float, default=0.0,
+                        help="Config.ball_visibility_gate for every replay (0 = off); the evidence must come from "
+                             "a run with the gate on, which records the scores")
     args = parser.parse_args(argv)
 
     manifest = read_manifest(args.archive / MANIFEST_NAME)
@@ -131,9 +136,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
         clips.append((found[0], video, labels_csv))
     # The whole clip is one run whatever the history and the cadence: once.
-    settings = [Setting(delay, history, every) for delay in args.delays if delay is not None
+    settings = [Setting(delay, history, every, args.visibility_gate) for delay in args.delays if delay is not None
                 for history in args.history for every in args.every]
-    settings += [Setting(None, args.history[0], args.every[0])]
+    settings += [Setting(None, args.history[0], args.every[0], args.visibility_gate)]
     jobs = [(evidence, video, labels_csv, setting) for setting in settings for evidence, video, labels_csv in clips]
     with ProcessPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         replays = list(pool.map(_job, jobs))

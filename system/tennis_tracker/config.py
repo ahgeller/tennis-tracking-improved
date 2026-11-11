@@ -75,8 +75,8 @@ class Config:
     # refuses an interpolated or motion fill on a frame whose visibility score (the stream_s4
     # visibility head's "a ball is visible here" probability, streamnet.StreamNet ``return_vis``) is
     # below the gate; a detection is never refused, and the tracking JSON records the score per
-    # frame (``visibility``). On this tree no prepass computes the score yet, so a run with the
-    # gate on is refused at start-up (``ball_detectors.refuse_visibility_gate``); the unit prepass
+    # frame (``visibility``). The streaming prepass computes the score from stream_s4 weights that
+    # carry the head (``ball_detectors.require_visibility_head`` refuses any other); the unit prepass
     # that reads the head is on ``phase-vis-head2``, and ``replay_selector.py`` applies the gate to
     # a recorded run's scores.
     ball_visibility_gate: float = 0.0

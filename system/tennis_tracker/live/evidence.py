@@ -81,7 +81,9 @@ def frame_evidence_of(evidence: _EvidenceLists, frame: int) -> FrameEvidence:
 class RecordedEvidence:
     """One live run's selector input, per source frame: the detections, the masks as pass 1 made
     them, the player boxes and court keypoints (``EMPTY_EVIDENCE`` for a dropped frame), and the
-    ghost log. ``source_index`` lists the source frames pass 1 saw; the others were dropped."""
+    ghost log. ``source_index`` lists the source frames pass 1 saw; the others were dropped.
+    ``visibility`` is the detector's visibility score per source frame when the run had the
+    visibility gate on (empty otherwise, and absent from a record made before it existed)."""
 
     fps: float
     width: int
@@ -93,10 +95,12 @@ class RecordedEvidence:
     court_keypoints: List[Optional[List[float]]] = field(default_factory=list)
     ghosts: List[GhostEntry] = field(default_factory=list)
     source_index: List[int] = field(default_factory=list)
+    visibility: List[Optional[float]] = field(default_factory=list)
 
-    def add(self, evidence: FrameEvidence) -> None:
+    def add(self, evidence: FrameEvidence, visibility: Optional[float] = None) -> None:
         """Record the next source frame's input as the selector was fed it."""
         detections, boost, raw, players, court = evidence
+        self.visibility.append(visibility)
         self.detections.append(detections)
         self.boost_masks.append(boost)
         self.raw_motions.append(raw)
@@ -133,9 +137,12 @@ class EvidenceFeed:
         self.keep = keep
         self._released = 0
 
-    def add(self, evidence: FrameEvidence, ghosts: Sequence[GhostEntry] = ()) -> List[int]:
-        """Frame ``len(detections)`` and the ghosts found as it was committed; the frames committed."""
+    def add(self, evidence: FrameEvidence, ghosts: Sequence[GhostEntry] = (),
+            visibility: Optional[float] = None) -> List[int]:
+        """Frame ``len(detections)``, the ghosts found as it was committed and the frame's
+        visibility score (None: it has none); the frames committed."""
         result = self.result
+        self.selector.visibility.append(visibility)
         detections, boost, raw, players, court = evidence
         result.boost_masks.append(boost)
         result.raw_motions.append(raw)
@@ -168,7 +175,9 @@ def replay(evidence: RecordedEvidence, settings: LagSettings) -> FixedLagSelecto
     by_commit: Dict[int, List[GhostEntry]] = {}
     for entry in evidence.ghosts:
         by_commit.setdefault(entry[0], []).append(entry)
+    scores: List[Optional[float]] = getattr(evidence, "visibility", None) or []
     for frame in range(len(evidence.detections)):
-        feed.add(frame_evidence_of(evidence, frame), by_commit.get(frame, ()))
+        feed.add(frame_evidence_of(evidence, frame), by_commit.get(frame, ()),
+                 scores[frame] if frame < len(scores) else None)
     feed.finish()
     return feed.selector

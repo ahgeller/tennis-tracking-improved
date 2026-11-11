@@ -64,7 +64,12 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   input with the same bytes; `tennis_tracker/cuda_kernels.py` compiles such kernels
   with the NVRTC PyTorch ships and caches the cubins; `video_decode.py` is NVDEC
   and OpenCV decoding with OpenCV's pixels); `ball_trt.py` builds and caches the ball model's TensorRT engine
-  (`Config.ball_prepass_runtime`), or a streaming network's encoder and decoder engines;
+  (`Config.ball_prepass_runtime`), or a streaming network's encoder and decoder engines
+  (with `Config.ball_visibility_gate` on, the decoder that also answers the stream_s4 visibility
+  head, an engine of its own; the prepass averages a frame's logits over its units in
+  `ball_gpu.LogitRing`, `visibility_scores` gives the probabilities, the prepass process sends
+  them beside its rows and the live tracker feeds them to the fixed-lag selector; weights without
+  the head are refused, `ball_detectors.require_visibility_head`);
   `ball_prepass_process.py` runs the prepass in a child process (`RemotePrepass`: started
   with the detector, so it builds its engines while the parent builds its own; told to exit by
   `finish_prepass` once pass 1 is done, waited for by `close`, which the pipeline calls whatever

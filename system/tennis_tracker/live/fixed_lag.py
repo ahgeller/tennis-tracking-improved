@@ -70,24 +70,30 @@ class Evidence(Protocol):
 class LagSettings:
     """How far behind the newest frame output is committed (``delay``, None for the whole clip), how
     many committed frames each run keeps as context (``history``) and how many frames wait for a
-    run (``every``), all in frames."""
+    run (``every``), all in frames. ``visibility_gate`` is ``Config.ball_visibility_gate`` for every
+    run (0: off), applied to the scores fed beside the frames (``FixedLagSelector.visibility``)."""
 
     delay: Optional[int]
     history: int
     every: int = 1
+    visibility_gate: float = 0.0
 
     def __post_init__(self) -> None:
         if self.delay is not None and self.delay < 0:
             raise ValueError(f"delay must be at least 0 frames, not {self.delay}")
         if self.history < 0 or self.every < 1:
             raise ValueError(f"history must be at least 0 and every at least 1, not {self.history} / {self.every}")
+        if not 0.0 <= self.visibility_gate < 1.0:
+            raise ValueError(f"visibility_gate is 0 (off) or a probability below 1, not {self.visibility_gate}")
 
     @classmethod
-    def at_fps(cls, fps: float, delay_s: Optional[float], history_s: float, every_s: float) -> "LagSettings":
+    def at_fps(cls, fps: float, delay_s: Optional[float], history_s: float, every_s: float,
+               visibility_gate: float = 0.0) -> "LagSettings":
         """The settings for a clip at `fps` from seconds; ``every`` is at least one frame."""
         frames = float(fps)
         delay = None if delay_s is None else int(round(delay_s * frames))
-        return cls(delay=delay, history=int(round(history_s * frames)), every=max(1, int(round(every_s * frames))))
+        return cls(delay=delay, history=int(round(history_s * frames)), every=max(1, int(round(every_s * frames))),
+                   visibility_gate=float(visibility_gate))
 
 
 class TrackIds:
@@ -126,7 +132,9 @@ class FixedLagSelector:
     called whenever `evidence` has grown and returns the frames it committed; ``finish``, after the
     last frame, commits the rest. ``committed[i]`` is frame ``i``'s final row (None: no ball).
     ``before_run(start, end)`` is called as each run is cut, with the window it reads (the live
-    pipeline clears the ghost ROIs pass 1 found since in it)."""
+    pipeline clears the ghost ROIs pass 1 found since in it). ``visibility`` is the detector's
+    visibility score per frame, appended by the feeder before the frame's detections when the gate
+    is on (a frame without an entry, or with None, is never refused)."""
 
     def __init__(self, evidence: Evidence, fps: float, width: int, height: int, settings: LagSettings,
                  before_run: Optional[Callable[[int, int], None]] = None) -> None:
@@ -135,6 +143,7 @@ class FixedLagSelector:
         self.fps, self.width, self.height = float(fps), int(width), int(height)
         self.settings = settings
         self.committed: List[Optional[FrameResult]] = []
+        self.visibility: List[Optional[float]] = []
         self.planned = 0                # frames below this belong to a run already made
         self.runs = 0
         self.ids = TrackIds()
@@ -176,12 +185,14 @@ class FixedLagSelector:
         if self.before_run is not None:
             self.before_run(start, end)
         ev, window = self.evidence, slice(start, end)
+        gate = self.settings.visibility_gate
         rows, _, tracks = select_ball_in_play(
             ev.detections[window], self.fps, self.width, self.height,
             court_polygon=self._court_polygon(start, end), boost_masks=ev.boost_masks[window],
             raw_motions=ev.raw_motions[window],
             player_boxes_by_frame=ev.player_boxes[window],     # type: ignore[arg-type]  # read as a Mapping
-            court_keypoints_by_frame=ev.court_keypoints[window])
+            court_keypoints_by_frame=ev.court_keypoints[window],
+            visibility=self.visibility[window] if gate else None, visibility_gate=gate)
         self.planned = commit_end
         self.runs += 1
         shifted = {track.track_id: _shifted(track, start) for track in tracks}

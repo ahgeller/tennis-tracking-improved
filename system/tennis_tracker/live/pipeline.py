@@ -295,6 +295,8 @@ class _LiveRun:
             self.feed = EvidenceFeed(video.fps, video.width, video.height, settings, keep=False)
         self.committed: List[Optional[FrameResult]] = []
         self.arrivals: List[Optional[float]] = []      # per source frame fed; None: dropped
+        # With the visibility gate on, the detector's score per source frame fed (None: dropped, or none).
+        self.visibility: Optional[List[Optional[float]]] = [] if settings.visibility_gate else None
         self.tracks: Dict[int, Any] = {}
         self.next_report = 0.0
         self._lock = threading.Lock()
@@ -318,28 +320,33 @@ class _LiveRun:
         while self.fed < source:
             self._feed(EMPTY_EVIDENCE, [], None)
         entries: List[GhostEntry] = [(source, pump.source_index[ghost_frame], box) for ghost_frame, box in ghosts]
-        self._feed(frame_evidence_of(result, frame), entries, pump.arrivals[frame])
+        # The frame's detections are final (pass 1 read them), so its visibility score is too.
+        scores = pump.detector.visibility_rows(frame, frame + 1) if self.visibility is not None else None
+        self._feed(frame_evidence_of(result, frame), entries, pump.arrivals[frame], scores[0] if scores else None)
         # Pass 1 never reads a committed frame's masks again (only how many there are), and the
         # selector and the record hold their own references: a long stream keeps none of them here.
         result.boost_masks[frame] = None
         result.raw_motions[frame] = None
         self._report(time.perf_counter())
 
-    def _feed(self, evidence: FrameEvidence, ghosts: List[GhostEntry], arrival: Optional[float]) -> None:
+    def _feed(self, evidence: FrameEvidence, ghosts: List[GhostEntry], arrival: Optional[float],
+              visibility: Optional[float] = None) -> None:
         source = self.fed
         self.arrivals.append(arrival)
+        if self.visibility is not None:
+            self.visibility.append(visibility)
         if self.recorded is not None:
-            self.recorded.add(evidence)
+            self.recorded.add(evidence, visibility)
             self.recorded.ghosts.extend(ghosts)
             if arrival is not None:
                 self.recorded.source_index.append(source)
         if self.process is not None:
-            self.process.add(evidence, ghosts)
+            self.process.add(evidence, ghosts, visibility)
             return
         assert self.feed is not None
         t0 = time.perf_counter()
         runs = self.feed.selector.runs
-        done = self.feed.add(evidence, ghosts)
+        done = self.feed.add(evidence, ghosts, visibility)
         if self.feed.selector.runs != runs:
             self.stats.run_seconds.append(time.perf_counter() - t0)
         if done:
@@ -474,7 +481,8 @@ def run_live(cfg: Config, options: LiveOptions = LiveOptions(),
     assert isinstance(detector, GridTrackNetBallDetector)
     stride = detector.source_stride_for(video.fps)        # the prepass's phases: a drop takes one of each
     queue = make_queue(options.pacing, options.drop, max(stride, int(round(options.max_backlog_s * video.fps))), stride)
-    settings = LagSettings.at_fps(video.fps, options.delay_s, options.history_s, options.every_s)
+    settings = LagSettings.at_fps(video.fps, options.delay_s, options.history_s, options.every_s,
+                                  visibility_gate=cfg.ball_visibility_gate)
     stats = LiveStats(fps=video.fps, delay_frames=settings.delay, every_frames=settings.every,
                       history_frames=settings.history)
     pump = _Pump(queue, detector, video.fps, video.width, video.height, region_for)
@@ -549,7 +557,8 @@ def _finish(ctx: RunContext, pass1: Pass1Result, run: _LiveRun, source_index: Li
     for track in tracks:
         track.in_timeline = True
     by_source = Pass1Result(player_boxes=player_boxes, court_keypoints=court_keypoints)
-    selection = Selection(run.committed, None, tracks, None, None if last_court is None else list(last_court), {})
+    selection = Selection(run.committed, None, tracks, None, None if last_court is None else list(last_court), {},
+                          run.visibility)
     events = compute_court_events(ctx, by_source, selection)
     outputs = {"tracking_json": Path(cfg.tracking_json)} if cfg.tracking_json else {}
     result = assemble_result(ctx, by_source, selection, events, total, 0, outputs)

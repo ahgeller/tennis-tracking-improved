@@ -177,3 +177,66 @@ def test_a_replay_commits_what_the_live_feed_committed():
     replayed = replay(recorded, settings)
     assert all(_same(a, b) for a, b in zip(replayed.committed, selector.committed))
     assert replayed.runs == selector.runs
+
+
+def _gapped_rally():
+    """``_rally`` with frames 20 and 21 undetected (the selector fills them) and scores that call
+    frame 20 empty."""
+    detections, masks = _rally()
+    detections = detections[:20] + [[], []] + detections[22:]
+    scores = [0.9] * len(detections)
+    scores[20] = 0.05
+    return detections, masks, scores
+
+
+@pytest.mark.parametrize("delay", [None, 12])
+def test_the_visibility_gate_refuses_a_live_fill_as_it_refuses_an_offline_one(delay):
+    """The gate in ``LagSettings`` with the scores fed beside the frames: over the whole clip the
+    committed rows are the offline selector's with the same scores, and on a fixed lag the fill on
+    the frame the head calls empty is refused while its neighbour's is kept. Off, or without
+    scores, nothing is refused."""
+    detections, masks, scores = _gapped_rally()
+
+    def run(gate, fed):
+        evidence = _evidence(detections, masks)
+        selector = FixedLagSelector(evidence, FPS, WIDTH, HEIGHT,
+                                    LagSettings(delay=delay, history=30, every=3, visibility_gate=gate))
+        for frame, row in enumerate(detections):
+            if fed:
+                selector.visibility.append(scores[frame])
+            evidence.detections.append(row)
+            selector.advance()
+        selector.finish()
+        return selector.committed
+
+    plain = run(0.0, fed=True)
+    assert plain[20] is not None and plain[21] is not None and plain[20].source != "det"
+    gated = run(0.3, fed=True)
+    assert gated[20] is None and gated[21] is not None
+    assert all(_same(a, b) for a, b in zip(run(0.3, fed=False), plain))        # no scores: nothing to refuse
+    if delay is None:
+        offline, _, _ = select_ball_in_play(detections, FPS, WIDTH, HEIGHT, boost_masks=masks, raw_motions=masks,
+                                            player_boxes_by_frame=[{} for _ in detections],
+                                            court_keypoints_by_frame=[None for _ in detections],
+                                            visibility=scores, visibility_gate=0.3)
+        assert all(_same(a, b) for a, b in zip(gated, offline))
+    with pytest.raises(ValueError, match="visibility_gate"):
+        LagSettings(delay=3, history=30, visibility_gate=1.0)
+    assert LagSettings.at_fps(30.0, 0.5, 2.0, 0.1, visibility_gate=0.4).visibility_gate == 0.4
+
+
+def test_a_replay_applies_the_gate_to_the_scores_the_record_holds():
+    """A record made with the gate on holds each frame's score, so a replay refuses what the run
+    refused; a record without scores (one made before they existed has no such attribute) replays
+    with nothing refused."""
+    detections, masks, scores = _gapped_rally()
+    settings = LagSettings(delay=12, history=30, every=3, visibility_gate=0.3)
+    recorded = RecordedEvidence(FPS, WIDTH, HEIGHT)
+    for frame, row in enumerate(detections):
+        recorded.add((row, masks[frame], masks[frame], {}, None), scores[frame])
+    assert recorded.visibility == scores
+    gated = replay(recorded, settings).committed
+    assert gated[20] is None and gated[21] is not None
+    del recorded.visibility                              # as unpickled from a record of the older shape
+    old = replay(recorded, settings).committed
+    assert old[20] is not None and old[21] is not None

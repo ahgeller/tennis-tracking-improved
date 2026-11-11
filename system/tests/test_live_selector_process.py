@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tennis_tracker.live.evidence import RecordedEvidence, frame_evidence_of, replay
+from tennis_tracker.live.evidence import EvidenceFeed, RecordedEvidence, frame_evidence_of, replay
 from tennis_tracker.live.fixed_lag import LagSettings
 from tennis_tracker.live.selector_process import run_in_process
 from tests._helpers import RALLY_FPS as FPS, RALLY_HEIGHT as HEIGHT, RALLY_WIDTH as WIDTH, rally as _rally
@@ -72,3 +72,23 @@ def test_a_tracker_whose_selector_process_died_still_exits(tmp_path):
     done = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     assert "reported: the live selector process exited with code" in done.stdout
+
+
+def test_the_selector_process_applies_the_visibility_gate_to_the_scores_sent_with_the_frames(quiet_spawn):
+    """Each frame's visibility score crosses to the child with it, and the child's gate (from the
+    settings) refuses the fill on the frame the head calls empty, as the selector in line does."""
+    detections, masks = _rally()
+    detections = detections[:20] + [[], []] + detections[22:]
+    scores = [0.9] * len(detections)
+    scores[20] = 0.05
+    settings = LagSettings(delay=12, history=30, every=3, visibility_gate=0.3)
+    frames = [((row, masks[index], masks[index], {}, None), (), scores[index]) for index, row in enumerate(detections)]
+    feed = EvidenceFeed(FPS, WIDTH, HEIGHT, settings)
+    for frame in frames:
+        feed.add(*frame)
+    feed.finish()
+    rows, output = run_in_process(frames, FPS, WIDTH, HEIGHT, settings)
+    assert rows[20] is None and rows[21] is not None
+    inline = [None if row is None else dataclasses.astuple(row) for row in feed.selector.committed]
+    assert [None if row is None else dataclasses.astuple(row) for row in rows] == inline
+    assert output.runs == feed.selector.runs

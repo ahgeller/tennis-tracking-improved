@@ -85,9 +85,11 @@ class StopRequest:
 @dataclass(frozen=True)
 class PrepassRows:
     """A newly final run of frames, ``start`` onwards: each frame's detections, as the prepass
-    caches them. A per-frame field the parent should see goes here beside ``rows``."""
+    caches them. A per-frame field the parent should see goes here beside ``rows``:
+    ``visibility`` is the frames' visibility scores (``Config.ball_visibility_gate`` on), else None."""
     start: int
     rows: Rows
+    visibility: Optional[List[Optional[float]]] = None
 
 
 @dataclass(frozen=True)
@@ -331,7 +333,7 @@ def _answer(connection: Any) -> None:
         nonlocal sent
         rows = (detector.precomputed or [])[sent:upto]
         if rows:
-            connection.send(PrepassRows(sent, rows))
+            connection.send(PrepassRows(sent, rows, detector.visibility_rows(sent, sent + len(rows))))
             sent += len(rows)
 
     if detector is not None:

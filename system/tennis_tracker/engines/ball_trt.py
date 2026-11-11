@@ -20,6 +20,11 @@ cached the same way with the half's name and ``HALVES_RECIPE`` in the key and th
 file name. The prepass exports them from the deployed network (``ball_models.load_deployed``: the
 RepVGG branches folded, which TensorRT cannot do itself), and ``open_stream_engines`` runs them on
 one stream at the addresses the prepass's ``ball_gpu.TransitionRing`` hands them.
+
+With `visibility` (``Config.ball_visibility_gate`` on) the decoder is the one that also answers the
+stream_s4 visibility head (``streamnet.StreamDecoder`` with ``visibility``): a second output,
+``VISIBILITY_OUTPUT_NAME``, in an engine of its own (``DECODER_VIS`` in its key and file name), so
+a run with the gate off keeps the engine it always had. The encoder is the same engine either way.
 """
 from __future__ import annotations
 
@@ -43,7 +48,9 @@ ENGINE_RECIPE = 1
 HALVES_RECIPE = 2
 INPUT_NAME = "frames"
 OUTPUT_NAME = "grids"
+VISIBILITY_OUTPUT_NAME = "visibility"               # the head's logits, (batch, FRAMES_PER_UNIT), when exported
 ENCODER, DECODER = "encoder", "decoder"             # the halves of a streaming network
+DECODER_VIS = "decoder-vis"                         # the decoder with the visibility head: its key and file name
 ENCODER_INPUTS = ("frame", "previous")
 FEATURE_NAMES = ("quarter", "eighth", "bottom")     # the encoder's outputs, the decoder's inputs
 _ONNX_OPSET = 17
@@ -108,15 +115,17 @@ def export_halves(encoder: Any, decoder: Any, batch: int, device: torch.device) 
     """A streaming network's halves (FP16 eval modules on `device`, ``streaming_halves``) as ONNX
     bytes by ``ENCODER`` / ``DECODER``, each at a static batch of `batch`: the encoder on
     ``(batch, 3, HEIGHT, WIDTH)`` frame pairs, the decoder on the features of `batch` units, each
-    unit's ``PAIRS_PER_UNIT`` transitions concatenated per stride."""
+    unit's ``PAIRS_PER_UNIT`` transitions concatenated per stride. A decoder with ``visibility``
+    (``streamnet.StreamDecoder``) is exported with its second output, ``VISIBILITY_OUTPUT_NAME``."""
     frame = torch.zeros((batch, 3, HEIGHT, WIDTH), dtype=torch.float16, device=device)
     with torch.no_grad():
         levels = encoder(frame, frame)
     pairs = int(encoder.model.PAIRS_PER_UNIT)
     features = tuple(torch.zeros((batch, pairs * level.shape[1], *level.shape[2:]), dtype=level.dtype, device=device)
                      for level in levels)
+    outputs = [OUTPUT_NAME, VISIBILITY_OUTPUT_NAME] if getattr(decoder, "visibility", False) else [OUTPUT_NAME]
     return {ENCODER: _onnx_bytes(encoder, (frame, frame), ENCODER_INPUTS, FEATURE_NAMES),
-            DECODER: _onnx_bytes(decoder, features, FEATURE_NAMES, [OUTPUT_NAME])}
+            DECODER: _onnx_bytes(decoder, features, FEATURE_NAMES, outputs)}
 
 
 def build_serialized_engine(onnx_bytes: bytes) -> bytes:
@@ -157,10 +166,12 @@ def ensure_ball_engine(weights: Path, model: Any, batch: int, cache_dir: Path, d
 
 
 def ensure_stream_engines(weights: Path, arch: str, encoder: Any, decoder: Any, batch: int, cache_dir: Path,
-                          device: torch.device) -> Dict[str, Path]:
+                          device: torch.device, visibility: bool = False) -> Dict[str, Path]:
     """The cached ``ENCODER`` and ``DECODER`` engines of the streaming network `weights` holds (its
     deployed halves `encoder` and `decoder`) at `batch` a call, by half, each built and written first
-    when the cache has none for its key; one export serves both."""
+    when the cache has none for its key; one export serves both. With `visibility`, `decoder` is the
+    one that answers the visibility head too, cached under ``DECODER_VIS`` (still returned under
+    ``DECODER``)."""
     exported: Dict[str, bytes] = {}
 
     def export(part: str) -> bytes:
@@ -170,8 +181,9 @@ def ensure_stream_engines(weights: Path, arch: str, encoder: Any, decoder: Any, 
 
     paths = {}
     for part in (ENCODER, DECODER):
-        paths[part] = _ensure_engine(engine_path(weights, arch, batch, cache_dir, device, part),
-                                     f"{Path(weights).name} ({arch} {part}, {batch} a call)",
+        named = DECODER_VIS if visibility and part == DECODER else part
+        paths[part] = _ensure_engine(engine_path(weights, arch, batch, cache_dir, device, named),
+                                     f"{Path(weights).name} ({arch} {named}, {batch} a call)",
                                      lambda part=part: export(part))      # type: ignore[misc]
     return paths
 
@@ -230,14 +242,19 @@ class _EngineRun:
         return self.outputs
 
 
-def open_stream_engines(paths: Dict[str, Path], device: torch.device) -> StreamHalves:
+def open_stream_engines(paths: Dict[str, Path], device: torch.device, visibility: bool = False) -> StreamHalves:
     """The ``ENCODER`` and ``DECODER`` engines at `paths` (``ensure_stream_engines``) as the
     prepass's ``StreamHalves``, both on one new stream (the prepass works on it), at the batch their
-    inputs were built for; halves of two batches are a RuntimeError."""
+    inputs were built for; halves of two batches are a RuntimeError. With `visibility` the decoder
+    engine is the two-output one and the halves answer ``(grids, visibility logits)``."""
     stream = torch.cuda.Stream(device=device)
     encoder = _EngineRun(paths[ENCODER], ENCODER_INPUTS, FEATURE_NAMES, device, stream)
-    decoder = _EngineRun(paths[DECODER], FEATURE_NAMES, (OUTPUT_NAME,), device, stream)
+    outputs = (OUTPUT_NAME, VISIBILITY_OUTPUT_NAME) if visibility else (OUTPUT_NAME,)
+    decoder = _EngineRun(paths[DECODER], FEATURE_NAMES, outputs, device, stream)
     if encoder.batch != decoder.batch:
         raise RuntimeError(f"the encoder engine takes {encoder.batch} transitions a call, the decoder {decoder.batch} units")
+    if visibility:
+        return StreamHalves(encode=encoder, decode=lambda *features: tuple(decoder(*features)), batch=encoder.batch,
+                            stream=stream, visibility=True)
     return StreamHalves(encode=encoder, decode=lambda *features: decoder(*features)[0], batch=encoder.batch,
                         stream=stream)

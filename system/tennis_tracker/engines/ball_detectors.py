@@ -26,14 +26,16 @@ import torch
 from ball_in_play_selector import RawDetection
 
 from ..config import AUTO, FOREGROUND, PREPASS_MODES, PROCESS, Config, PrepassMode
-from .ball_gpu import (HeatRing, ModelResize, Nv12ModelResize, Readback, StreamHalves, TransitionRing, grid_peaks,
+from .ball_gpu import (HeatRing, LogitRing, ModelResize, Nv12ModelResize, Readback, StreamHalves, TransitionRing, grid_peaks,
                       load_nv12_kernel, peak_points, transition_slots)
 from .ball_prepass_process import PrepassRows, RemotePrepass
 from .engine_boxes import OutputMode, decode_engine_boxes, engine_output_mode
 from .engine_session import TensorRTRuntimeSession
 from .. import video_decode
 from ..cuda_kernels import Kernel
+from .. import streamnet
 from ..ball_models import arch_of, load_ball_model, load_deployed, model_class
+from ..heatmapnet import read_record
 from ..frame_rate import require_phase_stride
 from ..gridtracknet import FRAMES_PER_UNIT, HEIGHT, WIDTH, GridPoint
 
@@ -187,19 +189,42 @@ class BallDetectorBackend:
         return None
 
 
-def refuse_visibility_gate(cfg: Config) -> None:
-    """The visibility gate needs the stream_s4 visibility head's score per frame, and no prepass
-    on this tree computes it yet (the streaming prepass decodes from cached transitions through
-    engines exported without the head; the unit prepass that reads it is on ``phase-vis-head2``).
-    A run asking for the gate is refused at start-up rather than run with it silently off; the
-    selector's side of the gate is here, and ``replay_selector.py`` applies it to a recorded run's
-    scores."""
+def visibility_gate(cfg: Config) -> float:
+    """``Config.ball_visibility_gate`` checked: 0 (off) or a probability in (0, 1); anything else
+    is a ValueError."""
     gate = float(cfg.ball_visibility_gate)
     if not 0.0 <= gate < 1.0:
         raise ValueError(f"ball_visibility_gate is 0 (off) or a probability below 1, not {gate}")
+    return gate
+
+
+def refuse_visibility_gate(cfg: Config) -> None:
+    """For a backend that computes no visibility score (the single-frame TensorRT ball engine): a
+    run asking for the gate is refused at start-up rather than run with it silently off. The
+    five-frame streaming prepass over stream_s4 weights with the visibility head is the one that
+    answers it (``GridTrackNetBallDetector``)."""
+    gate = visibility_gate(cfg)
     if gate:
-        raise ValueError(f"ball_visibility_gate={gate}: no prepass on this tree reads the stream_s4 visibility head "
-                         "(run the gate on phase-vis-head2, or replay a recorded run with replay_selector.py)")
+        raise ValueError(f"ball_visibility_gate={gate} needs the five-frame stream_s4 prepass with its visibility "
+                         "head; this ball backend computes no visibility score")
+
+
+def require_visibility_head(cfg: Config, weights: Path) -> None:
+    """With the visibility gate on, `weights` must be a streaming network's record carrying the
+    visibility head, run by the streaming prepass; a ValueError says which of those is missing.
+    Checked from the record, so the parent of a prepass process refuses at start-up too."""
+    gate = visibility_gate(cfg)
+    if not gate:
+        return
+    arch = arch_of(weights)
+    streams = callable(getattr(model_class(arch), "streaming_halves", None))
+    if not streams or not cfg.ball_prepass_streaming:
+        raise ValueError(f"ball_visibility_gate={gate} needs the streaming prepass of a stream_s4 network "
+                         f"(ball_prepass_streaming on); {Path(weights).name} is {arch}"
+                         + ("" if cfg.ball_prepass_streaming else " and ball_prepass_streaming is off"))
+    if not streamnet.has_vis_head(read_record(Path(weights), arch)["state_dict"]):
+        raise ValueError(f"ball_visibility_gate={gate} needs weights with the stream_s4 visibility head; "
+                         f"{Path(weights).name} has none")
 
 
 @dataclass
@@ -221,6 +246,8 @@ class _Flush:
     frames: Sequence[int] = ()
     units: Sequence[Sequence[int]] = ()
     points: Optional[List[GridPoint]] = None      # decoded on the host already (``_decode``)
+    # The visibility head's mean logit per row of ``frames`` (averaged) or per frame of ``units``.
+    logits: Optional[Readback] = None
 
 
 class GridTrackNetBallDetector(BallDetectorBackend):
@@ -239,7 +266,10 @@ class GridTrackNetBallDetector(BallDetectorBackend):
     unit the windowed prepass would run is decoded from its four cached transitions
     (``ball_gpu.TransitionRing``), the halves as two TensorRT engines (``ball_trt``) or, should
     those be unavailable, as PyTorch modules. The units, their batching and everything after the
-    network are the windowed prepass's.
+    network are the windowed prepass's. With ``Config.ball_visibility_gate`` on, the decoder also
+    answers the network's visibility head (weights without one are refused): a frame's logits from
+    the units holding it are averaged as its grids are (``ball_gpu.LogitRing``) and
+    ``visibility_scores`` gives each frame's probability that a ball is visible.
 
     ``Config.gridtracknet_window_step`` below 5 (the default is 1) starts a
     unit every that many frames of a phase instead of every 5, so a frame is
@@ -267,12 +297,17 @@ class GridTrackNetBallDetector(BallDetectorBackend):
     uses_raw_frames = True
     use_async = False
     async_slots = 1
+    _gate: float = 0.0                                          # the checked Config.ball_visibility_gate
+    _visibility: Optional[List[Optional[float]]] = None        # per frame, with the gate on
 
     def __init__(self, weights_path: str, cfg: Config):
         if not torch.cuda.is_available():
             raise RuntimeError("GridTrackNet requires CUDA-enabled torch.")
-        refuse_visibility_gate(cfg)
+        require_visibility_head(cfg, Path(weights_path))
         self.cfg = cfg
+        self._gate = visibility_gate(cfg)
+        # With the visibility gate, the head's probability per decoded source frame (``visibility_scores``).
+        self._visibility: Optional[List[Optional[float]]] = None
         self.device = torch.device(f"cuda:{cfg.device}")
         self._frame_tensor: Callable[[PrepassFrame, torch.device], torch.Tensor] = self._model_input
         # The one-unit-per-frame prepass finds each frame's peak on the device; a decoder set here,
@@ -326,8 +361,9 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         if halves is not None:
             engines = "TensorRT FP16 encoder and decoder" if halves.stream is not None else "FP16"
             runtime = f"{engines} streaming, {halves.batch} a call"
+        gate = f", visibility gate {self._gate:.2f}" if self._gate else ""
         print(f"[detector] {self.model.ARCH} {runtime}, {self.model.GRID_COLS}x{self.model.GRID_ROWS} grid "
-              f"(confidence={cfg.conf:.2f}, device={self.device}{windows})")
+              f"(confidence={cfg.conf:.2f}, device={self.device}{windows}{gate})")
 
     def _open_engine(self, weights: Path) -> Any:
         """The cached TensorRT engine for `weights` (``ball_trt``) when ``Config.ball_prepass_runtime``
@@ -352,24 +388,29 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         folds from the weights, which replaces the model) when it has them and
         ``Config.ball_prepass_streaming`` is on, else None (the model runs unit by unit). They run as cached TensorRT engines when ``Config.ball_prepass_runtime`` and the
         device allow, else as the PyTorch modules, a TensorRT failure reported as ``_open_engine``
-        reports it."""
+        reports it. With the visibility gate on they are the halves that answer the head too."""
         if not self.cfg.ball_prepass_streaming or not callable(getattr(self.model, "streaming_halves", None)):
             return None
         runtime = self.cfg.ball_prepass_runtime
         if runtime not in RUNTIMES:
             raise ValueError(f"ball_prepass_runtime must be one of {RUNTIMES}, not {runtime!r}")
         self.model = load_deployed(weights, self.device)
-        encoder, decoder = self.model.streaming_halves()
+        visibility = bool(self._gate)
+        encoder, decoder = self.model.streaming_halves(visibility=True) if visibility else self.model.streaming_halves()
         if runtime == "tensorrt" and self.device.type == "cuda":
             batch = int(self.cfg.ball_engine_batch)
             try:
                 from .ball_trt import ensure_stream_engines, open_stream_engines
+                if visibility:
+                    paths = ensure_stream_engines(weights, self.model.ARCH, encoder, decoder, batch,
+                                                  Path(self.cfg.ball_engine_dir), self.device, visibility=True)
+                    return open_stream_engines(paths, self.device, visibility=True)
                 paths = ensure_stream_engines(weights, self.model.ARCH, encoder, decoder, batch,
                                               Path(self.cfg.ball_engine_dir), self.device)
                 return open_stream_engines(paths, self.device)
             except (RuntimeError, OSError, ImportError) as error:
                 print(f"[detector] TensorRT engines unavailable, streaming the PyTorch model ({error})")
-        return StreamHalves(encoder, decoder, _UNITS_PER_INFERENCE)
+        return StreamHalves(encoder, decoder, _UNITS_PER_INFERENCE, visibility=visibility)
 
     def window_step(self) -> int:
         """The frames of a phase between the prepass's unit starts: ``Config.gridtracknet_window_step``,
@@ -472,6 +513,10 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         def on_rows(message: PrepassRows) -> None:
             del cached[message.start:]
             cached.extend(message.rows)
+            scores = self._visibility
+            if scores is not None:
+                del scores[message.start:]
+                scores.extend(message.visibility if message.visibility is not None else [None] * len(message.rows))
             self._publish(message.start + len(message.rows))
 
         def on_end(error: Optional[BaseException]) -> None:
@@ -527,6 +572,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         """A new clip's prepass state: an empty ``precomputed``, which it returns, nothing final yet."""
         cached: List[List[RawDetection]] = []
         self.precomputed = cached
+        self._visibility = [] if self._gate else None
         self._ready_upto = 0
         self._done = False
         self._worker_error = None
@@ -601,6 +647,25 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             while self._ready_upto <= index and not self._done:
                 self._ready.wait(timeout=0.5)
         self._raise_if_failed()
+
+    def visibility_scores(self) -> Optional[List[Optional[float]]]:
+        """With the visibility gate on, the head's probability per decoded source frame once the
+        prepass has finished (it waits for that; a failed prepass raises); None with the gate off."""
+        if self._visibility is None:
+            return None
+        with self._ready:
+            while not self._done:
+                self._ready.wait(timeout=0.5)
+        self._raise_if_failed()
+        return list(self._visibility)
+
+    def visibility_rows(self, start: int, end: int) -> Optional[List[Optional[float]]]:
+        """The visibility scores of the frames `start` to `end` (final ones: below ``ready_upto``),
+        without waiting; None with the gate off. What the prepass process sends beside its rows and
+        the live tracker reads as frames become final."""
+        if self._visibility is None:
+            return None
+        return list(self._visibility[start:end])
 
     def detect_clip(self, video_path: Path, fps: float, width: int, height: int,
                     total: int) -> List[List[RawDetection]]:
@@ -682,8 +747,11 @@ class PrepassStream:
             self.transitions = TransitionRing(self.halves, slots, self.source_stride,
                                               align_radius=int(self.cfg.ball_transition_align_px))
         self.averaging = self.window_step != 5
+        # The head's probability per frame when the gate asks (the detector's list, a slot per pushed frame).
+        self.visibility: Optional[List[Optional[float]]] = getattr(detector, "_visibility", None)
         self.covered: Set[int] = set()          # the frames summed in the ring and not yet decoded
         self.ring: Optional[HeatRing] = None
+        self.logit_ring: Optional[LogitRing] = None
         self.finalized: Set[int] = set()
         self.in_flight: Deque[_Flush] = deque()
         self.frame_index = self.inference_calls = self.detected = 0      # frame_index: frames pushed
@@ -702,6 +770,8 @@ class PrepassStream:
     def push(self, frame: PrepassFrame) -> None:
         """Take the clip's next decoded frame: a BGR frame (host array or CUDA tensor) or an NV12 picture."""
         self.cached.append([])
+        if self.visibility is not None:
+            self.visibility.append(None)
         index = self.frame_index
         phase = index % self.source_stride
         tensor = self.detector._frame_tensor(frame, self.detector.device)
@@ -753,21 +823,28 @@ class PrepassStream:
     def _apply(self, flush: _Flush) -> None:
         # The peaks become points on the host; with overlapping units each decoded frame is
         # final, otherwise the first unit to answer a source frame finalises it and a later
-        # overlapping unit (the clip's trailing window) is ignored.
+        # overlapping unit (the clip's trailing window) is ignored. The head's logits follow the
+        # same rows and become probabilities.
         points = flush.points
         if flush.peaks is not None:
             rows, cols = self.grid
             points = peak_points(flush.peaks.wait(), rows, cols, self.width, self.height, self.cfg.conf)
+        visibility = self.visibility
+        logits = flush.logits.wait().tolist() if flush.logits is not None and visibility is not None else None
         if points is not None:
             if self.averaging:
-                for index, found in zip(flush.frames, points):
+                for position, (index, found) in enumerate(zip(flush.frames, points)):
                     self._store(index, found)
+                    if visibility is not None and logits is not None:
+                        visibility[index] = _probability(logits[position])
             else:
                 for unit_index, indices in enumerate(flush.units):
-                    for index, found in zip(indices, points[unit_index * FRAMES_PER_UNIT:]):
+                    for position, (index, found) in enumerate(zip(indices, points[unit_index * FRAMES_PER_UNIT:])):
                         if index not in self.finalized:
                             self.finalized.add(index)
                             self._store(index, found)
+                            if visibility is not None and logits is not None:
+                                visibility[index] = _probability(logits[unit_index * FRAMES_PER_UNIT + position])
         self.detector._publish(flush.upto)
 
     def _drain(self, everything: bool = False) -> None:
@@ -788,8 +865,11 @@ class PrepassStream:
         record = _Flush(upto)
         if batches:
             units = [indices for _, indices in batches]
+            logits: Optional[torch.Tensor] = None
             if self.transitions is not None:     # pads its static batch itself
                 output = self.transitions.decode([cast(List[Optional[int]], values) for values, _ in batches])
+                if self.halves is not None and self.halves.visibility:
+                    output, logits = output
             else:
                 frames = [cast(torch.Tensor, tensor) for tensors, _ in batches for tensor in tensors]
                 if self.engine is not None:      # a static batch: pad with the last unit
@@ -805,12 +885,18 @@ class PrepassStream:
                     self.covered.update(indices)
                 self.ring.check_span(min(self.covered), newest)
                 self.ring.add(output, units)
+                if logits is not None and self.visibility is not None:
+                    if self.logit_ring is None:
+                        self.logit_ring = LogitRing(self.ring.slots, output.device)
+                    self.logit_ring.add(logits, units)
             elif self.detector._decode is not None:
                 record.points = self.detector._decode(output[:len(units)], self.width, self.height, self.cfg.conf)
                 record.units = units
             else:
                 record.peaks = Readback(grid_peaks(output[:len(units)].reshape(-1, 3, *grid)))
                 record.units = units
+            if logits is not None and self.visibility is not None and not self.averaging:
+                record.logits = Readback(logits[:len(units)].reshape(-1).float())
             self.inference_calls += 1
             batches.clear()
         if self.ring is not None:
@@ -818,8 +904,15 @@ class PrepassStream:
             if ready:
                 self.covered.difference_update(ready)
                 record.peaks, record.frames = Readback(self.ring.take(ready)), ready
+                if self.logit_ring is not None:
+                    record.logits = Readback(self.logit_ring.take(ready))
         self.in_flight.append(record)
         self._drain(everything=final or self.eager)
+
+
+def _probability(logit: float) -> float:
+    """The sigmoid of a visibility logit, as a Python float."""
+    return float(1.0 / (1.0 + np.exp(-np.float64(logit))))
 
 
 def _ring_slots(batch_units: int, window_step: int, source_stride: int) -> int:

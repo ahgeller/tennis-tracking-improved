@@ -75,9 +75,9 @@ def _serve(requests: Any, replies: Any, fps: float, width: int, height: int, set
                 send(feed.finish(), started, final=True)
                 replies.put((_DONE, feed.selector.tracks, feed.selector.runs, spent))
                 return
-            _, evidence, ghosts = message
+            _, evidence, ghosts, visibility = message
             started = time.perf_counter()
-            send(feed.add(evidence, ghosts), started)
+            send(feed.add(evidence, ghosts, visibility), started)
     except BaseException:                                   # the parent reports it
         replies.put((_FAILED, traceback.format_exc()))
 
@@ -114,9 +114,11 @@ class SelectorProcess:
                 raise RuntimeError("the live selector process did not start")
         self._raise()
 
-    def add(self, evidence: FrameEvidence, ghosts: Sequence[GhostEntry] = ()) -> None:
-        """Send the next committed frame; waits while the child is ``_MAX_PENDING_FRAMES`` behind."""
-        self._put((_FRAME, evidence, list(ghosts)))
+    def add(self, evidence: FrameEvidence, ghosts: Sequence[GhostEntry] = (),
+            visibility: Optional[float] = None) -> None:
+        """Send the next committed frame (with its visibility score, if it has one); waits while the
+        child is ``_MAX_PENDING_FRAMES`` behind."""
+        self._put((_FRAME, evidence, list(ghosts), visibility))
 
     def finish(self, timeout: float = 120.0) -> SelectorOutput:
         """End the stream: the child commits what is left; the tracks and the runs. `timeout` is
@@ -191,15 +193,16 @@ class SelectorProcess:
                 return
 
 
-def run_in_process(frames: Sequence[Tuple[FrameEvidence, Sequence[GhostEntry]]], fps: float, width: int,
+def run_in_process(frames: Sequence[Tuple[Any, ...]], fps: float, width: int,
                    height: int, settings: LagSettings) -> Tuple[List[Optional[FrameResult]], SelectorOutput]:
-    """Feed `frames` through a ``SelectorProcess`` and finish it (for tests and tools): every
-    committed row in frame order, and the output."""
+    """Feed `frames` (per frame its evidence, its ghosts and, optionally, its visibility score, as
+    ``SelectorProcess.add`` takes them) through a ``SelectorProcess`` and finish it (for tests and
+    tools): every committed row in frame order, and the output."""
     rows: List[Optional[FrameResult]] = []
     process = SelectorProcess(fps, width, height, settings, on_rows=lambda _first, new, _final: rows.extend(new))
     try:
-        for evidence, ghosts in frames:
-            process.add(evidence, ghosts)
+        for frame in frames:
+            process.add(*frame)
         return rows, process.finish()
     finally:
         process.close()

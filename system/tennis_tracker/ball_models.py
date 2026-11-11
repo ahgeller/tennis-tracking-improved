@@ -79,12 +79,15 @@ def load_deployed(weights: Path, device: torch.device) -> nn.Module:
     """The FP16 inference form of `weights` on ``device``: a ``.pt`` record's trainable network
     built in float32 from the record, folded (``deployed``) and only then cast to FP16, so each
     fused weight is rounded to FP16 once; GridTrackNet (``.npz``), which has nothing to fold, as
-    ``load_ball_model`` loads it."""
+    ``load_ball_model`` loads it. A record with optional parts (stream_s4's visibility head) is
+    loaded into the network its architecture's ``build_for`` shapes for it, so the head is kept."""
     arch = arch_of(weights)
     if WEIGHTS_SUFFIX[arch] != _RECORD_SUFFIX:
         return load_ball_model(weights, device)
-    model = model_class(arch)()
-    model.load_state_dict(heatmapnet.read_record(Path(weights), arch)["state_dict"])
+    state_dict = heatmapnet.read_record(Path(weights), arch)["state_dict"]
+    build_for = getattr(_MODULES[arch], "build_for", None)
+    model = build_for(state_dict) if callable(build_for) else model_class(arch)()
+    model.load_state_dict(state_dict)
     return deployed(model.eval()).to(device).half()
 
 

@@ -122,6 +122,23 @@ def test_a_streaming_networks_engines_come_from_one_export_and_are_found_after(t
     assert "stream.pt (stream_s4 encoder, 4 a call)" in out and "stream.pt (stream_s4 decoder, 4 a call)" in out
 
 
+def test_the_decoder_with_the_head_is_an_engine_of_its_own(tmp_path, fake_platform, capsys):
+    """With the gate on the decoder engine is cached under ``DECODER_VIS``, beside the plain
+    decoder's and never in its place; the encoder engine is the one both share."""
+    weights = tmp_path / "stream.pt"
+    weights.write_bytes(b"weights")
+    onnx = {ball_trt.ENCODER: b"encoder onnx", ball_trt.DECODER: b"decoder onnx"}
+    with patch.object(ball_trt, "export_halves", return_value=onnx), \
+         patch.object(ball_trt, "build_serialized_engine", side_effect=lambda data: data + b" plan") as build:
+        plain = ball_trt.ensure_stream_engines(weights, "stream_s4", "enc", "dec", 4, tmp_path / "cache", CUDA)
+        gated = ball_trt.ensure_stream_engines(weights, "stream_s4", "enc", "dec", 4, tmp_path / "cache", CUDA,
+                                               visibility=True)
+    assert build.call_count == 3                                             # the encoder was built once
+    assert gated[ball_trt.ENCODER] == plain[ball_trt.ENCODER] and gated[ball_trt.DECODER] != plain[ball_trt.DECODER]
+    assert "-decoder-vis-b4-" in gated[ball_trt.DECODER].name and "-decoder-b4-" in plain[ball_trt.DECODER].name
+    assert "stream.pt (stream_s4 decoder-vis, 4 a call)" in capsys.readouterr().out
+
+
 def _stream_detector(monkeypatch, **settings):
     """A CPU detector holding a small StreamNet; its PyTorch halves warm up at 32x48."""
     monkeypatch.setattr(ball_detectors, "HEIGHT", 32)

@@ -82,7 +82,7 @@ A bounce and a hit logit belong here too, once the trainer reads their labels.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Mapping, Optional, Sequence, Tuple, Union, cast
+from typing import List, Mapping, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import nn
@@ -342,12 +342,13 @@ class StreamNet(nn.Module):
         repvgg.fuse_for_inference(self)
         return self
 
-    def streaming_halves(self) -> Tuple["StreamEncoder", "StreamDecoder"]:
+    def streaming_halves(self, visibility: bool = False) -> Tuple["StreamEncoder", "StreamDecoder"]:
         """The network as the two modules a streaming prepass runs (and exports to TensorRT), both
         sharing this network's weights: ``StreamEncoder`` (one transition at a time) and
-        ``StreamDecoder`` (one unit from its four transitions' features). A detector streams the
-        model it holds when it has this method (``ball_detectors``)."""
-        return StreamEncoder(self), StreamDecoder(self)
+        ``StreamDecoder`` (one unit from its four transitions' features; with `visibility`, the
+        decoder that also answers the visibility head's logits, a ValueError for a network without
+        the head). A detector streams the model it holds when it has this method (``ball_detectors``)."""
+        return StreamEncoder(self), StreamDecoder(self, visibility=visibility)
 
 
 class StreamEncoder(nn.Module):
@@ -365,14 +366,19 @@ class StreamEncoder(nn.Module):
 class StreamDecoder(nn.Module):
     """``StreamNet.decode`` as a module on the four transitions' features already concatenated per
     stride in temporal order (``(N, PAIRS_PER_UNIT * C, h, w)`` at each of strides 4, 8 and 16, the
-    layout ``torch.cat`` of the four gives), to the unit's 15-channel output."""
+    layout ``torch.cat`` of the four gives), to the unit's 15-channel output; with `visibility`, to
+    ``(grids, visibility logits)``, the logits ``(N, VIS_LOGITS)`` (the head needs nothing the
+    decoder does not already hold: the grids, ``fuse4``'s output and the stride-4 features)."""
 
-    def __init__(self, model: StreamNet):
+    def __init__(self, model: StreamNet, visibility: bool = False):
         super().__init__()
+        if visibility and not model.has_vis_head:
+            raise ValueError(f"this {type(model).__name__} has no visibility head to decode with")
         self.model = model
+        self.visibility = bool(visibility)
 
-    def forward(self, quarter: torch.Tensor, eighth: torch.Tensor, bottom: torch.Tensor) -> torch.Tensor:
-        return cast(torch.Tensor, self.model._decode(quarter, eighth, bottom))     # the grids alone
+    def forward(self, quarter: torch.Tensor, eighth: torch.Tensor, bottom: torch.Tensor) -> Output:
+        return self.model._decode(quarter, eighth, bottom, self.visibility)
 
 
 def stream_units(model: StreamNet, frames: Sequence[torch.Tensor]) -> List[torch.Tensor]:
@@ -391,12 +397,18 @@ def stream_units(model: StreamNet, frames: Sequence[torch.Tensor]) -> List[torch
     return outputs
 
 
+def build_for(state_dict: Mapping[str, torch.Tensor]) -> StreamNet:
+    """A fresh network of the shape `state_dict` loads into: with the visibility head of the
+    variant the record carries (``vis_pool_of``), or without one."""
+    pool = vis_pool_of(state_dict)
+    return StreamNet(vis_head=pool is not None, vis_pool=pool or "global")
+
+
 def load_model(weights: Path, device: torch.device) -> StreamNet:
     """The FP16 eval network from the ``.pt`` record ``heatmapnet.save_model`` wrote, in its
     trainable form (the trainer fine-tunes from it), with the visibility head of the variant the
     record carries, if one (``vis_pool_of``); ``reparameterize`` gives the deployed one."""
     state_dict = read_record(Path(weights), ARCH)["state_dict"]
-    pool = vis_pool_of(state_dict)
-    model = StreamNet(vis_head=pool is not None, vis_pool=pool or "global")
+    model = build_for(state_dict)
     model.load_state_dict(state_dict)
     return model.eval().to(device).half()
