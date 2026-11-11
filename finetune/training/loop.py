@@ -48,7 +48,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tu
 import numpy as np
 import torch
 
-from tennis_tracker import heatmapnet
+from tennis_tracker import heatmapnet, streamnet
 from tennis_tracker.ball_models import ARCHITECTURES, GRIDTRACKNET, model_class, weights_suffix
 from tennis_tracker.gridtracknet import FRAMES_PER_UNIT, GRID_COLS, GRID_ROWS
 from finetune.training.dataset import FRAME_GAP
@@ -167,6 +167,30 @@ def with_vis_head(model: torch.nn.Module, pool: str = "global") -> torch.nn.Modu
         print(f"[train] the starting weights carry the {before} visibility head; a fresh {pool} head replaces it "
               f"(--vis-pool {pool})", flush=True)
     return model
+
+
+def freeze_all_but_vis_head(model: torch.nn.Module) -> List[Tuple[str, torch.nn.Parameter]]:
+    """``--vis-only``: every parameter of `model` but its visibility head's stops taking gradients,
+    so the detector the head sits on trains not at all; returns the head's (name, parameter) pairs,
+    the ones left trainable. ``train_epoch(..., vis_only=True)`` also keeps everything outside the
+    head in eval mode, which holds the BatchNorm running statistics as loaded. A network without
+    a head is a ValueError (``with_vis_head`` gives it one first)."""
+    if not has_vis_head(model):
+        raise ValueError(f"--vis-only trains the visibility head alone, and this {model.ARCH} has no visibility head")
+    trainable = []
+    for name, parameter in model.named_parameters():
+        keep = name.startswith(streamnet.VIS_PREFIX)
+        parameter.requires_grad_(keep)
+        if keep:
+            trainable.append((name, parameter))
+    return trainable
+
+
+def head_only_train_mode(model: torch.nn.Module) -> None:
+    """The modes a ``--vis-only`` step runs in: the whole network in eval mode (frozen BatchNorm
+    statistics, no dropout) and its visibility head alone in train mode."""
+    model.eval()
+    model.vis.train()
 
 
 def has_vis_head(model: torch.nn.Module) -> bool:
@@ -444,16 +468,22 @@ def evaluate_loss(model, loader, device, max_steps=None) -> float:
 
 def train_epoch(model, loader, optimizer, scaler, device: torch.device, epoch: int, epochs: int,
                 max_steps: Optional[int], distiller: Any = None, ema: Optional[EMA] = None,
-                vis_weight: float = 0.0, vis_gap_weight: float = 1.0) -> float:
+                vis_weight: float = 0.0, vis_gap_weight: float = 1.0, vis_only: bool = False) -> float:
     """One pass over the training loader; returns the mean loss. The normalised convolutions are
     held at ``FILTER_NORM`` per filter before the first step and after every step (``hold_conv_scale``;
     nothing to hold in a GridTrackNet). With a `distiller` (``distill.Distiller``) every step adds
     its loss on the same output to the labelled one, and the progress lines name its parts; with
     `vis_weight` above 0 on a network with the visibility head, `vis_weight` times
     ``visibility_loss`` of its logits (part ``vis``, the gap frames weighted `vis_gap_weight`); an
-    `ema` is updated after every step."""
-    model.train()
-    held = normalised_conv_weights(model)
+    `ema` is updated after every step. With `vis_only` (``--vis-only``, after
+    ``freeze_all_but_vis_head``) the network outside the head stays in eval mode
+    (``head_only_train_mode``) and its frozen convolutions are not re-held: only the head moves."""
+    if vis_only:
+        head_only_train_mode(model)
+        held: List[torch.Tensor] = []
+    else:
+        model.train()
+        held = normalised_conv_weights(model)
     hold_conv_scale(held)
     visibility = vis_weight > 0 and has_vis_head(model)
     total, steps = 0.0, 0

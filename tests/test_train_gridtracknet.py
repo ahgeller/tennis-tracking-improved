@@ -704,7 +704,7 @@ def scripted_run(tmp_path, argv, train_losses, val_losses, scored, scoring=True,
         answer = scored[len(calls) - 1]
         return training.metrics_of(*(answer if isinstance(answer, tuple) else (answer, 0.0)))
 
-    def train_epoch(model, *_):
+    def train_epoch(model, *_, **__):
         with torch.no_grad():
             model.convs[0].bias += 1.0          # "training": the first bias counts the epochs, so each saved file is its epoch
             for parameter in model.parameters():    # and the optimizer gets a step to remember

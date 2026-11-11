@@ -198,7 +198,7 @@ def test_the_gap_auc_reaches_results_csv_and_the_epoch_line(tmp_path, capsys):
     seen = {}
 
     def train_epoch(model, loader, optimizer, scaler, device, epoch, epochs, max_steps, distiller=None, ema=None,
-                    vis_weight=0.0, vis_gap_weight=1.0):
+                    vis_weight=0.0, vis_gap_weight=1.0, vis_only=False):
         seen["vis"] = (vis_weight, vis_gap_weight)
         return 0.5
 
