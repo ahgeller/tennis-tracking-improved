@@ -42,7 +42,7 @@ def ema_run(tmp_path: Path, argv, scored_live, scored_ema, resume=False, vis=Fal
         return training.metrics_of(answers[len(calls[kind]) - 1], 0.0)
 
     def train_epoch(model, loader, optimizer, scaler, device, epoch, epochs, max_steps, distiller=None, ema=None,
-                    vis_weight=0.0, vis_gap_weight=1.0):
+                    vis_weight=0.0, vis_gap_weight=1.0, vis_only=False):
         with torch.no_grad():
             model.convs[0].bias += 1.0
         if ema is not None:

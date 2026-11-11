@@ -107,7 +107,11 @@ And two the stream_s4 Colab run of 2026-11 tests (``loop.py``'s docstring has th
   frames, the absent labels inside a rally (``frame_cache.gap_frames``) that the selector bridges;
   ``vis_gap_auc`` (and ``ema_vis_gap_auc``) is the head's AUC on those frames alone. Recorded as
   ``vis_head`` (``weight``, ``pool``, ``gap_weight``; a run recorded with ``weight`` alone was the
-  global head at gap weight 1, ``vis_head_of_config``).
+  global head at gap weight 1, ``vis_head_of_config``). ``--vis-only`` trains that head alone on a
+  finished ``--weights`` detector (``loop.freeze_all_but_vis_head``): every other parameter and
+  BatchNorm statistic stays as loaded, so the 15-channel output is the record's to the bit and the
+  held-out detector numbers are the record's every epoch; read ``vis_gap_auc`` instead. Recorded
+  as ``vis_only``.
 """
 
 from __future__ import annotations
@@ -146,7 +150,7 @@ from finetune.training.distill import (DISTILL_LOSSES, TEACHER_DIR, TEACHER_MAPS
 from finetune.training.frame_cache import TrainingUnit, build_units, prepare_data, prepare_pseudo
 from finetune.training.loop import (EMA, EMA_DECAY, HALF_MAX, VIS_LOSS_WEIGHT, Validation, build_optimizer, check_finite,
                                     evaluate, fresh_model, gridtracknet_loss, heatmap_loss, largest_running_variance,
-                                    save_weights, train_epoch, with_vis_head)
+                                    freeze_all_but_vis_head, save_weights, train_epoch, with_vis_head)
 from finetune.training.metrics import FALSE_ALARM_CONF, epoch_score, false_alarm_units, promotion_improves, score_weights
 
 SEED = 7                   # every run draws the same augmentation and sampling sequence unless --seed says otherwise
@@ -201,6 +205,7 @@ def run_config(args: argparse.Namespace, names: List[str], val_clips: List[str],
             "ema": None if not args.ema else {"decay": args.ema_decay},
             "vis_head": None if not args.vis_head else {"weight": args.vis_weight, "pool": args.vis_pool,
                                                        "gap_weight": args.vis_gap_weight},
+            "vis_only": bool(getattr(args, "vis_only", False)),
             "clips": names,
             "validation_clips": val_clips, "holdout": args.holdout,
             "val_clips": args.val_clips,
@@ -396,7 +401,7 @@ def same_run(saved: dict, current: dict, lr_drop: bool = False) -> None:
         if field in RUN_OUTCOMES or field in RATE_FIELDS:
             continue
         recorded = (arch_of_config(saved) if field == "arch" else vis_head_of_config(saved) if field == "vis_head"
-                    else saved.get(field))
+                    else bool(saved.get(field)) if field == "vis_only" else saved.get(field))
         if recorded != current[field]:
             raise ValueError(f"--resume would continue a different run: config.json has {field}={recorded!r}, "
                              f"this run {field}={current[field]!r}")
@@ -567,7 +572,8 @@ def fit(args: argparse.Namespace, model: torch.nn.Module, train_loader: DataLoad
         started = time.perf_counter()
         torch.manual_seed(args.seed + epoch)
         train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch, args.epochs, args.max_train_steps,
-                                 distiller, ema, args.vis_weight if visibility else 0.0, args.vis_gap_weight)
+                                 distiller, ema, args.vis_weight if visibility else 0.0, args.vis_gap_weight,
+                                 vis_only=bool(getattr(args, "vis_only", False)))
         check_finite(model)
         name, variance = largest_running_variance(model)
         if variance > HALF_MAX * VARIANCE_WARNING_SHARE:
@@ -808,6 +814,10 @@ def train(args: argparse.Namespace) -> None:
             with_vis_head(model, args.vis_pool)
         print(f"[train] fine-tuning {args.arch} from {args.weights}")
     model.train()
+    if args.vis_only:
+        trainable = freeze_all_but_vis_head(model)
+        print(f"[train] --vis-only: the {args.vis_pool} visibility head alone trains ({sum(p.numel() for _, p in trainable)} "
+              f"parameters); every other weight and BatchNorm statistic stays as {args.weights} has them", flush=True)
     if args.vis_head:
         print(f"[train] visibility head on ({args.vis_pool}): BCE x{args.vis_weight:g} beside the heat loss, the gap "
               f"frames x{args.vis_gap_weight:g}; held-out AUC (vis_auc) and gap-frame AUC (vis_gap_auc) in results.csv")
@@ -994,6 +1004,10 @@ def build_parser() -> argparse.ArgumentParser:
                             help="The head's variant: global (the default: a global average of the fused stride-16 "
                                  "features, one linear layer) or peak (per frame, the stride-4 features at that frame's "
                                  "own heat peak with its top heat values, a small MLP; streamnet.PeakHead)")
+    visibility.add_argument("--vis-only", action="store_true",
+                            help="Train the visibility head alone on the --weights detector (with --vis-head, not "
+                                 "--from-scratch): every other parameter and BatchNorm statistic stays as loaded, so "
+                                 "the tracker's 15-channel output is the record's to the bit. No --ema, no --distill")
     visibility.add_argument("--vis-gap-weight", type=float, default=VIS_GAP_WEIGHT_DEFAULT, metavar="W",
                             help="Weight of the visibility loss on the gap frames, the absent labels in a run of at most "
                                  "3 flanked by visible labels (the occlusions the selector bridges; default 1: off)")
@@ -1050,6 +1064,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.lr_drop and not args.resume:
         print("[error] --lr-drop goes with --resume: it lowers the learning rate of the run being continued", file=sys.stderr)
         return 1
+    if args.vis_only:
+        clash = ("--vis-head" if not args.vis_head else "--from-scratch" if args.from_scratch else "--ema" if args.ema
+                 else "--distill" if args.distill else None)
+        if clash is not None:
+            need = "needs" if clash == "--vis-head" else "does not go with"
+            print(f"[error] --vis-only {need} {clash}: it trains the visibility head alone on a finished detector",
+                  file=sys.stderr)
+            return 1
     if args.vis_gap_weight <= 0:
         print(f"[error] --vis-gap-weight must be above 0 (1 leaves the gap frames at the other frames' weight), "
               f"not {args.vis_gap_weight:g}", file=sys.stderr)
