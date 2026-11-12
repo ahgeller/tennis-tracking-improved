@@ -17,7 +17,7 @@ label: the label tool and the label scorers resolve the main copy's labels
 
 The candidate weights (`system/models/candidates`) and the TensorRT engine cache
 (`system/models/engine_cache`) are copied from the reference worktree,
-`final_nonlive` (`--reference` names another), before the main copy's
+`final_train` (`--reference` names another), before the main copy's
 `system/models` fills in the rest. Each worktree would otherwise build its own
 stream_s4 engine on first use, and two builds of the same weights choose different
 FP16 tactics, so their detections differ in the fourth decimal: outputs compare
@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 MAIN = Path(r"C:\Users\Andrew\Desktop\clean_version\optimization_test")
-REFERENCE = MAIN / "final_nonlive"
+REFERENCE = MAIN / "final_train"
 HERE = Path(__file__).resolve().parent.parent
 
 JUNCTIONS = ("finetune/videos", "finetune/cache")
