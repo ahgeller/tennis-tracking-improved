@@ -46,7 +46,8 @@ class _FrameRowAlways(TypedDict):
 class FrameRow(_FrameRowAlways, total=False):
     """One row of the ``frames`` table.  ``frame`` and ``present`` are always there; the
     position keys only when the ball was selected that frame (``frame_result_to_json``);
-    ``court_keypoints`` and ``player_boxes`` for every frame pass 1 saw (``RunResult.frame_rows``).
+    ``court_keypoints`` and ``player_boxes`` for every frame pass 1 saw (``RunResult.frame_rows``);
+    ``visibility`` only when the run's ``Config.ball_visibility_gate`` was on.
     """
 
     x: float
@@ -62,6 +63,7 @@ class FrameRow(_FrameRowAlways, total=False):
     selection: SelectionJson
     court_keypoints: Optional[List[float]]
     player_boxes: Dict[str, Optional[List[float]]]
+    visibility: float                   # the detector's "a ball is visible" probability, with the visibility gate on
 
 
 class ObservationJson(TypedDict):
@@ -97,7 +99,7 @@ class TrackJson(TypedDict):
     last_obs_frame: int
     start: TrackStartJson
     end_reason: str                     # "max_gap" or "clip_end"
-    selection: Dict[str, bool]          # core.selected_tracks' tests: established, reacquired, airborne, rolling
+    selection: Dict[str, bool]          # core.selected_tracks' tests: established, reacquired, airborne, rolling; off_court vetoes
     in_timeline: bool                   # whether the timeline chain used it
     score_breakdown: Dict[str, float]
     observations: List[ObservationJson]

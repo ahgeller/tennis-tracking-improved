@@ -102,3 +102,54 @@ def test_raw_head_takes_the_best_class_and_honours_the_class_filter():
     assert only_people.shape == (1, 6) and only_people[0, 5] == 0.0
     assert decode_engine_boxes(torch.zeros((5, 8)), (1.0, 1.0), 0.5, 0.45, OUTPUT_MODE_RAW).shape == (0, 6)
     assert decode_engine_boxes(torch.zeros((1, 4, 8)), (1.0, 1.0), 0.5, 0.45, OUTPUT_MODE_RAW).shape == (0, 6)
+
+
+def _anchor_major_rows(head: torch.Tensor, conf_threshold: float, iou_threshold: float) -> np.ndarray:
+    """The raw-head decode as it read the head before: every anchor a ``[cx, cy, w, h, scores...]``
+    row, all of them converted, then thresholded."""
+    p = head[0]
+    if p.shape[0] <= p.shape[1]:
+        p = p.transpose(0, 1)
+    p = p.float().numpy()
+    boxes = xywh_to_xyxy(p[:, :4].astype(np.float32))
+    cls_scores = p[:, 4:].astype(np.float32)
+    cls_ids = np.argmax(cls_scores, axis=1)
+    scores = cls_scores[np.arange(cls_scores.shape[0]), cls_ids]
+    keep = scores >= conf_threshold
+    boxes, scores, cls_ids = boxes[keep], scores[keep], cls_ids[keep]
+    if not len(boxes):
+        return np.empty((0, 6))
+    order = nms_xyxy(boxes, scores, iou_threshold)
+    return np.column_stack((boxes[order].astype(np.float64), scores[order].astype(np.float64),
+                            cls_ids[order].astype(np.float64)))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("channel_major", [True, False])
+@pytest.mark.parametrize("classes", [1, 3])
+def test_raw_head_decode_matches_the_anchor_major_decode_bit_for_bit(dtype, channel_major, classes):
+    """Reading the head channel by channel and converting only the anchors that pass gives the
+    rows the anchor-major decode gave, on the tensor or on its host copy; scores tie across
+    classes (the first class wins) and sit exactly on the threshold."""
+    rng = np.random.default_rng(classes)
+    anchors = 400
+    head = np.empty((4 + classes, anchors), np.float32)
+    head[0:2] = rng.uniform(0, 640, (2, anchors))
+    head[2:4] = rng.uniform(4, 120, (2, anchors))
+    head[4:] = rng.choice([0.0, 0.25, 0.5, 0.625, 0.75, 0.875], (classes, anchors))
+    t = torch.from_numpy(head).to(dtype).unsqueeze(0)
+    if not channel_major:
+        t = t.transpose(1, 2)
+    expected = _anchor_major_rows(t, 0.5, 0.45)
+    assert len(expected) > 5
+    for preds in (t, t.numpy()):
+        out = decode_engine_boxes(preds, (1.0, 1.0), 0.5, 0.45, OUTPUT_MODE_RAW)
+        assert out.dtype == np.float64
+        np.testing.assert_array_equal(out, expected)
+
+
+def test_a_host_copy_of_postprocessed_rows_decodes_as_the_tensor():
+    rows = torch.tensor([[[10.0, 20.0, 30.0, 40.0, 0.9, 0.0], [1.0, 1.0, 2.0, 2.0, 0.2, 0.0]]], dtype=torch.float16)
+    assert engine_output_mode(rows.numpy()) == OUTPUT_MODE_POSTPROCESSED
+    np.testing.assert_array_equal(decode_engine_boxes(rows.numpy(), (2.0, 0.5), 0.5, 0.45, OUTPUT_MODE_POSTPROCESSED),
+                                  decode_engine_boxes(rows, (2.0, 0.5), 0.5, 0.45, OUTPUT_MODE_POSTPROCESSED))

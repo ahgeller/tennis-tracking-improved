@@ -32,11 +32,11 @@ def import_tensorrt() -> Any:
     return trt
 
 
-def _torch_dtype(np_dtype: npt.DTypeLike) -> torch.dtype:
+def torch_dtype(np_dtype: npt.DTypeLike) -> torch.dtype:
     return torch.from_numpy(np.empty((0,), dtype=np_dtype)).dtype
 
 
-def _deserialize_engine(trt: Any, engine_path: str) -> Tuple[Any, Any]:
+def deserialize_engine(trt: Any, engine_path: str) -> Tuple[Any, Any]:
     """Load ``engine_path`` (with or without the Ultralytics metadata header)
     and create its execution context."""
     _, raw = read_engine_header(Path(engine_path))
@@ -90,7 +90,7 @@ class TensorRTRuntimeSession:
             raise RuntimeError("TensorRT session requires CUDA-enabled torch.")
         trt = import_tensorrt()
         self.device = device if device is not None else torch.device("cuda:0")
-        self.engine, self.context = _deserialize_engine(trt, engine_path)
+        self.engine, self.context = deserialize_engine(trt, engine_path)
 
         self.use_async = bool(async_execute) and hasattr(self.context, "execute_async_v3")
         self.stream = torch.cuda.Stream(device=self.device) if self.use_async else None
@@ -135,7 +135,7 @@ class TensorRTRuntimeSession:
             else:
                 self.output_names.append(io.name)
             shape_now = tuple(self.context.get_tensor_shape(io.name))
-            tensor = torch.empty(shape_now, dtype=_torch_dtype(np_dtype), device=self.device)
+            tensor = torch.empty(shape_now, dtype=torch_dtype(np_dtype), device=self.device)
             self.bindings[io.name] = _Binding(io.name, io.index, np_dtype, shape_now, tensor, int(tensor.data_ptr()))
 
     def _input_size(self) -> Tuple[int, int]:
@@ -192,7 +192,7 @@ class TensorRTRuntimeSession:
         h0, w0 = frame_bgr.shape[:2]
         t = torch.from_numpy(frame_bgr).to(device=self.device, dtype=torch.float32)
         t = t.permute(2, 0, 1).unsqueeze(0).contiguous()
-        t = t[:, [2, 1, 0], :, :] / 255.0
+        t = t.flip(1) / 255.0
         return self._finish_preprocess(t, h0, w0)
 
     def preprocess_cuda_chw_frame(self, frame_bgr_chw: Optional[torch.Tensor]
@@ -211,7 +211,10 @@ class TensorRTRuntimeSession:
         # engine-sized tensor gives the same values while touching a tenth of the memory.
         if h0 != self.input_h or w0 != self.input_w:
             t = F.interpolate(t, size=(self.input_h, self.input_w), mode="bilinear", align_corners=False)
-        t = t[:, [2, 1, 0], :, :]
+        # flip, not t[:, [2, 1, 0]]: a Python index list is copied to the device from pageable
+        # memory, which waits for all the work queued on the stream (2.7 s of pass 1's player
+        # launches in the review's profile).  Both give the same values.
+        t = t.flip(1)
         if self.fp16:
             t = t.half()
         return t.contiguous(), (w0 / float(self.input_w), h0 / float(self.input_h))
@@ -234,7 +237,7 @@ class TensorRTRuntimeSession:
             if t.max() > 1.5:
                 t = t / 255.0
         t = t.permute(2, 0, 1).unsqueeze(0).contiguous()
-        t = t[:, [2, 1, 0], :, :]
+        t = t.flip(1)
         return self._finish_preprocess(t, h0, w0)
 
     # --- execution --------------------------------------------------------

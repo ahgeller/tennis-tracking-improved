@@ -1,0 +1,223 @@
+"""The prepass's device-side pieces (engines/ball_gpu.py), run on the CPU: the resize is OpenCV's to
+the byte, the peaks are decode_grid's, the heat ring's means are the ones the host summed."""
+import cv2
+import numpy as np
+import pytest
+import torch
+
+from tennis_tracker.engines import ball_gpu
+from tennis_tracker.cuda_kernels import KernelUnavailable
+from tennis_tracker.engines.ball_gpu import (
+    HeatRing, ModelResize, Nv12ModelResize, Readback, StreamHalves, TransitionRing, grid_peaks, peak_points,
+)
+from tennis_tracker.video_decode import Nv12Frame, nv12_to_bgr
+from tennis_tracker.gridtracknet import HEIGHT, WIDTH, decode_grid, frame_tensor
+
+CPU = torch.device("cpu")
+
+
+def _texture(width: int, height: int, seed: int) -> np.ndarray:
+    """A BGR frame with noise, hard edges and smooth ramps, so every rounding case of the resize
+    turns up."""
+    rng = np.random.default_rng(seed)
+    frame = rng.integers(0, 256, (height, width, 3), dtype=np.uint8)
+    frame[: height // 3] = np.linspace(0, 255, width, dtype=np.uint8)[None, :, None]
+    frame[height // 2:, : width // 4] = (255, 0, 128)
+    return frame
+
+
+@pytest.mark.parametrize("width, height", [(1920, 1080), (1280, 720), (3840, 2160), (1536, 864), (2560, 1440),
+                                           (1000, 563), (640, 360), (100, 60), (768, 432), (800, 450)])
+def test_the_resize_is_opencvs_inter_linear_to_the_byte(width, height):
+    """Downscales by 2.5, 1.67, 5 and 2 (which OpenCV runs as its area fast path), odd ratios,
+    upscales and the model's own size all give exactly cv2.resize's bytes, and the model input is
+    frame_tensor's."""
+    frame = _texture(width, height, seed=width + height)
+    resize = ModelResize(width, height, WIDTH, HEIGHT, CPU)
+    got = resize.resize_u8(torch.from_numpy(frame)).numpy()
+    expected = cv2.resize(frame, (WIDTH, HEIGHT), interpolation=cv2.INTER_LINEAR)
+    assert got.shape == expected.shape and np.array_equal(got, expected)
+    assert torch.equal(resize(torch.from_numpy(frame)), frame_tensor(frame, CPU))
+
+
+def test_the_taps_clamp_at_both_edges():
+    first, second, weight0, weight1 = ball_gpu.linear_taps(4, 8, horizontal=True)     # an upscale: the ends sit past the pixels
+    assert first[0] == 0 and weight0[0] == 2048 and weight1[0] == 0
+    assert first[-1] == 3 and second[-1] == 3 and weight1[-1] == 0
+    assert np.all(weight0 + weight1 == 2048)
+    first, second, weight0, weight1 = ball_gpu.linear_taps(4, 8, horizontal=False)   # down: weights kept, rows clamped
+    assert first[0] == second[0] == 0 and weight0[0] == 512 and weight1[0] == 1536     # at -0.25: rows -1 and 0
+
+
+def test_peaks_are_decode_grids_answers_first_maximum_included():
+    rng = np.random.default_rng(3)
+    grids = rng.random((6, 3, 27, 48)).astype(np.float32)
+    grids[2, 0] = 0.0
+    grids[2, 0, 4, 7] = grids[2, 0, 9, 1] = 0.75            # a tie: the first in row-major order wins
+    grids[4, 0] *= 0.2                                     # below the threshold everywhere
+    peaks = grid_peaks(torch.from_numpy(grids)).numpy()
+    found = peak_points(peaks, 27, 48, 1920, 1080, 0.5)
+    assert found == [decode_grid(frame, 1920, 1080, 0.5) for frame in grids]
+    assert found[2][0] == pytest.approx(((grids[2, 1, 4, 7] + 7) * 40, (grids[2, 2, 4, 7] + 4) * 40))
+    assert found[4][0] is None
+
+
+def test_the_ring_averages_in_the_hosts_order_and_clears_what_it_hands_back():
+    """Units of five frames at one frame apart (a window step of 1) are summed in the ring; the mean
+    each frame gets is bit for bit the host's (the sum in unit order, divided by the count on the
+    device), and a taken slot starts again from zero."""
+    rng = np.random.default_rng(5)
+    output = torch.from_numpy(rng.random((4, 15, 3, 4)).astype(np.float16))
+    units = [[f, f + 1, f + 2, f + 3, f + 4] for f in range(4)]
+    ring = HeatRing(16, 3, 4, CPU)
+    ring.add(output, units)
+    grids = output.float().reshape(4, 5, 3, 3, 4)
+    sums = {}
+    for row, unit in enumerate(units):
+        for position, index in enumerate(unit):
+            sums[index] = sums[index] + grids[row, position] if index in sums else grids[row, position].clone()
+    counts = {index: sum(index in unit for unit in units) for index in sums}
+    frames = sorted(sums)
+    expected = grid_peaks(torch.stack([sums[i] * torch.tensor(1.0 / counts[i], dtype=torch.float32) for i in frames]))
+    assert torch.equal(ring.take(frames), expected)
+    assert not ring.sums.any() and not ring.counts.any()
+    ring.add(output[:1], [[16, 17, 18, 19, 20]])                     # slots 0 to 4 again, from zero
+    assert torch.equal(ring.take([16]), grid_peaks(output[:1, 0:3].float()))
+
+
+def test_the_ring_refuses_a_span_it_cannot_hold():
+    ring = HeatRing(8, 1, 1, CPU)
+    ring.check_span(10, 17)
+    with pytest.raises(RuntimeError, match="8 slots"):
+        ring.check_span(10, 18)
+
+
+def test_a_cpu_readback_is_ready_at_once():
+    values = torch.arange(8, dtype=torch.float32).view(2, 4)
+    readback = Readback(values)
+    values.zero_()                                   # the copy is the host's own
+    assert readback.ready() and readback.wait().tolist() == [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+
+def _nv12_kernel_or_skip(device: torch.device):
+    if not torch.cuda.is_available():
+        pytest.skip("the NV12 kernel runs on a CUDA device")
+    try:
+        return ball_gpu.load_nv12_kernel(device)
+    except KernelUnavailable as error:
+        pytest.skip(f"no NVRTC here: {error}")
+
+
+@pytest.mark.parametrize("width, height", [(1920, 1080), (1280, 720), (640, 360), (768, 432), (98, 64), (1000, 562)])
+@pytest.mark.parametrize("full_range", [False, True])
+def test_the_nv12_kernel_is_the_resize_of_opencvs_bgr_to_the_byte(width, height, full_range):
+    """Random NV12 pictures (every chroma and rounding case) of downscales, upscales and the model's
+    own size: one kernel gives exactly ModelResize(nv12_to_bgr(...)), the path whose bytes are
+    cv2.resize's of OpenCV's picture."""
+    device = torch.device("cuda")
+    kernel = _nv12_kernel_or_skip(device)
+    generator = torch.Generator().manual_seed(width * 7 + height + int(full_range))
+    planes = torch.randint(0, 256, (height * 3 // 2, width), dtype=torch.uint8, generator=generator).to(device)
+    expected = ModelResize(width, height, WIDTH, HEIGHT, device)(nv12_to_bgr(planes, full_range))
+    got = Nv12ModelResize(width, height, WIDTH, HEIGHT, full_range, device, kernel)(Nv12Frame(planes, full_range))
+    assert got.dtype == torch.float16 and got.shape == expected.shape
+    assert torch.equal(got.view(torch.int16), expected.view(torch.int16))
+
+
+def test_the_nv12_kernel_reads_rows_with_a_pitch_and_refuses_another_picture():
+    device = torch.device("cuda")
+    kernel = _nv12_kernel_or_skip(device)
+    padded = torch.randint(0, 256, (96, 192), dtype=torch.uint8).to(device)
+    planes = padded[:, :128]                                    # a 128x64 picture in rows of 192 bytes
+    resize = Nv12ModelResize(128, 64, 40, 24, False, device, kernel)
+    expected = ModelResize(128, 64, 40, 24, device)(nv12_to_bgr(planes.contiguous(), False))
+    assert torch.equal(resize(Nv12Frame(planes, False)).view(torch.int16), expected.view(torch.int16))
+    with pytest.raises(ValueError, match="got a"):
+        resize(Nv12Frame(planes, True))
+    with pytest.raises(ValueError, match="got a"):
+        resize(Nv12Frame(padded[:90, :128], False))
+
+
+def _identity_halves(batch, calls):
+    """Halves whose transition features are (frame, previous) at two strides and whose decoder hands
+    back what it was given, recording each encoder batch."""
+    def encode(frames, before):
+        calls.append((frames.clone(), before.clone()))
+        return frames[:, :1].clone(), before[:, :1, :1, :1].clone()
+    def decode(first, second):         # (batch, 4) frame indices and (batch, 4) previous ones
+        return torch.stack([first[:, :, 0, 0], second[:, :, 0, 0]], dim=2)
+    return StreamHalves(encode=encode, decode=decode, batch=batch)
+
+
+def test_the_transition_ring_encodes_each_transition_once_and_gathers_each_units_four():
+    """Two phases of frames 0 to 13 (a frame's picture holds its index): a phase's first frame has no
+    transition, every full batch is encoded as it fills and a decode encodes the rest first; the
+    ring wraps (8 slots for 12 transitions) and each unit gets its four transitions in order,
+    padded with its last unit to the static batch."""
+    calls = []
+    ring = TransitionRing(_identity_halves(3, calls), slots=8, phases=2)
+    numbers = []
+    for index in range(14):
+        numbers.append(ring.push(torch.full((1, 2, 2), float(index)), index % 2))
+    assert numbers[:2] == [None, None] and numbers[2:] == list(range(12))
+    assert len(calls) == 4                                      # 12 transitions, batches of 3
+    frames, before = calls[1]
+    assert frames[:, 0, 0, 0].tolist() == [5.0, 6.0, 7.0] and before[:, 0, 0, 0].tolist() == [3.0, 4.0, 5.0]
+    phase0, phase1 = numbers[4:14:2], numbers[5:14:2]          # frames 4 to 12 and 5 to 13
+    output = ring.decode([phase0, phase1])
+    assert output.shape == (3, 4, 2)
+    assert output[:, :, 0].tolist() == [[6.0, 8.0, 10.0, 12.0], [7.0, 9.0, 11.0, 13.0], [7.0, 9.0, 11.0, 13.0]]
+    assert output[:, :, 1].tolist() == [[4.0, 6.0, 8.0, 10.0], [5.0, 7.0, 9.0, 11.0], [5.0, 7.0, 9.0, 11.0]]
+    with pytest.raises(ValueError, match="1 to 3 units a call, not 4"):
+        ring.decode([phase0] * 4)
+
+
+def test_the_transition_ring_refuses_a_unit_whose_transition_was_overwritten():
+    ring = TransitionRing(_identity_halves(2, []), slots=5, phases=1)
+    numbers = [ring.push(torch.full((1, 2, 2), float(index)), 0) for index in range(8)]
+    assert ring.decode([numbers[3:8]])[0, :, 0].tolist() == [4.0, 5.0, 6.0, 7.0]
+    with pytest.raises(RuntimeError, match="lost transition 1"):
+        ring.decode([numbers[1:6]])
+    with pytest.raises(ValueError, match="at least 4 slots"):
+        TransitionRing(_identity_halves(2, []), slots=3, phases=1)
+
+
+def _moved(frame: torch.Tensor, dx: int, dy: int) -> torch.Tensor:
+    """`frame` (3, H, W) as the camera would see it after the picture moved by (dx, dy): the content
+    shifts, the uncovered strip is fresh noise."""
+    out = torch.rand_like(frame)
+    h, w = frame.shape[-2:]
+    out[:, max(0, dy):h + min(0, dy), max(0, dx):w + min(0, dx)] = frame[:, max(0, -dy):h + min(0, -dy), max(0, -dx):w + min(0, -dx)]
+    return out
+
+
+@pytest.mark.parametrize("dx, dy", [(0, 0), (2, -1), (-3, 3), (1, 0)])
+def test_a_pure_translation_leaves_no_difference_once_the_transition_is_aligned(dx, dy):
+    """A textured frame and the same picture moved by a few pixels: the estimate is the move, the
+    aligned previous frame equals the current one everywhere (the uncovered strip is filled from the
+    current frame), so streamnet.transition's two polarity fields are zero; a zero shift keeps the
+    previous frame as it is. Through the ring, the encoder receives the aligned pair."""
+    torch.manual_seed(0)
+    previous = torch.rand(3, 48, 64)
+    frame = _moved(previous, dx, dy)
+    assert ball_gpu.estimate_shift(frame, previous, radius=4) == (dx, dy)
+    aligned = ball_gpu.aligned_previous(frame, previous, (dx, dy))
+    assert torch.equal(aligned, frame) if (dx, dy) != (0, 0) else aligned is previous
+    assert float(torch.relu(frame - aligned).abs().max()) == 0.0 and float(torch.relu(aligned - frame).abs().max()) == 0.0
+    calls = []
+    ring = TransitionRing(_identity_halves(1, calls), slots=4, phases=1, align_radius=4)
+    ring.push(previous, 0)
+    ring.push(frame, 0)
+    frames, before = calls[0]
+    assert torch.equal(frames[0], frame) and torch.equal(before[0], frame if (dx, dy) != (0, 0) else previous)
+
+
+def test_an_unaligned_ring_and_a_zero_radius_pass_the_previous_frame_through():
+    torch.manual_seed(1)
+    previous, frame = torch.rand(3, 48, 64), torch.rand(3, 48, 64)
+    assert ball_gpu.estimate_shift(frame, previous, radius=0) == (0, 0)
+    calls = []
+    ring = TransitionRing(_identity_halves(1, calls), slots=4, phases=1)
+    ring.push(previous, 0)
+    ring.push(frame, 0)
+    assert torch.equal(calls[0][1][0], previous)

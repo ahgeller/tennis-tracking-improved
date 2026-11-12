@@ -34,6 +34,7 @@ SCORE_BREAKDOWN_DEFAULTS: Dict[str, float] = {
     "span": 0.0,                    # frames from first to last observation
     "inside_frac": 0.0,             # near-court: inside polygon or within court_expand_px
     "inside_strict_frac": 0.0,      # strictly inside the court polygon
+    "court_lateral_min_m": 0.0,     # closest it comes to our sidelines, metres (0: no court)
     "motion_overlap": 0.0,          # observations on the boost/motion mask
     "motion_kin_frac": 0.0,         # physics.kinematic_motion_frac estimate
     "motion_evidence": 0.0,         # max(motion_overlap, motion_kin_frac)
@@ -167,8 +168,8 @@ class Track:
 # What decided a frame's position:
 #   'det'    = a detector observation on the selected track
 #   'motion' = a motion blob near the predicted path (bounded correction)
-#   'interp' = a fitted position: bounded fill between anchors, or a detector
-#              point the trajectory refit relocated too far to still call raw
+#   'interp' = a fitted position: a bounded fill between anchors (the refit moves a
+#              detection a few pixels at most, so it stays 'det')
 Source = Literal["det", "motion", "interp"]
 
 # Where a frame's position stands relative to the detector's measurement:

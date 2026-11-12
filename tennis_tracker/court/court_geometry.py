@@ -23,6 +23,8 @@ Point = Tuple[float, float]
 # A side guide: ``base`` is the court corner, ``anchor`` the corner shifted
 # outward by the alley width, ``dir`` the direction of the outer sideline.
 SideGuide = Dict[str, np.ndarray]
+# The doubles corners as ``(far_left, far_right, near_left, near_right)``.
+Corners = Tuple[Point, Point, Point, Point]
 GroundModel = Dict[str, np.ndarray]  # "H_i2c": image -> unit court, "H_c2i": the inverse
 
 # Keypoint indices in the detector's semantic order.
@@ -233,6 +235,54 @@ def build_ground_projection_model(kps: Optional[CourtKeypoints]) -> Optional[Gro
     return {"H_i2c": image_to_court, "H_c2i": court_to_image}
 
 
+def doubles_corners(kps: Optional[CourtKeypoints]) -> Optional[Corners]:
+    """The four doubles corners, keypoints 0-3, or None unless all four are detected and the near
+    baseline lies below the far one.  Nothing else (a hull of the other keypoints) stands in for a
+    missing corner: a guessed corner would put the sidelines in the wrong place."""
+    far_left, far_right, near_left, near_right = (
+        court_keypoint(kps, index, require_finite=True)
+        for index in (KP_FAR_LEFT, KP_FAR_RIGHT, KP_NEAR_LEFT, KP_NEAR_RIGHT)
+    )
+    if far_left is None or far_right is None or near_left is None or near_right is None:
+        return None
+    if (near_left[1] + near_right[1]) - (far_left[1] + far_right[1]) < 2.0:
+        return None
+    return far_left, far_right, near_left, near_right
+
+
+def _x_on_line(top: Point, bottom: Point, row: float) -> float:
+    """The x of the line through two image points at image row ``row``."""
+    if abs(bottom[1] - top[1]) < 1e-6:
+        return 0.5 * (top[0] + bottom[0])
+    return top[0] + (row - top[1]) * (bottom[0] - top[0]) / (bottom[1] - top[1])
+
+
+def sideline_distance_m(corners: Corners, x: float, y: float) -> float:
+    """Metres sideways beyond the nearer doubles sideline at image point ``(x, y)``, 0 between them.
+
+    Read on the point's own image row, and the court there is 10.97 m wide.  A point above a
+    sideline's far corner is read on that corner's row instead, where the sideline ends: seen from
+    behind a baseline a ball in the air stands straight above its ground point, and above the far
+    corner nothing says how far back it is.  For such a point the value understates the distance
+    of a ball over ground beyond the baseline (it errs towards calling the ball ours).  For a ball
+    in the air lower in the picture, its ground point lies on a lower row, where the sidelines
+    spread and the distance shrinks, so the value is an upper bound: judge a whole flight by its
+    smallest value, which its bounces and contacts give.
+    """
+    far_left, far_right, near_left, near_right = corners
+
+    def edges(row: float) -> Tuple[float, float]:
+        return _x_on_line(far_left, near_left, row), _x_on_line(far_right, near_right, row)
+
+    left, right = edges(max(y, far_left[1]))
+    if x < left and right - left > 1.0:
+        return (left - x) * DOUBLES_WIDTH_M / (right - left)
+    left, right = edges(max(y, far_right[1]))
+    if x > right and right - left > 1.0:
+        return (x - right) * DOUBLES_WIDTH_M / (right - left)
+    return 0.0
+
+
 def last_valid_court_keypoints(kps_by_frame: Sequence[Optional[CourtKeypoints]],
                                min_values: int = MIN_KEYPOINT_VALUES) -> Optional[CourtKeypoints]:
     """The latest frame's keypoints that hold at least ``min_values`` values, or None.
@@ -246,27 +296,30 @@ def last_valid_court_keypoints(kps_by_frame: Sequence[Optional[CourtKeypoints]],
     return None
 
 
-def build_court_polygon(all_court_kps: Sequence[Optional[CourtKeypoints]]) -> Tuple[Optional[np.ndarray], Optional[CourtKeypoints]]:
+def build_court_polygon(all_court_kps: Sequence[Optional[CourtKeypoints]],
+                        quiet: bool = False) -> Tuple[Optional[np.ndarray], Optional[CourtKeypoints]]:
     """The court polygon from the last frame with valid keypoints, and those keypoints.
 
     Prefers the ordered four-corner polygon; falls back to the convex hull of
-    every detected point.  Reports what it built on stdout.
+    every detected point.  Reports what it built on stdout unless `quiet` (a live stream
+    rebuilds it at every court refresh).
     """
+    report = (lambda _message: None) if quiet else print
     last_kps = last_valid_court_keypoints(all_court_kps)
     if last_kps is None:
-        print("[court polygon] No court keypoints found")
+        report("[court polygon] No court keypoints found")
         return None, None
 
     court_poly = build_ordered_court_polygon(last_kps)
     if court_poly is not None:
         tl, bl, br, tr = (court_poly[i, 0].tolist() for i in range(4))
-        print(f"[court polygon] Ordered corners [0,2,3,1]: TL={tl}, BL={bl}, BR={br}, TR={tr}")
+        report(f"[court polygon] Ordered corners [0,2,3,1]: TL={tl}, BL={bl}, BR={br}, TR={tr}")
         bx, by, bw, bh = cv2.boundingRect(court_poly)
-        print(f"[court polygon] bbox=({bx},{by},{bw}x{bh})")
+        report(f"[court polygon] bbox=({bx},{by},{bw}x{bh})")
         test_cx = bx + bw / 2.0
         test_cy = by + bh / 2.0
         test_dist = cv2.pointPolygonTest(court_poly, (test_cx, test_cy), True)
-        print(f"[court polygon] Center ({test_cx:.0f},{test_cy:.0f}) dist={test_dist:.1f} (positive=inside)")
+        report(f"[court polygon] Center ({test_cx:.0f},{test_cy:.0f}) dist={test_dist:.1f} (positive=inside)")
         return court_poly, last_kps
 
     pts = [
@@ -277,8 +330,8 @@ def build_court_polygon(all_court_kps: Sequence[Optional[CourtKeypoints]]) -> Tu
     if len(pts) >= 4:
         court_poly = cv2.convexHull(np.array(pts, dtype=np.float32).reshape(-1, 1, 2))
         bx, by, bw, bh = cv2.boundingRect(court_poly)
-        print(f"[court polygon] Fallback hull ({len(pts)} points), bbox=({bx},{by},{bw}x{bh})")
+        report(f"[court polygon] Fallback hull ({len(pts)} points), bbox=({bx},{by},{bw}x{bh})")
         return court_poly, last_kps
 
-    print(f"[court polygon] Not enough valid points ({len(pts)}), skipping")
+    report(f"[court polygon] Not enough valid points ({len(pts)}), skipping")
     return None, last_kps

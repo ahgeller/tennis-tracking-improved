@@ -1,11 +1,17 @@
 """clean_tracker.main: the command line becomes a Config; run() and the self-test are patched out."""
 import os
 from unittest.mock import Mock, patch
+from pathlib import Path
 
 import pytest
 
 import clean_tracker
 from clean_tracker import resolve_output_paths
+from tennis_tracker.ball_weights import HEATMAP_S4_WEIGHTS, STREAM_S4_E60_WEIGHTS, STREAM_S4_WEIGHTS, UNKNOWN_CONF
+from tennis_tracker.config import Config
+from tennis_tracker.paths import BALL_WEIGHTS, STREAM_PEAK_WEIGHTS, STREAM_WEIGHTS
+
+STREAM_CONF, HEATMAP_CONF = STREAM_S4_WEIGHTS.conf, HEATMAP_S4_WEIGHTS.conf
 
 
 def _run_main(tmp_path, argv):
@@ -26,19 +32,45 @@ def test_cli_paths_reach_the_config_and_the_output_folder_is_made(tmp_path):
     assert status == 0                                             # no --annotations: nothing to validate
     assert cfg.input_video == str((tmp_path / "in.mp4").resolve())
     assert cfg.tracking_json == str((tmp_path / "t.json").resolve())
-    assert cfg.model_path.endswith("ball_detector.pt")
+    assert cfg.model_path.endswith("stream_s4_fg1_e46_peakhead.pt")
     assert (tmp_path / "out").is_dir()
 
 
-def test_weights_default_to_the_bundled_heatmapnet_and_another_path_reaches_the_config_as_given(tmp_path):
-    """--weights feeds Config.model_path, whose suffix picks the detector: the default is the
-    bundled HeatmapNet file, and another path is passed through unchanged."""
-    from tennis_tracker.paths import BALL_WEIGHTS
+def test_weights_default_to_stream_s4_and_another_path_reaches_the_config_as_given(tmp_path):
+    """--weights feeds Config.model_path, whose record picks the detector: the default is the
+    stream_s4 file with the visibility head, and another path is passed through unchanged. The
+    visibility gate follows the weights as the threshold does: the default file's own (0.40), off
+    for any other, and --visibility-gate overrides either."""
+    assert BALL_WEIGHTS == STREAM_PEAK_WEIGHTS
     assert clean_tracker._parser().get_default("weights") == str(BALL_WEIGHTS)
     _, cfg = _run_main(tmp_path, ["--weights", "runs/h1/best.pt", "--no-video"])
-    assert cfg.model_path == "runs/h1/best.pt"
+    assert cfg.model_path == "runs/h1/best.pt" and cfg.ball_visibility_gate == 0.0
     _, cfg = _run_main(tmp_path, ["--no-video"])
-    assert cfg.model_path == str(BALL_WEIGHTS)
+    assert cfg.model_path == str(BALL_WEIGHTS) and cfg.ball_visibility_gate == 0.40
+    _, cfg = _run_main(tmp_path, ["--no-video", "--visibility-gate", "0"])
+    assert cfg.ball_visibility_gate == 0.0
+    _, cfg = _run_main(tmp_path, ["--weights", str(STREAM_WEIGHTS), "--no-video"])
+    assert cfg.ball_visibility_gate == 0.0
+    _, cfg = _run_main(tmp_path, ["--weights", "runs/h1/peak.pt", "--visibility-gate", "0.3", "--no-video"])
+    assert cfg.ball_visibility_gate == 0.3
+
+
+@pytest.mark.parametrize("argv, conf", [
+    ([], STREAM_CONF),                                                      # the default, stream_s4
+    (["--weights", "models/candidates/stream_s4_fg1_e46.pt"], STREAM_CONF),         # named, relative to system/
+    (["--weights", "models/candidates/stream_s4_e60.pt"], STREAM_S4_E60_WEIGHTS.conf),  # the previous default, at its own threshold
+    (["--weights", "models/ball_detector.pt"], HEATMAP_CONF),               # the heat-map network
+    (["--weights", "runs/h1/best.pt"], UNKNOWN_CONF),                       # weights the table does not know
+    (["--weights", "models/ball_detector.pt", "--conf", "0.40"], 0.40),     # explicit
+    (["--conf", "0.40"], 0.40),                                             # stream_s4 at another threshold
+    (["--weights", "models/ball_detector.pt", "--conf", "0.55"], 0.55),
+])
+def test_the_threshold_follows_the_weights_unless_conf_is_given(tmp_path, monkeypatch, argv, conf):
+    """Without --conf the threshold is the one the named weights were gated at (ball_weights);
+    --conf overrides it for any weights."""
+    monkeypatch.chdir(clean_tracker.ROOT)
+    _, cfg = _run_main(tmp_path, [*argv, "--no-video"])
+    assert cfg.conf == conf
 
 
 def test_cli_flags_reach_the_config(tmp_path):
@@ -54,13 +86,20 @@ def test_cli_flags_reach_the_config(tmp_path):
     assert cfg.save_track_debug_video is False                             # ... without the track-debug video
 
 
+def test_players_run_every_other_frame_at_60_fps_unless_the_flag_asks_for_every_frame(tmp_path):
+    _, cfg = _run_main(tmp_path, ["--no-video"])
+    assert cfg.player_every_other_frame_fps == Config().player_every_other_frame_fps > 0.0
+    _, cfg = _run_main(tmp_path, ["--no-video", "--players-every-frame"])
+    assert cfg.player_every_other_frame_fps == 0.0
+
+
 def test_cli_defaults(tmp_path):
     run = Mock()
     with patch.object(clean_tracker, "run", run), patch.object(clean_tracker, "OUTPUT", tmp_path):
         assert clean_tracker.main([]) == 0
     cfg = run.call_args.args[0]
     assert cfg.save_tracking_video is True
-    assert cfg.conf == 0.4
+    assert cfg.conf == STREAM_CONF
     assert cfg.draw_court_minimap is False and cfg.court_events is False and cfg.info_timing is False
     assert cfg.show_all_tracks is False
     assert cfg.input_video.endswith("pomona.mp4")
@@ -129,3 +168,34 @@ def test_failed_self_test_reports_its_status(capsys):
     with patch.object(clean_tracker, "_self_test", return_value=1):
         assert clean_tracker.main(["--self-test"]) == 1
     assert "passed" not in capsys.readouterr().out
+
+
+def test_the_live_flags_reach_the_live_tracker(tmp_path):
+    """--live (or --camera) runs the live tracker with the options asked for, and writes no video."""
+    from tennis_tracker.live.source import DropPolicy
+    run_live = Mock()
+    with patch.object(clean_tracker, "run_live", run_live), patch.object(clean_tracker, "run") as run, \
+         patch.object(clean_tracker, "OUTPUT", tmp_path / "out"):
+        assert clean_tracker.main(["-i", str(tmp_path / "in.mp4"), "--live", "--pace", "fast", "--live-delay", "1.5",
+                                   "--live-history", "3", "--live-every", "0.2", "--live-drop", "never",
+                                   "--record-evidence", "--live-selector-inline"]) == 0
+        assert clean_tracker.main(["--camera", "1", "--live-delay", "clip"]) == 0
+    assert run.call_count == 0 and run_live.call_count == 2
+    (cfg, options), (_, camera) = run_live.call_args_list[0].args, run_live.call_args_list[1].args
+    assert not cfg.save_tracking_video
+    assert (options.pacing, options.delay_s, options.history_s, options.every_s) == ("fast", 1.5, 3.0, 0.2)
+    assert options.drop is DropPolicy.NEVER and options.record_evidence and not options.selector_process
+    assert camera.camera == 1 and camera.delay_s is None and camera.selector_process
+
+
+def test_a_camera_run_writes_its_own_json_and_is_never_paced_fast(tmp_path, capsys):
+    """A camera's JSON does not go over a file run's default one; --pace fast with a camera is refused."""
+    run_live = Mock()
+    with patch.object(clean_tracker, "run_live", run_live), patch.object(clean_tracker, "OUTPUT", tmp_path / "out"):
+        assert clean_tracker.main(["--camera", "2", "--camera-fps", "59.94"]) == 0
+        cfg, options = run_live.call_args.args
+        assert Path(cfg.tracking_json) == tmp_path / "out" / f"camera2_live{clean_tracker.TRACKING_JSON_SUFFIX}"
+        assert options.camera_fps == 59.94
+        with pytest.raises(SystemExit):
+            clean_tracker.main(["--camera", "0", "--pace", "fast"])
+    assert "a camera is realtime" in capsys.readouterr().err

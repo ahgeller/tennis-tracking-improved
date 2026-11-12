@@ -4,7 +4,8 @@ These were the selector half of ``clean_tracker.py --self-test``. Several
 fixtures reproduce measured tracks from real clips (noted per test); keep their
 numbers and expectations as they are: they are regressions, not tunable values.
 """
-from typing import List, Tuple
+import math
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -16,7 +17,8 @@ from ball_in_play_selector.core import (
     selected_tracks,
     trajectory_observations,
 )
-from ball_in_play_selector.scoring import select_timeline_chain, stitch_track_chain
+from ball_in_play_selector.scoring import adopt_fragments, score_tracks, select_timeline_chain, stitch_track_chain
+from tennis_tracker.court.court_geometry import build_ordered_court_polygon, doubles_corners, sideline_distance_m
 
 FRAME_SHAPE = (360, 640)
 WIDTH, HEIGHT = FRAME_SHAPE[1], FRAME_SHAPE[0]
@@ -102,6 +104,36 @@ def test_first_internal_gap_is_filled_between_real_endpoints():
     assert results[1] is not None and results[2] is not None
 
 
+def test_a_hole_without_motion_is_bridged_only_for_one_detector_step():
+    # Without a blob, one missing step is the ball's line through a racket, the net or a bounce;
+    # two missing steps at 30 FPS are a guess, which on the non-held-out clips landed on more
+    # invisible labels than visible ones (audit/records/opt_picker_rules.md), so they stay empty.
+    detections, masks = _moving_ball(16)
+    for holes, filled in (((5,), True), ((5, 6), False)):
+        rows = [[] if frame in holes else row for frame, row in enumerate(detections)]
+        blank = [_empty_mask() if frame in holes else mask for frame, mask in enumerate(masks)]
+        results, _, _ = select_ball_in_play(rows, 30.0, WIDTH, HEIGHT, boost_masks=blank, raw_motions=blank)
+        assert all((results[frame] is not None) == filled for frame in holes), holes
+        assert all(results[frame].source == "interp" for frame in holes if filled)
+
+
+def test_two_missing_frames_at_60fps_are_one_detector_step():
+    detections, masks = _moving_ball(24)
+    rows = [[] if frame in (9, 10) else row for frame, row in enumerate(detections)]
+    blank = [_empty_mask() if frame in (9, 10) else mask for frame, mask in enumerate(masks)]
+    results, _, _ = select_ball_in_play(rows, 60.0, WIDTH, HEIGHT, boost_masks=blank, raw_motions=blank)
+    assert results[9] is not None and results[10] is not None
+
+
+def test_three_missing_frames_at_60fps_without_a_blob_stay_empty():
+    detections, masks = _moving_ball(24)
+    rows = [[] if frame in (9, 10, 11) else row for frame, row in enumerate(detections)]
+    blank = [_empty_mask() if frame in (9, 10, 11) else mask for frame, mask in enumerate(masks)]
+    results, _, _ = select_ball_in_play(rows, 60.0, WIDTH, HEIGHT, boost_masks=blank, raw_motions=blank)
+    assert results[8] is not None and results[12] is not None
+    assert all(results[frame] is None for frame in (9, 10, 11))
+
+
 def test_motion_backed_odd_frames_beside_a_player_are_kept_at_60fps():
     # At 60 FPS, a motion-backed frame between two sampled detections remains
     # usable beside a player; unobserved near-player gaps stay conservative.
@@ -140,20 +172,48 @@ def test_direction_cosine_of_straight_and_reversed_paths():
     assert direction_cosine(*straight) == -1.0
 
 
-def test_refit_repairs_a_target_switch_and_relabels_the_moved_detections():
-    # The robust refit repairs a short target-switch block. The repair itself is
-    # unbounded, but a detection dragged that far is no longer where the detector
-    # fired, so it stops being reported as one: green in the overlay and scored
-    # against the detector both mean "raw observation".
+def test_refit_keeps_a_short_excursion_where_the_detector_put_it():
+    # A 1-2 frame excursion off the local fit is far more often the ball at a bounce or a
+    # contact than the detector on another object (the non-held-out clips, 2026-10-30), so the
+    # refit moves it no further than any detection and it stays a detection; the
+    # excursion barely weighs on its neighbours, which keep their line.
     smooth = [
         FrameResult(cx=float(frame * 10), cy=100.0, conf=0.9, source="det")
         for frame in range(15)
     ]
     smooth[7].cy = smooth[8].cy = 180.0
     refine_trajectory(smooth, 734.0)
-    assert max(abs(smooth[frame].cy - 100.0) for frame in (7, 8)) < 10.0
-    assert all(smooth[frame].source == "interp" for frame in (7, 8))
-    assert all(smooth[frame].source == "det" for frame in range(15) if frame not in (7, 8))
+    assert all(abs(smooth[frame].cy - 180.0) <= 3.0 + 1e-9 for frame in (7, 8))
+    assert all(abs(smooth[frame].cy - 100.0) < 1.0 for frame in range(15) if frame not in (7, 8))
+    assert all(result.source == "det" for result in smooth)
+    assert smooth[7].measurement == (70.0, 180.0)
+
+
+def test_refit_holds_a_weak_detection_as_close_as_a_strong_one():
+    # A detection under 0.55 used to take the fill's 12 px bound and was dragged 10 to 18 px off
+    # the ball (mixed_v1, 2026-11-11); whatever its confidence a detection now moves at most 3 px.
+    path = [
+        FrameResult(cx=float(frame * 10), cy=100.0, conf=0.9, source="det")
+        for frame in range(15)
+    ]
+    path[7].cy, path[7].conf = 111.0, 0.45
+    refine_trajectory(path, 734.0)
+    assert abs(path[7].cy - 111.0) <= 3.0 + 1e-9 and path[7].source == "det"
+
+
+def test_refit_never_moves_a_bounce_vertex_off_its_detection():
+    # A one-frame vertex 40 px off its neighbours' line (a bounce or a contact the local fit
+    # cannot follow, too short to split the run at a kink): the old unbounded spike move pulled it
+    # 12 px towards the line; now every strong detection stays within 3 px of where it was seen.
+    line = [
+        FrameResult(cx=float(frame * 20), cy=100.0 + 3.0 * frame, conf=0.9, source="det")
+        for frame in range(21)
+    ]
+    line[10].cy += 40.0
+    raw = [(item.cx, item.cy) for item in line]
+    refine_trajectory(line, 734.0)
+    assert all(math.hypot(item.cx - x, item.cy - y) <= 3.0 + 1e-9 for item, (x, y) in zip(line, raw))
+    assert all(item.source == "det" for item in line)
 
 
 def test_subpixel_refit_does_not_relabel_detections():
@@ -165,6 +225,17 @@ def test_subpixel_refit_does_not_relabel_detections():
     nudged[7].cy = 103.0
     refine_trajectory(nudged, 734.0)
     assert all(result.source == "det" for result in nudged)
+
+
+def test_detections_already_on_their_line_stay_measurements():
+    # A fit that lands on a point to within floating-point noise leaves it where the detector put
+    # it, so position_kind does not depend on the BLAS build.
+    line = [
+        FrameResult(cx=37.1 + frame * 11.3, cy=200.7 - frame * 3.9, conf=0.9, source="det")
+        for frame in range(15)
+    ]
+    refine_trajectory(line, 734.0)
+    assert all(result.position_kind == "measurement" for result in line)
 
 
 def test_one_motion_hit_after_loss_supports_one_point_not_a_tail():
@@ -236,7 +307,7 @@ def _point_track(track_id, points, score, cfg):
 
 
 def test_disjoint_continuity_is_decided_at_the_start_edge():
-    # Pins scoring._add_disjoint_tracks.continuous as it behaves today: the
+    # Pins scoring._meets_chain (the continuity test of _add_disjoint_tracks) as it behaves today: the
     # chain observation nearest in time to the candidate's FIRST observation
     # decides, and the last observation is never consulted when one exists.
     # A candidate whose start sits far from the chain but whose end meets it
@@ -253,6 +324,37 @@ def test_disjoint_continuity_is_decided_at_the_start_edge():
     )
     assert [track.track_id for track in select_timeline_chain([outer, near_end], chain_cfg, 200)] == [5]
     assert [track.track_id for track in select_timeline_chain([outer, near_start], chain_cfg, 200)] == [5, 7]
+
+
+def test_a_confident_fragment_beside_the_chain_is_adopted():
+    # The association breaks a true ball off the rally at a bounce or a contact; the fragment is too
+    # short for selected_tracks and its frames used to go unanswered. It is adopted when one of its
+    # ends meets the chain, and only then: not a far one, a weak one, one beside another court, or
+    # one inside a chain track's span.
+    cfg = _cfg(30.0)
+    rally = _line_track(5, list(range(0, 40)), 100.0, 50.0, cfg)                 # x = 100 + frame
+
+    def fragment(track_id, frames, x_offset, conf=0.9):
+        track = _line_track(track_id, frames, x_offset, 0.0, cfg)
+        for obs in track.observations:
+            obs.conf = conf
+        return track
+
+    near = fragment(6, [41, 42, 43], 100.0)
+    one_end = _point_track(7, [(41, 141.0), (42, 500.0), (43, 900.0)], 0.0, cfg)  # the far end faces nothing
+    far = fragment(8, [41, 42, 43], 900.0)
+    weak = fragment(9, [41, 42, 43], 100.0, conf=0.45)
+    beside = fragment(10, [41, 42, 43], 100.0)
+    beside.selection = {"off_court": True}
+    inside = fragment(11, [20, 21], 100.0)
+
+    def adopted(*others):
+        return [track.track_id for track in adopt_fragments([rally], [rally, *others], cfg, 200)]
+
+    assert adopted(near) == [5, 6] and adopted(one_end) == [5, 7]
+    assert adopted(far) == adopted(weak) == adopted(beside) == adopted(inside) == [5]
+    assert adopted(near, far, weak) == [5, 6]
+    assert adopt_fragments([], [near], cfg, 200) == []                        # no chain, nothing to join
 
 
 def test_weak_endpoint_without_motion_creates_no_interpolation():
@@ -485,7 +587,7 @@ def test_the_selection_verdicts_and_the_timeline_are_recorded_and_exported():
     detections, masks = _moving_ball()
     results, chosen, tracks = select_ball_in_play(detections, 30.0, WIDTH, HEIGHT, boost_masks=masks)
     [track] = tracks
-    assert set(track.selection) == {"established", "reacquired", "airborne", "rolling"}
+    assert set(track.selection) == {"established", "reacquired", "airborne", "rolling", "off_court"}
     assert track.selection["established"] and track.in_timeline
     assert all(row.track_id == track.track_id for row in results if row is not None and row.source == "det")
 
@@ -527,3 +629,120 @@ def test_speed_reference_is_the_last_same_phase_observation():
     assert _speed_reference(observations, 14, 1).frame == 13
     assert _speed_reference(_observations([11, 13]), 14, 2).frame == 13
     assert _speed_reference(_observations([10, 11, 13, 15, 17]), 18, 2).frame == 17
+
+
+# The VolyAvw court (sample/VolyAvw-cut-merged-1771797159395.mp4, its last valid keypoints):
+# the doubles corners far left, far right, near left, near right, then the singles corners.
+_VOLY_KEYPOINTS = [787.5, 199.3, 1182.0, 197.9, 201.0, 632.8, 1827.0, 631.5,
+                   830.0, 199.0, 1140.0, 198.0, 420.0, 632.0, 1610.0, 631.0]
+
+
+def _flight(points: List[Tuple[float, float]], first_frame: int, steps: int) -> List[List[Detection]]:
+    """Confident on-mask detections moving linearly through ``points``, ``steps`` frames per leg."""
+    rows: List[List[Detection]] = []
+    frame = first_frame
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        for step in range(steps):
+            x = x0 + (x1 - x0) * step / steps
+            y = y0 + (y1 - y0) * step / steps
+            rows.append([Detection(frame, x, y, x - 3, y - 3, x + 3, y + 3, 0.9, 36.0, True)])
+            frame += 1
+    return rows
+
+
+def _scored_at_volyavw(*flights: List[List[Detection]], court: Optional[List[float]] = None,
+                       court_by_frame: Optional[List[List[float]]] = None) -> List[Track]:
+    """The flights' tracks scored as the pipeline scores them, every frame showing ``court`` (the
+    VolyAvw court by default) unless ``court_by_frame`` gives each frame's; the court polygon is
+    the VolyAvw one either way."""
+    cfg = _cfg(60.0, HD_WIDTH, HD_HEIGHT)
+    total = max(row[0].frame for flight in flights for row in flight) + 1
+    rows: List[List[Detection]] = [[] for _ in range(total)]
+    for flight in flights:
+        for row in flight:
+            rows[row[0].frame] += row
+    keypoints = court_by_frame or [court or _VOLY_KEYPOINTS] * total
+    return score_tracks(build_tracks(rows, cfg), cfg, court_poly=build_ordered_court_polygon(_VOLY_KEYPOINTS),
+                        total_frames=total, court_keypoints_by_frame=keypoints)
+
+
+_NEIGHBOUR = [(1673.0, 126.0), (1515.0, 208.0), (1497.0, 140.0)]
+
+
+def test_a_ball_on_the_neighbouring_court_is_not_selected():
+    # The measured stream_s4 track 22 on VolyAvw (frames 2772-2865): a ball bouncing on the
+    # court to the right, 8.7 m and more beyond our right sideline. The near-court score term
+    # gave it 0.86 (its margin reaches the next court; 0.77 for this sketch of it) and the
+    # chain chose it between two of our rallies; on our court the server was bouncing her ball.
+    [neighbour] = _scored_at_volyavw(_flight(_NEIGHBOUR, 0, 30))
+    assert neighbour.score_value("inside_frac") > 0.7
+    assert neighbour.score_value("court_lateral_min_m") > 8.0
+    assert neighbour not in selected_tracks([neighbour])
+    assert neighbour.selection["established"] and neighbour.selection["off_court"]
+
+
+def test_our_balls_beside_and_above_the_court_stay_selected():
+    # A high ball over the far end that never comes below the far baseline in the picture
+    # (the labelled PomonaPitzer ball of frames 2012-2097, strictly inside 0% of the time), and
+    # a ball hit wide that flies out 5 m beyond our left sideline: each has a point near our
+    # lines, so neither is another court's.
+    high = _flight([(978.0, 175.0), (1000.0, 98.0), (1027.0, 160.0)], 0, 30)
+    wide = _flight([(700.0, 300.0), (300.0, 340.0), (20.0, 500.0)], 200, 30)
+    tracks = _scored_at_volyavw(high, wide)
+    assert len(tracks) == 2
+    assert all(track.score_value("court_lateral_min_m") < 1.0 for track in tracks)
+    assert {track.first_frame for track in selected_tracks(tracks)} == {0, 200}
+
+
+def test_each_observation_is_measured_against_its_own_frames_court():
+    # The camera reframes halfway: the second half's court lies 1200 px to the right. A ball on
+    # our court in the first half is ours whatever the clip's last court says, and frames
+    # without keypoints of their own fall back to the last valid ones.
+    shifted = [value + 1200.0 if index % 2 == 0 else value for index, value in enumerate(_VOLY_KEYPOINTS)]
+    ours = _flight([(1000.0, 400.0), (1100.0, 300.0), (1150.0, 400.0)], 0, 30)
+    frames = len(ours) + 60
+    [track] = _scored_at_volyavw(ours, court_by_frame=[_VOLY_KEYPOINTS] * 60 + [shifted] * 60)
+    assert track.score_value("court_lateral_min_m") == 0.0 and track in selected_tracks([track])
+    [track] = _scored_at_volyavw(ours, court_by_frame=[[0.0] * 16] * 60 + [shifted] * (frames - 60))
+    assert track.score_value("court_lateral_min_m") > 3.0
+
+
+def test_a_court_missing_a_corner_vetoes_nothing():
+    # Without the far-left corner the court polygon falls back to a hull of the other keypoints,
+    # often four-sided too; read as corners it put a ball 1.6 m out at 3.1 m. Only keypoints 0-3
+    # are corners, and with one missing the track is not measured.
+    missing = [0.0, 0.0] + _VOLY_KEYPOINTS[2:]
+    assert doubles_corners(missing) is None
+    [neighbour] = _scored_at_volyavw(_flight(_NEIGHBOUR, 0, 30), court=missing)
+    assert neighbour.score_value("court_lateral_min_m") == 0.0
+    assert neighbour in selected_tracks([neighbour])
+
+
+def test_lateral_distance_is_read_on_the_ball_row_or_the_far_corner_row():
+    corners = doubles_corners(_VOLY_KEYPOINTS)
+    assert corners is not None
+    assert sideline_distance_m(corners, 1000.0, 400.0) == 0.0
+    # On the near baseline the court is 1626 px wide: 148 px a metre.
+    assert abs(sideline_distance_m(corners, 1827.0 + 148.2, 632.0) - 1.0) < 0.01
+    # Above the far right corner, that corner's row (395 px wide, 36 px a metre) is used.
+    assert sideline_distance_m(corners, 1218.0, 60.0) == sideline_distance_m(corners, 1218.0, 197.9)
+    assert abs(sideline_distance_m(corners, 1218.0, 60.0) - 1.0) < 0.05
+
+
+def test_a_tilted_far_baseline_is_read_on_each_sidelines_own_far_corner():
+    # The far right corner sits 100 px below the far left one. A ball 100 px right of the far
+    # right corner, halfway up the tilt, is read on that corner's row, where the court is 523 px
+    # wide (2.10 m); the mean far row put the sideline's extension above the corner (4.11 m).
+    corners = doubles_corners([700.0, 150.0, 1150.0, 250.0, 300.0, 700.0, 1600.0, 700.0])
+    assert corners is not None
+    assert abs(sideline_distance_m(corners, 1250.0, 200.0) - 100.0 * 10.97 / (1150.0 - 627.27)) < 0.01
+    assert sideline_distance_m(corners, 1250.0, 200.0) == sideline_distance_m(corners, 1250.0, 250.0)
+
+
+def test_without_court_keypoints_no_track_is_called_off_court():
+    cfg = _cfg(60.0, HD_WIDTH, HD_HEIGHT)
+    rows = _flight(_NEIGHBOUR, 0, 30)
+    [track] = score_tracks(build_tracks(rows, cfg), cfg, court_poly=build_ordered_court_polygon(_VOLY_KEYPOINTS),
+                           total_frames=len(rows))
+    assert track.score_value("court_lateral_min_m") == 0.0
+    assert track in selected_tracks([track])

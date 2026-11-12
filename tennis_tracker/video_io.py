@@ -5,7 +5,7 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
-from typing import List, Optional, Protocol, Tuple, Union
+from typing import Any, List, Optional, Protocol, Tuple, Union
 
 import cv2
 import numpy as np
@@ -66,37 +66,92 @@ def check_writable_video_path(path: Union[str, Path], label: str = "Video output
         raise ValueError(f"{label} {target} cannot be written: {nearest or target.anchor} is not a directory")
 
 
-class PinnedFrameUploader:
-    """Pinned host staging for faster/non-blocking H2D frame uploads."""
+_UPLOAD_SLOTS = 3
+# OpenCV's luma weights in BGR order: the gray plane the temporal motion gate compares.
+BGR_TO_GRAY = (0.114, 0.587, 0.299)
 
-    def __init__(self, h: int, w: int, device: torch.device):
+
+def pinned_source(frame: np.ndarray) -> Optional[torch.Tensor]:
+    """The pinned tensor `frame` was decoded into (``ThreadedFrameReader(pinned_shape=...)``), when
+    it is one: the uploader copies from it straight to the device. Else None."""
+    base = frame.base
+    if (isinstance(base, torch.Tensor) and base.is_pinned() and tuple(base.shape) == frame.shape
+            and base.data_ptr() == frame.ctypes.data):
+        return base
+    return None
+
+
+class PinnedFrameUploader:
+    """Uploads decoded BGR frames through pinned host buffers.
+
+    The frame goes to the GPU as it was decoded, HWC uint8: a quarter of the
+    bytes of the float32 frame the GPU works on, which ``hwc_u8_to_chw_f32``
+    then makes there.  The copy is asynchronous (``non_blocking`` from pinned
+    memory), so the host only waits when it is about to refill a pinned
+    buffer whose copy, ``_UPLOAD_SLOTS`` uploads ago, has not finished.
+    Converting on the host first, as ``.to(device, dtype=float32)`` from a
+    uint8 array does, cost 0.7 ms a 1080p frame on the CPU and turned the
+    copy into a synchronous one from pageable memory (the review's profile).
+    """
+
+    def __init__(self, h: int, w: int, device: torch.device, slots: int = _UPLOAD_SLOTS):
         self.h = int(h)
         self.w = int(w)
         self.device = device
         self._slot = 0
         self._pinned_u8 = [
             torch.empty((self.h, self.w, 3), dtype=torch.uint8, pin_memory=True)
-            for _ in range(2)
+            for _ in range(max(1, int(slots)))
         ]
         self._pinned_np = [t.numpy() for t in self._pinned_u8]
-        self._copy_done: List[Optional[torch.cuda.Event]] = [None, None]
+        self._copy_done: List[Optional[torch.cuda.Event]] = [None] * len(self._pinned_u8)
 
     @torch.no_grad()
-    def upload_chw_f32(self, frame_bgr: np.ndarray) -> torch.Tensor:
+    def upload_hwc_u8(self, frame_bgr: np.ndarray) -> torch.Tensor:
+        """``frame_bgr`` as an HWC uint8 tensor on the device; the copy may still be in flight
+        (it is ordered before any later work on the current stream)."""
         if frame_bgr.shape[0] != self.h or frame_bgr.shape[1] != self.w or frame_bgr.shape[2] != 3:
-            return torch.from_numpy(frame_bgr).to(
-                device=self.device, dtype=torch.float32
-            ).permute(2, 0, 1).contiguous() / 255.0
+            return torch.from_numpy(np.ascontiguousarray(frame_bgr)).to(device=self.device)
+        t = torch.empty((self.h, self.w, 3), dtype=torch.uint8, device=self.device)
+        self.upload_into(frame_bgr, t)
+        return t
+
+    @torch.no_grad()
+    def upload_into(self, frame_bgr: np.ndarray, target: torch.Tensor) -> None:
+        """Copy ``frame_bgr`` (this uploader's size) into the HWC uint8 device tensor ``target``
+        through a pinned buffer (the frame's own when it was decoded into one); the copy is ordered
+        on the current stream and may still be in flight."""
+        source = pinned_source(frame_bgr)
+        if source is not None:
+            # PyTorch's host allocator keeps the buffer from reuse until this copy is done.
+            target.copy_(source, non_blocking=True)
+            return
         slot = self._slot
         self._slot = (self._slot + 1) % len(self._pinned_u8)
-        if self._copy_done[slot] is not None:
-            self._copy_done[slot].synchronize()
+        done = self._copy_done[slot]
+        if done is not None:
+            done.synchronize()
         np.copyto(self._pinned_np[slot], frame_bgr)
-        t = self._pinned_u8[slot].to(device=self.device, dtype=torch.float32, non_blocking=True)
+        target.copy_(self._pinned_u8[slot], non_blocking=True)
         done = torch.cuda.Event(blocking=False)
         done.record(torch.cuda.current_stream(device=self.device))
         self._copy_done[slot] = done
-        return t.permute(2, 0, 1).contiguous() / 255.0
+
+    def upload_chw_f32(self, frame_bgr: np.ndarray) -> torch.Tensor:
+        return hwc_u8_to_chw_f32(self.upload_hwc_u8(frame_bgr))
+
+
+@torch.no_grad()
+def hwc_u8_to_chw_f32(frame_u8: torch.Tensor) -> torch.Tensor:
+    """An HWC uint8 frame as a contiguous CHW float32 tensor in [0, 1] on its own device.
+
+    One kernel converts and transposes; ``div_(255.0)`` is the same division the old
+    host-converted path did (``/ 255.0`` on the device), so the values are bit-identical.
+    """
+    h, w, c = (int(n) for n in frame_u8.shape)
+    out = torch.empty((c, h, w), dtype=torch.float32, device=frame_u8.device)
+    out.copy_(frame_u8.permute(2, 0, 1))
+    return out.div_(255.0)
 
 
 @torch.no_grad()
@@ -105,9 +160,30 @@ def cuda_frame_to_chw_f32(frame_bgr: np.ndarray, device: torch.device,
     """Upload one BGR frame once as CHW float32 in [0,1] on CUDA."""
     if uploader is not None:
         return uploader.upload_chw_f32(frame_bgr)
-    return torch.from_numpy(frame_bgr).to(
-        device=device, dtype=torch.float32
-    ).permute(2, 0, 1).contiguous() / 255.0
+    return hwc_u8_to_chw_f32(torch.from_numpy(np.ascontiguousarray(frame_bgr)).to(device=device))
+
+
+@torch.no_grad()
+def cuda_frame_planes(chw: torch.Tensor) -> torch.Tensor:
+    """The motion planes of a CHW BGR float frame in [0, 1]: one ``(3, H, W)`` tensor holding
+    gray (OpenCV's luma weights), HSV value and HSV saturation, in that order.
+
+    The arithmetic is the one the motion code always used, op for op (gray as
+    ``b*wb + g*wg + r*wr``, saturation as ``(max - min) / (max + 1e-6)`` where
+    ``max > 1e-6``), so every value is bit-identical; computing the gray plane
+    once per frame here replaces four recomputations in the temporal gate.
+    """
+    planes = torch.empty((3,) + tuple(chw.shape[1:]), dtype=chw.dtype, device=chw.device)
+    gray, maxc, sat = planes[0], planes[1], planes[2]
+    wb, wg, wr = BGR_TO_GRAY
+    torch.mul(chw[0], wb, out=gray)
+    gray.add_(chw[1] * wg)
+    gray.add_(chw[2] * wr)
+    torch.amax(chw, dim=0, out=maxc)
+    minc = torch.amin(chw, dim=0)
+    torch.div(maxc - minc, maxc + 1e-6, out=sat)
+    sat.masked_fill_(maxc <= 1e-6, 0.0)
+    return planes
 
 
 @torch.no_grad()
@@ -121,10 +197,8 @@ def cuda_vs_tensors(frame_bgr: Optional[np.ndarray], device: torch.device,
         if frame_bgr is None:
             raise ValueError("frame_bgr is required when gpu_tensor is None")
         t = cuda_frame_to_chw_f32(frame_bgr, device)
-    maxc = torch.max(t, dim=0).values
-    minc = torch.min(t, dim=0).values
-    s = torch.where(maxc > 1e-6, (maxc - minc) / (maxc + 1e-6), torch.zeros_like(maxc))
-    return maxc, s
+    planes = cuda_frame_planes(t)
+    return planes[1], planes[2]
 
 
 def ffmpeg_command(ffmpeg: str, encoder: str, w: int, h: int, fps: float, path: str,
@@ -319,6 +393,15 @@ def _close_pipes(proc: subprocess.Popen) -> None:
             pipe.close()
 
 
+class FrameCapture(Protocol):
+    """What ``ThreadedFrameReader`` reads from: ``cv2.VideoCapture`` or a ``video_decode`` decoder.
+    ``read`` may decode into ``image`` (OpenCV does when its shape and type fit) or ignore it."""
+
+    def read(self, image: Optional[np.ndarray] = None) -> Tuple[bool, Any]: ...
+
+    def release(self) -> None: ...
+
+
 class ThreadedFrameReader:
     """Prefetch frames in a background thread to overlap decode with GPU work.
 
@@ -331,8 +414,9 @@ class ThreadedFrameReader:
     from aborts the process.
     """
 
-    def __init__(self, cap: cv2.VideoCapture, prefetch: int = 4):
+    def __init__(self, cap: FrameCapture, prefetch: int = 4, pinned_shape: Optional[Tuple[int, int]] = None):
         self._cap = cap
+        self._pinned_shape = pinned_shape
         self._q: queue.Queue = queue.Queue(maxsize=prefetch)
         self._done = False
         self._stop = threading.Event()
@@ -354,13 +438,32 @@ class ThreadedFrameReader:
     def _read_loop(self) -> None:
         try:
             while not self._stop.is_set():
-                ret, frame = self._cap.read()
+                ret, frame = self._read()
                 if not ret or not self._put(frame):
                     break
         except BaseException as error:  # noqa: BLE001 - handed to read() on the consumer thread
             self._error = error
         finally:
             self._put(None)
+
+    def _read(self) -> Tuple[bool, Any]:
+        """The capture's next frame; with ``pinned_shape``, decoded into a fresh pinned buffer from
+        PyTorch's caching host allocator, which ``PinnedFrameUploader`` copies to the device as it
+        is. A capture that does not decode into the buffer (frames of another size, which OpenCV
+        allocates its own array for, or a decoder with its own buffers) ends the pinned reads: the
+        frames are read as they come, with a warning when their size is not the one expected."""
+        if self._pinned_shape is None:
+            return self._cap.read()
+        h, w = self._pinned_shape
+        buffer = torch.empty((h, w, 3), dtype=torch.uint8, pin_memory=True).numpy()
+        ret, frame = self._cap.read(buffer)
+        if ret and not (isinstance(frame, np.ndarray) and frame.ctypes.data == buffer.ctypes.data):
+            self._pinned_shape = None
+            shape = getattr(frame, "shape", None)
+            if shape is not None and tuple(shape[:2]) != (h, w):
+                print(f"[decode] frames are {shape[1]}x{shape[0]}, not the {w}x{h} the clip reported; "
+                      "reading them without pinned buffers")
+        return ret, frame
 
     def read(self) -> Optional[np.ndarray]:
         if self._done:

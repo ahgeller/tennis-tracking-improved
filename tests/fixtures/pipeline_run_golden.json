@@ -5,7 +5,7 @@
    "first_frame": 0,
    "in_timeline": true,
    "last_obs_frame": 39,
-   "num_obs": 34,
+   "num_obs": 33,
    "observations": [
     {
      "area": 144.0,
@@ -388,20 +388,6 @@
     {
      "area": 144.0,
      "bbox": [
-      466.3076923076923,
-      205.4792899408284,
-      478.3076923076923,
-      217.4792899408284
-     ],
-     "conf": 0.8886,
-     "frame": 33,
-     "on_motion": true,
-     "x": 472.3076923076923,
-     "y": 211.4792899408284
-    },
-    {
-     "area": 144.0,
-     "bbox": [
       477.5897435897436,
       217.99737015121633,
       489.5897435897436,
@@ -484,10 +470,11 @@
      "y": 300.0
     }
    ],
-   "score": 86.56470588235294,
+   "score": 86.14545454545454,
    "score_breakdown": {
-    "additive_core": 104.0,
-    "avg_speed_pxpf": 14.830349361024274,
+    "additive_core": 103.0,
+    "avg_speed_pxpf": 14.830204692444985,
+    "court_lateral_min_m": 0.0,
     "end_frac": 1.0,
     "end_frame": 39.0,
     "extent_px": 471.65878681234125,
@@ -497,23 +484,24 @@
     "motion_evidence": 1.0,
     "motion_kin_frac": 1.0,
     "motion_mult": 1.0,
-    "motion_overlap": 0.9411764705882353,
-    "near_player_court_frac": 0.4411764705882353,
-    "near_player_frac": 0.4411764705882353,
-    "near_player_mult": 0.8323529411764705,
-    "num_obs": 34,
-    "obs_add": 34.0,
+    "motion_overlap": 0.9393939393939394,
+    "near_player_court_frac": 0.45454545454545453,
+    "near_player_frac": 0.45454545454545453,
+    "near_player_mult": 0.8363636363636363,
+    "num_obs": 33,
+    "obs_add": 33.0,
     "peak_speed_pxpf": 20.39374396484696,
     "span": 40,
     "span_add": 70.0,
     "span_frac": 1.0,
     "start_frac": 0.0,
     "start_frame": 0.0,
-    "total": 86.56470588235294
+    "total": 86.14545454545454
    },
    "selection": {
     "airborne": true,
     "established": true,
+    "off_court": false,
     "reacquired": false,
     "rolling": true
    },
@@ -604,8 +592,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 100.09458648582016,
-    "y": 300.0998436980854
+    "x": 100.09458648582017,
+    "y": 300.09984369808546
    },
    {
     "bbox": [
@@ -685,8 +673,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 111.26779324971415,
-    "y": 283.0009606376714
+    "x": 111.26779324971417,
+    "y": 283.00096063767154
    },
    {
     "bbox": [
@@ -766,8 +754,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 122.56024875962305,
-    "y": 266.9122930374991
+    "x": 122.56024875962302,
+    "y": 266.9122930374992
    },
    {
     "bbox": [
@@ -847,8 +835,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 133.8655236376329,
-    "y": 251.73140052251622
+    "x": 133.86552363763295,
+    "y": 251.73140052251625
    },
    {
     "bbox": [
@@ -929,7 +917,7 @@
     "source": "det",
     "track_id": 0,
     "x": 145.16837665136958,
-    "y": 237.4434032479679
+    "y": 237.44340324796795
    },
    {
     "bbox": [
@@ -1009,8 +997,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 156.4651562611439,
-    "y": 224.04453455382725
+    "x": 156.46515626114385,
+    "y": 224.04453455382716
    },
    {
     "bbox": [
@@ -1090,8 +1078,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 167.75576307445291,
-    "y": 211.5344528381955
+    "x": 167.75576307445297,
+    "y": 211.5344528381956
    },
    {
     "bbox": [
@@ -1171,8 +1159,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 179.04134098524278,
-    "y": 199.9140523011357
+    "x": 179.0413409852427,
+    "y": 199.91405230113568
    },
    {
     "bbox": [
@@ -1252,8 +1240,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 190.32459383248494,
-    "y": 189.1856201247987
+    "x": 190.32459383248488,
+    "y": 189.18562012479867
    },
    {
     "bbox": [
@@ -1323,8 +1311,8 @@
     },
     "source": "motion",
     "track_id": null,
-    "x": 201.59768097812486,
-    "y": 179.3302087723648
+    "x": 201.59768097812488,
+    "y": 179.33020877236484
    },
    {
     "bbox": [
@@ -1394,8 +1382,8 @@
     },
     "source": "motion",
     "track_id": null,
-    "x": 212.8786839889305,
-    "y": 170.39617819987396
+    "x": 212.87868398893056,
+    "y": 170.39617819987393
    },
    {
     "bbox": [
@@ -1475,8 +1463,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 224.16009645172934,
-    "y": 162.35286898608186
+    "x": 224.16009645172937,
+    "y": 162.35286898608183
    },
    {
     "bbox": [
@@ -1556,8 +1544,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 235.44021791398552,
-    "y": 155.20138505660043
+    "x": 235.44021791398546,
+    "y": 155.20138505660037
    },
    {
     "bbox": [
@@ -1637,7 +1625,7 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 246.7184150183322,
+    "x": 246.7184150183321,
     "y": 148.94170349871996
    },
    {
@@ -1718,7 +1706,7 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 257.9946540679417,
+    "x": 257.9946540679418,
     "y": 143.5739397087207
    },
    {
@@ -1799,8 +1787,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 269.2688501680744,
-    "y": 139.0980948541095
+    "x": 269.2688501680741,
+    "y": 139.0980948541094
    },
    {
     "bbox": [
@@ -1881,7 +1869,7 @@
     "source": "det",
     "track_id": 0,
     "x": 280.54075473742074,
-    "y": 135.51401429278272
+    "y": 135.51401429278275
    },
    {
     "bbox": [
@@ -1961,8 +1949,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 291.80930935935135,
-    "y": 132.8075344384468
+    "x": 291.8092114016048,
+    "y": 132.821195793598
    },
    {
     "bbox": [
@@ -2042,8 +2030,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 303.070155218573,
-    "y": 130.97939126258686
+    "x": 303.0686280199666,
+    "y": 131.01499176932023
    },
    {
     "bbox": [
@@ -2113,8 +2101,8 @@
     },
     "source": "motion",
     "track_id": null,
-    "x": 314.31382686218484,
-    "y": 130.03167990296012
+    "x": 314.304172612773,
+    "y": 130.0834577104271
    },
    {
     "bbox": [
@@ -2194,8 +2182,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 325.63762351396116,
-    "y": 130.11278939833923
+    "x": 325.6317732657569,
+    "y": 130.10854098570343
    },
    {
     "bbox": [
@@ -2275,8 +2263,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 336.9313797945999,
-    "y": 131.0455665012524
+    "x": 336.9333824616836,
+    "y": 131.02971997458855
    },
    {
     "bbox": [
@@ -2356,8 +2344,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 348.21291479004657,
-    "y": 132.8472266724595
+    "x": 348.2145887920353,
+    "y": 132.81606555335264
    },
    {
     "bbox": [
@@ -2437,8 +2425,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 359.4942176771677,
-    "y": 135.53960584350983
+    "x": 359.4945538094292,
+    "y": 135.4936926445073
    },
    {
     "bbox": [
@@ -2518,8 +2506,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 370.7751955052553,
-    "y": 139.12356619496853
+    "x": 370.7728068044547,
+    "y": 139.06151404539708
    },
    {
     "bbox": [
@@ -2599,8 +2587,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 382.05576499265726,
-    "y": 143.59914624772
+    "x": 382.04912280976606,
+    "y": 143.51901014649087
    },
    {
     "bbox": [
@@ -2680,12 +2668,10 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 393.3358454777201,
-    "y": 148.96647850268246
+    "x": 393.3243435032674,
+    "y": 148.8681249804181
    },
    {
-    "bbox": null,
-    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -2717,8 +2703,6 @@
      260.0
     ],
     "frame": 27,
-    "interpolated": true,
-    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -2733,25 +2717,9 @@
       134.0
      ]
     },
-    "position_kind": "recovered",
-    "present": true,
-    "search": {
-     "radius": 16.720651970172938,
-     "x": 404.6153846153846,
-     "y": 156.21416346170525
-    },
-    "selection": {
-     "reason": "bounded_linear_fill",
-     "source": "interp"
-    },
-    "source": "interp",
-    "track_id": null,
-    "x": 404.61519347999695,
-    "y": 155.22400939999054
+    "present": false
    },
    {
-    "bbox": null,
-    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -2783,8 +2751,6 @@
      260.0
     ],
     "frame": 28,
-    "interpolated": true,
-    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -2799,25 +2765,9 @@
       134.0
      ]
     },
-    "position_kind": "recovered",
-    "present": true,
-    "search": {
-     "radius": 19.220651970172938,
-     "x": 415.8974358974359,
-     "y": 163.72276364256294
-    },
-    "selection": {
-     "reason": "bounded_linear_fill",
-     "source": "interp"
-    },
-    "source": "interp",
-    "track_id": null,
-    "x": 415.89347380615834,
-    "y": 162.37194470997449
+    "present": false
    },
    {
-    "bbox": null,
-    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -2849,8 +2799,6 @@
      260.0
     ],
     "frame": 29,
-    "interpolated": true,
-    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -2865,21 +2813,7 @@
       134.0
      ]
     },
-    "position_kind": "recovered",
-    "present": true,
-    "search": {
-     "radius": 21.720651970172938,
-     "x": 427.1794871794872,
-     "y": 171.414689431462
-    },
-    "selection": {
-     "reason": "bounded_linear_fill",
-     "source": "interp"
-    },
-    "source": "interp",
-    "track_id": null,
-    "x": 427.17271875823775,
-    "y": 170.41087557685543
+    "present": false
    },
    {
     "bbox": [
@@ -2960,7 +2894,7 @@
     "source": "det",
     "track_id": 0,
     "x": 438.46153846153834,
-    "y": 179.3676423267819
+    "y": 179.2924065569772
    },
    {
     "bbox": [
@@ -3040,8 +2974,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 449.74358974358955,
-    "y": 189.20180778339474
+    "x": 449.7435897435899,
+    "y": 189.1331621365751
    },
    {
     "bbox": [
@@ -3121,17 +3055,12 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 461.0256410256411,
-    "y": 199.9261118454166
+    "x": 461.0256410256409,
+    "y": 199.86651076560582
    },
    {
-    "bbox": [
-     466.3076923076923,
-     205.4792899408284,
-     478.3076923076923,
-     217.4792899408284
-    ],
-    "conf": 0.8886,
+    "bbox": null,
+    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -3163,18 +3092,8 @@
      260.0
     ],
     "frame": 33,
-    "interpolated": false,
-    "measurement": {
-     "bbox": [
-      466.3076923076923,
-      205.4792899408284,
-      478.3076923076923,
-      217.4792899408284
-     ],
-     "conf": 0.8886,
-     "x": 472.3076923076923,
-     "y": 211.4792899408284
-    },
+    "interpolated": true,
+    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -3189,21 +3108,21 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "recovered",
     "present": true,
     "search": {
-     "radius": 0.0,
-     "x": 472.3076923076923,
-     "y": 211.4792899408284
+     "radius": 17.304505197350682,
+     "x": 472.30769230769226,
+     "y": 211.8347014300359
     },
     "selection": {
-     "reason": "selected_track_observation",
-     "source": "det"
+     "reason": "bounded_linear_fill",
+     "source": "interp"
     },
-    "source": "det",
-    "track_id": 0,
-    "x": 472.3076923076925,
-    "y": 211.5395872833967
+    "source": "interp",
+    "track_id": null,
+    "x": 472.3076923076924,
+    "y": 211.49245244407
    },
    {
     "bbox": [
@@ -3283,8 +3202,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 483.5897435897437,
-    "y": 224.04160291800193
+    "x": 483.58974358974365,
+    "y": 224.0109871719673
    },
    {
     "bbox": [
@@ -3364,8 +3283,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 494.8717948717948,
-    "y": 237.43197150080994
+    "x": 494.8717948717947,
+    "y": 237.42211494929757
    },
    {
     "bbox": [
@@ -3446,7 +3365,7 @@
     "source": "det",
     "track_id": 0,
     "x": 506.1538461538462,
-    "y": 251.7101515120932
+    "y": 251.72583577606122
    },
    {
     "bbox": [
@@ -3526,8 +3445,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 517.4358974358973,
-    "y": 266.86024729741854
+    "x": 517.4358974358977,
+    "y": 266.9221496522582
    },
    {
     "bbox": [
@@ -3607,8 +3526,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 528.7179487179484,
-    "y": 283.0210564094717
+    "x": 528.7179487179488,
+    "y": 283.0110565778881
    },
    {
     "bbox": [
@@ -3688,8 +3607,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 539.9999999999999,
-    "y": 300.0389511065312
+    "x": 540.0000000000005,
+    "y": 299.9925565529512
    }
   ],
   "last_valid_court_keypoints": [
@@ -3738,7 +3657,7 @@
        ],
        "compactness": 0.7629588017321033,
        "distance_to_search": 0.3653846652807355,
-       "distance_to_selected": 1.55406529069081,
+       "distance_to_selected": 1.554065290690772,
        "fill_ratio": 0.5454545454545454,
        "frame": 9,
        "mask": "boost",
@@ -3760,8 +3679,8 @@
       "y": 180.00019095170433
      },
      "selected_position": {
-      "x": 201.59768097812486,
-      "y": 179.3302087723648
+      "x": 201.59768097812488,
+      "y": 179.33020877236484
      },
      "selected_source": "motion"
     },
@@ -3779,7 +3698,7 @@
        ],
        "compactness": 0.7629588017321033,
        "distance_to_search": 0.6859776985751586,
-       "distance_to_selected": 1.2735581506112152,
+       "distance_to_selected": 1.2735581506111788,
        "fill_ratio": 0.5454545454545454,
        "frame": 10,
        "mask": "boost",
@@ -3801,8 +3720,8 @@
       "y": 171.04802011430354
      },
      "selected_position": {
-      "x": 212.8786839889305,
-      "y": 170.39617819987396
+      "x": 212.87868398893056,
+      "y": 170.39617819987393
      },
      "selected_source": "motion"
     },
@@ -3820,7 +3739,7 @@
        ],
        "compactness": 0.7629588017321033,
        "distance_to_search": 0.5209707578744566,
-       "distance_to_selected": 1.186792899115268,
+       "distance_to_selected": 1.150749982138027,
        "fill_ratio": 0.5454545454545454,
        "frame": 19,
        "mask": "boost",
@@ -3842,8 +3761,8 @@
       "y": 130.66698753907156
      },
      "selected_position": {
-      "x": 314.31382686218484,
-      "y": 130.03167990296012
+      "x": 314.304172612773,
+      "y": 130.0834577104271
      },
      "selected_source": "motion"
     },
@@ -3857,16 +3776,16 @@
      "mask_source": "none",
      "reason": "no_motion_mask",
      "search": {
-      "radius": 16.720651970172938,
-      "source": "result_search",
-      "x": 404.6153846153846,
-      "y": 156.21416346170525
+      "radius": 33.04360755123447,
+      "source": "previous_position",
+      "x": 393.3243435032674,
+      "y": 148.8681249804181
      },
      "selected_position": {
-      "x": 404.61519347999695,
-      "y": 155.22400939999054
+      "x": null,
+      "y": null
      },
-     "selected_source": "interp"
+     "selected_source": null
     },
     {
      "candidate_count_exported": 0,
@@ -3878,16 +3797,16 @@
      "mask_source": "none",
      "reason": "no_motion_mask",
      "search": {
-      "radius": 19.220651970172938,
-      "source": "result_search",
-      "x": 415.8974358974359,
-      "y": 163.72276364256294
+      "radius": 33.04360755123447,
+      "source": "previous_position",
+      "x": 393.3243435032674,
+      "y": 148.8681249804181
      },
      "selected_position": {
-      "x": 415.89347380615834,
-      "y": 162.37194470997449
+      "x": null,
+      "y": null
      },
-     "selected_source": "interp"
+     "selected_source": null
     },
     {
      "candidate_count_exported": 0,
@@ -3899,36 +3818,57 @@
      "mask_source": "none",
      "reason": "no_motion_mask",
      "search": {
-      "radius": 21.720651970172938,
-      "source": "result_search",
-      "x": 427.1794871794872,
-      "y": 171.414689431462
+      "radius": 33.04360755123447,
+      "source": "previous_position",
+      "x": 393.3243435032674,
+      "y": 148.8681249804181
      },
      "selected_position": {
-      "x": 427.17271875823775,
-      "y": 170.41087557685543
+      "x": null,
+      "y": null
+     },
+     "selected_source": null
+    },
+    {
+     "candidate_count_exported": 0,
+     "candidates": [],
+     "frame": 33,
+     "has_boost_mask": false,
+     "has_detections": false,
+     "has_raw_motion": false,
+     "mask_source": "none",
+     "reason": "no_motion_mask",
+     "search": {
+      "radius": 17.304505197350682,
+      "source": "result_search",
+      "x": 472.30769230769226,
+      "y": 211.8347014300359
+     },
+     "selected_position": {
+      "x": 472.3076923076924,
+      "y": 211.49245244407
      },
      "selected_source": "interp"
     }
    ],
    "schema_version": 2,
    "summary": {
-    "detector_gap_frames": 6,
+    "detector_gap_frames": 7,
     "detector_gap_frames_with_motion_candidate": 0,
     "frames_analyzed": 40,
     "mask_source_counts": {
-     "boost": 35,
-     "none": 5
+     "boost": 34,
+     "none": 6
     },
     "max_candidates_per_frame": 5,
     "reason_counts": {
      "accepted_motion": 3,
-     "detection_available": 34,
-     "no_motion_mask": 3
+     "detection_available": 33,
+     "no_motion_mask": 4
     },
     "selected_source_counts": {
-     "det": 34,
-     "interp": 3,
+     "det": 33,
+     "interp": 1,
      "motion": 3
     }
    }
@@ -3936,8 +3876,8 @@
   "schema_version": 5,
   "summary": {
    "chosen_track_id": 0,
-   "filled_frames": 40,
-   "filled_percent": 100.0,
+   "filled_frames": 37,
+   "filled_percent": 92.5,
    "pass2_frames_rendered": 40,
    "timeline_track_ids": [
     0
@@ -3950,7 +3890,7 @@
     "first_frame": 0,
     "in_timeline": true,
     "last_obs_frame": 39,
-    "num_obs": 34,
+    "num_obs": 33,
     "observations": [
      {
       "area": 144.0,
@@ -4333,20 +4273,6 @@
      {
       "area": 144.0,
       "bbox": [
-       466.3076923076923,
-       205.4792899408284,
-       478.3076923076923,
-       217.4792899408284
-      ],
-      "conf": 0.8886,
-      "frame": 33,
-      "on_motion": true,
-      "x": 472.3076923076923,
-      "y": 211.4792899408284
-     },
-     {
-      "area": 144.0,
-      "bbox": [
        477.5897435897436,
        217.99737015121633,
        489.5897435897436,
@@ -4429,10 +4355,11 @@
       "y": 300.0
      }
     ],
-    "score": 86.56470588235294,
+    "score": 86.14545454545454,
     "score_breakdown": {
-     "additive_core": 104.0,
-     "avg_speed_pxpf": 14.830349361024274,
+     "additive_core": 103.0,
+     "avg_speed_pxpf": 14.830204692444985,
+     "court_lateral_min_m": 0.0,
      "end_frac": 1.0,
      "end_frame": 39.0,
      "extent_px": 471.65878681234125,
@@ -4442,23 +4369,24 @@
      "motion_evidence": 1.0,
      "motion_kin_frac": 1.0,
      "motion_mult": 1.0,
-     "motion_overlap": 0.9411764705882353,
-     "near_player_court_frac": 0.4411764705882353,
-     "near_player_frac": 0.4411764705882353,
-     "near_player_mult": 0.8323529411764705,
-     "num_obs": 34,
-     "obs_add": 34.0,
+     "motion_overlap": 0.9393939393939394,
+     "near_player_court_frac": 0.45454545454545453,
+     "near_player_frac": 0.45454545454545453,
+     "near_player_mult": 0.8363636363636363,
+     "num_obs": 33,
+     "obs_add": 33.0,
      "peak_speed_pxpf": 20.39374396484696,
      "span": 40,
      "span_add": 70.0,
      "span_frac": 1.0,
      "start_frac": 0.0,
      "start_frame": 0.0,
-     "total": 86.56470588235294
+     "total": 86.14545454545454
     },
     "selection": {
      "airborne": true,
      "established": true,
+     "off_court": false,
      "reacquired": false,
      "rolling": true
     },
@@ -4495,6 +4423,7 @@
     "score_breakdown": {
      "additive_core": 1.0,
      "avg_speed_pxpf": 0.0,
+     "court_lateral_min_m": 0.0,
      "end_frac": 0.358974358974359,
      "end_frame": 14.0,
      "extent_px": 0.0,
@@ -4521,6 +4450,7 @@
     "selection": {
      "airborne": false,
      "established": false,
+     "off_court": false,
      "reacquired": false,
      "rolling": false
     },
@@ -4545,7 +4475,7 @@
    "first_frame": 0,
    "in_timeline": true,
    "last_obs_frame": 39,
-   "num_obs": 34,
+   "num_obs": 33,
    "observations": [
     {
      "area": 144.0,
@@ -4928,20 +4858,6 @@
     {
      "area": 144.0,
      "bbox": [
-      466.3076923076923,
-      205.4792899408284,
-      478.3076923076923,
-      217.4792899408284
-     ],
-     "conf": 0.8886,
-     "frame": 33,
-     "on_motion": false,
-     "x": 472.3076923076923,
-     "y": 211.4792899408284
-    },
-    {
-     "area": 144.0,
-     "bbox": [
       477.5897435897436,
       217.99737015121633,
       489.5897435897436,
@@ -5024,10 +4940,11 @@
      "y": 300.0
     }
    ],
-   "score": 86.56470588235294,
+   "score": 86.14545454545454,
    "score_breakdown": {
-    "additive_core": 104.0,
-    "avg_speed_pxpf": 14.830349361024274,
+    "additive_core": 103.0,
+    "avg_speed_pxpf": 14.830204692444985,
+    "court_lateral_min_m": 0.0,
     "end_frac": 1.0,
     "end_frame": 39.0,
     "extent_px": 471.65878681234125,
@@ -5038,22 +4955,23 @@
     "motion_kin_frac": 1.0,
     "motion_mult": 1.0,
     "motion_overlap": 0.0,
-    "near_player_court_frac": 0.4411764705882353,
-    "near_player_frac": 0.4411764705882353,
-    "near_player_mult": 0.8323529411764705,
-    "num_obs": 34,
-    "obs_add": 34.0,
+    "near_player_court_frac": 0.45454545454545453,
+    "near_player_frac": 0.45454545454545453,
+    "near_player_mult": 0.8363636363636363,
+    "num_obs": 33,
+    "obs_add": 33.0,
     "peak_speed_pxpf": 20.39374396484696,
     "span": 40,
     "span_add": 70.0,
     "span_frac": 1.0,
     "start_frac": 0.0,
     "start_frame": 0.0,
-    "total": 86.56470588235294
+    "total": 86.14545454545454
    },
    "selection": {
     "airborne": true,
     "established": false,
+    "off_court": false,
     "reacquired": false,
     "rolling": false
    },
@@ -5131,7 +5049,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5144,8 +5062,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 99.99999999999999,
-    "y": 300.0740019450944
+    "x": 100.0,
+    "y": 300.0
    },
    {
     "bbox": [
@@ -5212,7 +5130,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5225,8 +5143,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 111.28205128205127,
-    "y": 283.0055885448697
+    "x": 111.28205128205128,
+    "y": 283.0111768573307
    },
    {
     "bbox": [
@@ -5293,7 +5211,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5306,8 +5224,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 122.56410256410255,
-    "y": 266.9142437989892
+    "x": 122.56410256410257,
+    "y": 266.9165023011177
    },
    {
     "bbox": [
@@ -5374,7 +5292,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5388,7 +5306,7 @@
     "source": "det",
     "track_id": 0,
     "x": 133.84615384615384,
-    "y": 251.72412754984992
+    "y": 251.71597633136093
    },
    {
     "bbox": [
@@ -5455,7 +5373,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5468,8 +5386,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 145.12820512820517,
-    "y": 237.42746693360036
+    "x": 145.12820512820514,
+    "y": 237.40959894806048
    },
    {
     "bbox": [
@@ -5536,7 +5454,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5549,8 +5467,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 156.41025641025638,
-    "y": 224.02230905109565
+    "x": 156.4102564102564,
+    "y": 223.99737015121633
    },
    {
     "bbox": [
@@ -5617,7 +5535,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5630,8 +5548,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 167.69230769230765,
-    "y": 211.50844649430553
+    "x": 167.69230769230768,
+    "y": 211.47928994082838
    },
    {
     "bbox": [
@@ -5698,7 +5616,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5711,8 +5629,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 178.974358974359,
-    "y": 199.8863400823977
+    "x": 178.97435897435898,
+    "y": 199.8553583168968
    },
    {
     "bbox": [
@@ -5779,7 +5697,7 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "measurement",
     "present": true,
     "search": {
      "radius": 0.0,
@@ -5792,12 +5710,10 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 190.25641025641016,
-    "y": 189.15722444122426
+    "x": 190.25641025641025,
+    "y": 189.12557527942144
    },
    {
-    "bbox": null,
-    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -5829,8 +5745,6 @@
      260.0
     ],
     "frame": 9,
-    "interpolated": true,
-    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -5845,25 +5759,9 @@
       134.0
      ]
     },
-    "position_kind": "recovered",
-    "present": true,
-    "search": {
-     "radius": 16.879130775751676,
-     "x": 201.53846153846152,
-     "y": 180.0007638068173
-    },
-    "selection": {
-     "reason": "bounded_linear_fill",
-     "source": "interp"
-    },
-    "source": "interp",
-    "track_id": null,
-    "x": 201.53846153846135,
-    "y": 179.31475441525748
+    "present": false
    },
    {
-    "bbox": null,
-    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -5895,8 +5793,6 @@
      260.0
     ],
     "frame": 10,
-    "interpolated": true,
-    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -5911,21 +5807,7 @@
       134.0
      ]
     },
-    "position_kind": "recovered",
-    "present": true,
-    "search": {
-     "radius": 19.379130775751676,
-     "x": 212.82051282051282,
-     "y": 171.0592779422545
-    },
-    "selection": {
-     "reason": "bounded_linear_fill",
-     "source": "interp"
-    },
-    "source": "interp",
-    "track_id": null,
-    "x": 212.82051282051285,
-    "y": 170.3746500620241
+    "present": false
    },
    {
     "bbox": [
@@ -6005,8 +5887,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 224.10256410256414,
-    "y": 162.32805364622283
+    "x": 224.1025641025641,
+    "y": 162.2967073783401
    },
    {
     "bbox": [
@@ -6086,8 +5968,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 235.38461538461553,
-    "y": 155.17475947236966
+    "x": 235.38461538461544,
+    "y": 155.14593530544903
    },
    {
     "bbox": [
@@ -6167,8 +6049,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 246.6666666666668,
-    "y": 148.91459011644946
+    "x": 246.66666666666663,
+    "y": 148.89047448117276
    },
    {
     "bbox": [
@@ -6249,7 +6131,7 @@
     "source": "det",
     "track_id": 0,
     "x": 257.94871794871796,
-    "y": 143.54757390792585
+    "y": 143.5285034093832
    },
    {
     "bbox": [
@@ -6329,8 +6211,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 269.23076923076917,
-    "y": 139.07369447496592
+    "x": 269.23076923076934,
+    "y": 139.05965525445643
    },
    {
     "bbox": [
@@ -6410,8 +6292,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 280.5128205128205,
-    "y": 135.49283978040938
+    "x": 280.51282051282055,
+    "y": 135.48405067147434
    },
    {
     "bbox": [
@@ -6491,8 +6373,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 291.79487179487165,
-    "y": 132.79084183978668
+    "x": 291.7948717948719,
+    "y": 132.80263957644732
    },
    {
     "bbox": [
@@ -6572,8 +6454,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 303.07692307692304,
-    "y": 130.96915067868974
+    "x": 303.0769230769232,
+    "y": 131.01490196119636
    },
    {
     "bbox": null,
@@ -6639,7 +6521,7 @@
     "source": "interp",
     "track_id": null,
     "x": 314.3589743589744,
-    "y": 130.0264856400478
+    "y": 130.12083782572145
    },
    {
     "bbox": [
@@ -6719,8 +6601,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 325.6410256410256,
-    "y": 130.10605996501275
+    "x": 325.64102564102564,
+    "y": 130.1204471700227
    },
    {
     "bbox": [
@@ -6800,8 +6682,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 336.92307692307685,
-    "y": 131.0327799058355
+    "x": 336.923076923077,
+    "y": 131.01372999409998
    },
    {
     "bbox": [
@@ -6881,8 +6763,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 348.20512820512835,
-    "y": 132.8353983535584
+    "x": 348.2051282051283,
+    "y": 132.8014027668746
    },
    {
     "bbox": [
@@ -6962,8 +6844,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 359.4871794871796,
-    "y": 135.52898564338292
+    "x": 359.48717948717945,
+    "y": 135.48227434290587
    },
    {
     "bbox": [
@@ -7043,8 +6925,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 370.7692307692308,
-    "y": 139.11456710381154
+    "x": 370.76923076923083,
+    "y": 139.05598053401386
    },
    {
     "bbox": [
@@ -7125,7 +7007,7 @@
     "source": "det",
     "track_id": 0,
     "x": 382.051282051282,
-    "y": 143.5923407896845
+    "y": 143.52235067583024
    },
    {
     "bbox": [
@@ -7205,12 +7087,10 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 393.3333333333333,
-    "y": 148.96261950046042
+    "x": 393.3333333333334,
+    "y": 148.88203233535648
    },
    {
-    "bbox": null,
-    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -7242,8 +7122,6 @@
      260.0
     ],
     "frame": 27,
-    "interpolated": true,
-    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -7258,25 +7136,9 @@
       134.0
      ]
     },
-    "position_kind": "recovered",
-    "present": true,
-    "search": {
-     "radius": 16.720651970172938,
-     "x": 404.6153846153846,
-     "y": 156.21416346170525
-    },
-    "selection": {
-     "reason": "bounded_linear_fill",
-     "source": "interp"
-    },
-    "source": "interp",
-    "track_id": null,
-    "x": 404.61538461538476,
-    "y": 155.22430788556483
+    "present": false
    },
    {
-    "bbox": null,
-    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -7308,8 +7170,6 @@
      260.0
     ],
     "frame": 28,
-    "interpolated": true,
-    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -7324,25 +7184,9 @@
       134.0
      ]
     },
-    "position_kind": "recovered",
-    "present": true,
-    "search": {
-     "radius": 19.220651970172938,
-     "x": 415.8974358974359,
-     "y": 163.72276364256294
-    },
-    "selection": {
-     "reason": "bounded_linear_fill",
-     "source": "interp"
-    },
-    "source": "interp",
-    "track_id": null,
-    "x": 415.897435897436,
-    "y": 162.37824913632176
+    "present": false
    },
    {
-    "bbox": null,
-    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -7374,8 +7218,6 @@
      260.0
     ],
     "frame": 29,
-    "interpolated": true,
-    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -7390,21 +7232,7 @@
       134.0
      ]
     },
-    "position_kind": "recovered",
-    "present": true,
-    "search": {
-     "radius": 21.720651970172938,
-     "x": 427.1794871794872,
-     "y": 171.414689431462
-    },
-    "selection": {
-     "reason": "bounded_linear_fill",
-     "source": "interp"
-    },
-    "source": "interp",
-    "track_id": null,
-    "x": 427.17948717948724,
-    "y": 170.42167984624726
+    "present": false
    },
    {
     "bbox": [
@@ -7485,7 +7313,7 @@
     "source": "det",
     "track_id": 0,
     "x": 438.46153846153834,
-    "y": 179.3676423267819
+    "y": 179.2924065569772
    },
    {
     "bbox": [
@@ -7565,8 +7393,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 449.74358974358955,
-    "y": 189.20180778339474
+    "x": 449.7435897435899,
+    "y": 189.1331621365751
    },
    {
     "bbox": [
@@ -7646,17 +7474,12 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 461.0256410256411,
-    "y": 199.9261118454166
+    "x": 461.0256410256409,
+    "y": 199.86651076560582
    },
    {
-    "bbox": [
-     466.3076923076923,
-     205.4792899408284,
-     478.3076923076923,
-     217.4792899408284
-    ],
-    "conf": 0.8886,
+    "bbox": null,
+    "conf": 0.0,
     "court_keypoints": [
      180.0,
      90.0,
@@ -7688,18 +7511,8 @@
      260.0
     ],
     "frame": 33,
-    "interpolated": false,
-    "measurement": {
-     "bbox": [
-      466.3076923076923,
-      205.4792899408284,
-      478.3076923076923,
-      217.4792899408284
-     ],
-     "conf": 0.8886,
-     "x": 472.3076923076923,
-     "y": 211.4792899408284
-    },
+    "interpolated": true,
+    "measurement": null,
     "player_boxes": {
      "1": [
       118.0,
@@ -7714,21 +7527,21 @@
       134.0
      ]
     },
-    "position_kind": "filtered",
+    "position_kind": "recovered",
     "present": true,
     "search": {
-     "radius": 0.0,
-     "x": 472.3076923076923,
-     "y": 211.4792899408284
+     "radius": 17.304505197350682,
+     "x": 472.30769230769226,
+     "y": 211.8347014300359
     },
     "selection": {
-     "reason": "selected_track_observation",
-     "source": "det"
+     "reason": "bounded_linear_fill",
+     "source": "interp"
     },
-    "source": "det",
-    "track_id": 0,
-    "x": 472.3076923076925,
-    "y": 211.5395872833967
+    "source": "interp",
+    "track_id": null,
+    "x": 472.3076923076924,
+    "y": 211.49245244407
    },
    {
     "bbox": [
@@ -7808,8 +7621,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 483.5897435897437,
-    "y": 224.04160291800193
+    "x": 483.58974358974365,
+    "y": 224.0109871719673
    },
    {
     "bbox": [
@@ -7889,8 +7702,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 494.8717948717948,
-    "y": 237.43197150080994
+    "x": 494.8717948717947,
+    "y": 237.42211494929757
    },
    {
     "bbox": [
@@ -7971,7 +7784,7 @@
     "source": "det",
     "track_id": 0,
     "x": 506.1538461538462,
-    "y": 251.7101515120932
+    "y": 251.72583577606122
    },
    {
     "bbox": [
@@ -8051,8 +7864,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 517.4358974358973,
-    "y": 266.86024729741854
+    "x": 517.4358974358977,
+    "y": 266.9221496522582
    },
    {
     "bbox": [
@@ -8132,8 +7945,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 528.7179487179484,
-    "y": 283.0210564094717
+    "x": 528.7179487179488,
+    "y": 283.0110565778881
    },
    {
     "bbox": [
@@ -8213,8 +8026,8 @@
     },
     "source": "det",
     "track_id": 0,
-    "x": 539.9999999999999,
-    "y": 300.0389511065312
+    "x": 540.0000000000005,
+    "y": 299.9925565529512
    }
   ],
   "last_valid_court_keypoints": [
@@ -8259,16 +8072,16 @@
      "mask_source": "none",
      "reason": "no_motion_mask",
      "search": {
-      "radius": 16.879130775751676,
-      "source": "result_search",
-      "x": 201.53846153846152,
-      "y": 180.0007638068173
+      "radius": 33.04360755123447,
+      "source": "previous_position",
+      "x": 190.25641025641025,
+      "y": 189.12557527942144
      },
      "selected_position": {
-      "x": 201.53846153846135,
-      "y": 179.31475441525748
+      "x": null,
+      "y": null
      },
-     "selected_source": "interp"
+     "selected_source": null
     },
     {
      "candidate_count_exported": 0,
@@ -8280,16 +8093,16 @@
      "mask_source": "none",
      "reason": "no_motion_mask",
      "search": {
-      "radius": 19.379130775751676,
-      "source": "result_search",
-      "x": 212.82051282051282,
-      "y": 171.0592779422545
+      "radius": 33.04360755123447,
+      "source": "previous_position",
+      "x": 190.25641025641025,
+      "y": 189.12557527942144
      },
      "selected_position": {
-      "x": 212.82051282051285,
-      "y": 170.3746500620241
+      "x": null,
+      "y": null
      },
-     "selected_source": "interp"
+     "selected_source": null
     },
     {
      "candidate_count_exported": 0,
@@ -8308,7 +8121,7 @@
      },
      "selected_position": {
       "x": 314.3589743589744,
-      "y": 130.0264856400478
+      "y": 130.12083782572145
      },
      "selected_source": "interp"
     },
@@ -8322,16 +8135,16 @@
      "mask_source": "none",
      "reason": "no_motion_mask",
      "search": {
-      "radius": 16.720651970172938,
-      "source": "result_search",
-      "x": 404.6153846153846,
-      "y": 156.21416346170525
+      "radius": 33.04360755123447,
+      "source": "previous_position",
+      "x": 393.3333333333334,
+      "y": 148.88203233535648
      },
      "selected_position": {
-      "x": 404.61538461538476,
-      "y": 155.22430788556483
+      "x": null,
+      "y": null
      },
-     "selected_source": "interp"
+     "selected_source": null
     },
     {
      "candidate_count_exported": 0,
@@ -8343,16 +8156,16 @@
      "mask_source": "none",
      "reason": "no_motion_mask",
      "search": {
-      "radius": 19.220651970172938,
-      "source": "result_search",
-      "x": 415.8974358974359,
-      "y": 163.72276364256294
+      "radius": 33.04360755123447,
+      "source": "previous_position",
+      "x": 393.3333333333334,
+      "y": 148.88203233535648
      },
      "selected_position": {
-      "x": 415.897435897436,
-      "y": 162.37824913632176
+      "x": null,
+      "y": null
      },
-     "selected_source": "interp"
+     "selected_source": null
     },
     {
      "candidate_count_exported": 0,
@@ -8364,21 +8177,42 @@
      "mask_source": "none",
      "reason": "no_motion_mask",
      "search": {
-      "radius": 21.720651970172938,
-      "source": "result_search",
-      "x": 427.1794871794872,
-      "y": 171.414689431462
+      "radius": 33.04360755123447,
+      "source": "previous_position",
+      "x": 393.3333333333334,
+      "y": 148.88203233535648
      },
      "selected_position": {
-      "x": 427.17948717948724,
-      "y": 170.42167984624726
+      "x": null,
+      "y": null
+     },
+     "selected_source": null
+    },
+    {
+     "candidate_count_exported": 0,
+     "candidates": [],
+     "frame": 33,
+     "has_boost_mask": false,
+     "has_detections": false,
+     "has_raw_motion": false,
+     "mask_source": "none",
+     "reason": "no_motion_mask",
+     "search": {
+      "radius": 17.304505197350682,
+      "source": "result_search",
+      "x": 472.30769230769226,
+      "y": 211.8347014300359
+     },
+     "selected_position": {
+      "x": 472.3076923076924,
+      "y": 211.49245244407
      },
      "selected_source": "interp"
     }
    ],
    "schema_version": 2,
    "summary": {
-    "detector_gap_frames": 6,
+    "detector_gap_frames": 7,
     "detector_gap_frames_with_motion_candidate": 0,
     "frames_analyzed": 40,
     "mask_source_counts": {
@@ -8386,20 +8220,20 @@
     },
     "max_candidates_per_frame": 5,
     "reason_counts": {
-     "detection_available": 34,
-     "no_motion_mask": 6
+     "detection_available": 33,
+     "no_motion_mask": 7
     },
     "selected_source_counts": {
-     "det": 34,
-     "interp": 6
+     "det": 33,
+     "interp": 2
     }
    }
   },
   "schema_version": 5,
   "summary": {
    "chosen_track_id": 0,
-   "filled_frames": 40,
-   "filled_percent": 100.0,
+   "filled_frames": 35,
+   "filled_percent": 87.5,
    "pass2_frames_rendered": 0,
    "timeline_track_ids": [
     0
@@ -8412,7 +8246,7 @@
     "first_frame": 0,
     "in_timeline": true,
     "last_obs_frame": 39,
-    "num_obs": 34,
+    "num_obs": 33,
     "observations": [
      {
       "area": 144.0,
@@ -8795,20 +8629,6 @@
      {
       "area": 144.0,
       "bbox": [
-       466.3076923076923,
-       205.4792899408284,
-       478.3076923076923,
-       217.4792899408284
-      ],
-      "conf": 0.8886,
-      "frame": 33,
-      "on_motion": false,
-      "x": 472.3076923076923,
-      "y": 211.4792899408284
-     },
-     {
-      "area": 144.0,
-      "bbox": [
        477.5897435897436,
        217.99737015121633,
        489.5897435897436,
@@ -8891,10 +8711,11 @@
       "y": 300.0
      }
     ],
-    "score": 86.56470588235294,
+    "score": 86.14545454545454,
     "score_breakdown": {
-     "additive_core": 104.0,
-     "avg_speed_pxpf": 14.830349361024274,
+     "additive_core": 103.0,
+     "avg_speed_pxpf": 14.830204692444985,
+     "court_lateral_min_m": 0.0,
      "end_frac": 1.0,
      "end_frame": 39.0,
      "extent_px": 471.65878681234125,
@@ -8905,22 +8726,23 @@
      "motion_kin_frac": 1.0,
      "motion_mult": 1.0,
      "motion_overlap": 0.0,
-     "near_player_court_frac": 0.4411764705882353,
-     "near_player_frac": 0.4411764705882353,
-     "near_player_mult": 0.8323529411764705,
-     "num_obs": 34,
-     "obs_add": 34.0,
+     "near_player_court_frac": 0.45454545454545453,
+     "near_player_frac": 0.45454545454545453,
+     "near_player_mult": 0.8363636363636363,
+     "num_obs": 33,
+     "obs_add": 33.0,
      "peak_speed_pxpf": 20.39374396484696,
      "span": 40,
      "span_add": 70.0,
      "span_frac": 1.0,
      "start_frac": 0.0,
      "start_frame": 0.0,
-     "total": 86.56470588235294
+     "total": 86.14545454545454
     },
     "selection": {
      "airborne": true,
      "established": false,
+     "off_court": false,
      "reacquired": false,
      "rolling": false
     },
@@ -8957,6 +8779,7 @@
     "score_breakdown": {
      "additive_core": 1.0,
      "avg_speed_pxpf": 0.0,
+     "court_lateral_min_m": 0.0,
      "end_frac": 0.358974358974359,
      "end_frame": 14.0,
      "extent_px": 0.0,
@@ -8983,6 +8806,7 @@
     "selection": {
      "airborne": false,
      "established": false,
+     "off_court": false,
      "reacquired": false,
      "rolling": false
     },
@@ -9002,8 +8826,8 @@
   }
  },
  "render_env": {
-  "numpy": "2.5.3",
-  "opencv": "5.0.0"
+  "numpy": "1.26.4",
+  "opencv": "4.9.0"
  },
  "streams": {
   "detector_input": [
@@ -9040,7 +8864,7 @@
    "6ffbbfbfadbbb57e85a31f3b967a348a",
    "20df3c05f1edb19805613c144401a418",
    "210c32f44c03042bc4775cb36e8e3bea",
-   "e9a96a4628726d6f000e73cf3cc965ac",
+   "eb6467809d25aca7179b47e61f4e67ba",
    "01259df33ce4e6e30baa60a38657c247",
    "b314a272855b93eddd5f761e017fd131",
    "78a5680e06e730eddbd851f9e7808e26",
@@ -9049,130 +8873,130 @@
    "7fee6eb104cb8fe8f9b96489637762e8"
   ],
   "motion_debug": [
-   "4aefa19a8966d1b5c7ddf7b408fe11e3",
-   "1a8c60a76f77d3da02e8ff099cdc91da",
-   "d9a77a9246a4e048d7f737fd3844c25f",
-   "61b96c27b9c82b432b9578b1171a9e55",
-   "f3ea6d75335bcbf4a9682d0d60ceea39",
-   "765887ade39553274abe6449cac8805a",
-   "dcf68b1361a7f37cabdfb85d076b3e30",
-   "ff07100d7dec0a9ddf0e2d3851f7ab42",
-   "3ae74a50be7070e57cff4680e71bd554",
-   "6c05e2de7bcd1b99dd14a4962482d6d9",
-   "35ed7dca7ba3e6c90e2ccdb44708c234",
-   "b9da547dba9c7e4bba8e196bee1aff73",
-   "fae3b10f4e8d458abb66527f2fd1adff",
-   "67890608d8e2e7d3198ca03a2e346e7a",
-   "4641545b44725fbf1e453b1d35b908d6",
-   "de825678a641d52109461625064d0737",
-   "3d3e38ed213f168a946eee4ae2264d54",
-   "dcb100be031e290c0a7cf31a2dd647a4",
-   "bc37936d50cd7d4799f560293f9e2b43",
-   "1c049c0a8e1f056e119b2c2b2b8b7752",
-   "ab60649c7fd5c1fe972e577fbeab8985",
-   "2e9038fdc9d0d1d71281aa98b3f9c2b1",
-   "30e622f361056196e79904a1db2b37f9",
-   "d916ca4ad3d4e4d0ef96d5bf3eaae096",
-   "1eecbdfd1f161b0581ded786dbee7aa0",
-   "f812619503918f95edabe91668d42fc0",
-   "3c51ad6659829cdd98565be7bf0e280f",
-   "5017774dcc90ec946f34cddf6dee0012",
-   "968eea158795d01f4c51cf07f205f211",
-   "1dc6877e0664ef65a8589eef75f2e8eb",
-   "84abad364de21dbf12873f72010a2e55",
-   "387bcd806a5cd7edcfa0c5b2261aa3d7",
-   "081c53171c603273b28a2750748b8aa6",
-   "df5bac01790a096ad5cfd1f028066a88",
-   "8edc5dbc35864418c1e781c311c52d50",
-   "7b0c51350db63108185132b6bd9574b4",
-   "2cc95835f477235b45b845ef271c3c37",
-   "db760e95842b543c061c5cf8b29595da",
-   "391e3bd4cfb4500f235d5f9e3d5535eb",
-   "3cc595d8ec73897d609410d2fe02280a"
+   "395a303c9496113112b90a2254fb90f6",
+   "1a2b00e6c2a14b451b820d20d811dd66",
+   "5e4a77094a689843a2d4163b6ce3e960",
+   "d2fbd06d2207b028538b786d1166ce81",
+   "84c3ed5a737d8d25a2ab192ff4a92842",
+   "b93bea660d405bc96847600bd19c798f",
+   "c1c3e9a3119c16cdc1ef1a153fcc168d",
+   "af07d390689f1a9a1ff3da9fcf8df9a0",
+   "d3461dee83796448242227ea6089cd7c",
+   "bdd36d7b3a45e526c44dfe77a65f0832",
+   "8feea2baef07b0ddd0f072a1b334b54e",
+   "41e3821d669f7496df1e2f1a55141667",
+   "3506ee104d44c20f2914aef9b9625f74",
+   "bbd7dff8f503d0feeafb17ca956a5dc5",
+   "f83248efd3f9c87719054cd7a24156f5",
+   "e404a98688067facf639aa84c603700e",
+   "46782e48f68db371c059c31974505c37",
+   "986e7688a2e0b092e9269050662cffae",
+   "67d9f9b1805b19c8f716e99bd6648a7f",
+   "7a9e0e24c2a9b8ad4dc3cbf8cc0be17e",
+   "62b723a3b917e189714cf77f29db572b",
+   "919669956675e469346c68e52f2442a1",
+   "a3ba421218f0e6a682f9eb3eb25cb8af",
+   "10b7efd8d0eacfffa739b7ff43dd30c2",
+   "46f3b1afbe0894ed8777f065c8758f58",
+   "f59339a36f09afd74058a03cbb51ced3",
+   "a943d03498c76c31de1b5e07fac91a55",
+   "8d87e777b3ed5024ef16269a67227bd2",
+   "4c741ade24317606d2fc455405f5405e",
+   "6812abe00287bce6fc42cba14cc0cd31",
+   "8a1d6f2a9eea1a357a42541400a5e579",
+   "2a3d5846abea07addf7b2526ecc49711",
+   "f8124ae66dab92e3a9d598a3a724fde2",
+   "0b5162891f9561cb99952c4a69ead08b",
+   "282f865efd98b13c5322508b21b08139",
+   "24ec78134a66298dc2d0a083a10afd49",
+   "8f0fb48f32f21cd7f65842c8da58583b",
+   "004cf7fdc59a483aea71ce64e381e1f9",
+   "a893b74238e685a052dde6379ffb1200",
+   "fb09ccee553a79a7e99fed2037778050"
   ],
   "track_debug": [
-   "df7f6f69531fa359bd8e940533ebc582",
-   "51ca7367646229390468af27670f0c89",
-   "51e94708c5ce7816ad63d54673e3107e",
-   "6de601de36d677308273a467680e1d72",
-   "223f53dfedd2ffa401428473371cfd61",
-   "b81126137922160c4853e103b5a7aa30",
-   "d379e02ae96224ef3e1138c0211c36ce",
-   "0ec18d9e70b2706690d2184db85922bf",
-   "a089a2611c959556c6bef007ca32267e",
-   "e707d20b31af1f436ea328f3edb263ad",
-   "f8a36047b6b0da89095c1f5e23a6e2bb",
-   "c06b5d7eb963f6419e469bc25bf0dee7",
-   "a1f526570904da9ee4d611a3d8d8d426",
-   "7de59d3c75bd60dab7343183ec89c7f4",
-   "b6c6fa475f6735d8890f44b471773db6",
-   "82859eea3692ce536fa25361775772e9",
-   "c03af6d2035bcff03dfa9b4c40e21ea7",
-   "cb5df63958247b5a2f0c8c66ded56715",
-   "5b58402f8a500d8dfe605a5a7b707eb9",
-   "983340f0fa3130c041a444f95f2089f3",
-   "e0ce2065696139dc9c2eb7af4cb94c41",
-   "000699e44b79bec84cfcaddeb7849528",
-   "272793def30dcef40cee0dd58a94e949",
-   "a32ca29dd7a9b9e146be12b70f756dbb",
-   "f7aabeff44cacf2d1b471154df8075bc",
-   "3ad1c68198023e7104aaff211d0b8b11",
-   "c1e8f4417f0b2013f562f93463cbaf09",
-   "3b958801b5632f99863453ad7bc6d6be",
-   "c28f167a4bf204e8c998fe7446bca5d5",
-   "24303bed65f5e2804c7d8a36101946b0",
-   "e0ad8aa9c59a08258bbf59eddc36b54d",
-   "9d1f614f1c9f51105a52c0ecb0f4dd10",
-   "aa305cbdd9ae9ce7fe39f8ff14b7d498",
-   "c0439771935c11c2098cb0e0fff3d83d",
-   "77715e974d8847a8cf994ec51b94d438",
-   "17b5095b461ce525a9de31205dcd3ef6",
-   "c0b0a76eb5c15ae944a823b99ebfe4ec",
-   "f2a16eed068b98b2f4406882a614f853",
-   "01840d95da055d512aef87bac06c3499",
-   "7ea6090464787587e19b4b109096c57a"
+   "15fb9c67b29f2e131dac91128dd6dab6",
+   "fb5d237844a9dd40339d97de7bee9a3f",
+   "25e7fe75447d03a22b57d11ce61c0471",
+   "e1d55ecb57ac800cb89555bf2ba97fef",
+   "934768f4db823570f3df10c408105443",
+   "1deb9620bd0f96eee0fe0b4d0480c544",
+   "63f033fc64093054b48ce7c5aba8026a",
+   "4eaf92fc47dcc33db6d1167d1e1098b2",
+   "94cebab349fce89014a4cae6456f7801",
+   "6213d16fd4271e298f62c8dec4ec0e8e",
+   "b0cfd27228c294daf6095cf1ee2faf99",
+   "f8b929bceda538bf748f37b450c2bf75",
+   "b5b8a10fbcb509dea09405bf25c0048f",
+   "4ca96e2b08bc89cf9f0054e04baa30a5",
+   "279b021d757727f2e65cb1986326702c",
+   "8339f122c2204082dbf6554398abf0db",
+   "64f893644838add1cf69be1b65c8f2de",
+   "ca76826458cbe14af9500ffd5deb2e67",
+   "beaa2fa623ce953eaeabebe37cf53fcb",
+   "bce6352cfaab0d7fca2683b61f628575",
+   "9b5390e78819fb7b45e79201e055db21",
+   "205ae21158aeedca1e151e599bbfd8cb",
+   "6d5ce0c5d4f5a26ac2e88c325f22abc7",
+   "15034c936248416837ed7cb1e498370e",
+   "2d85d937938377e9434a4178141c9e90",
+   "8248b31c54ba623fcba5ddffb8fe2598",
+   "947da5ac033fe07e60e3484f8df44368",
+   "92b17f2b9dfdde0abc3d53855674fb69",
+   "6a1660c6edf55923b28f9238fa094ce8",
+   "9a5e20515c18767934c73f6214efa845",
+   "ca884b465bf8fe752bd4965842657aa4",
+   "60e51afc7a21cb94f70d4cd7b08a4641",
+   "df98ff3212a0200ee001deaf6a58ac4a",
+   "9f57dad9b23f5e3b654028a41d329a72",
+   "7ab65978c550ab56d7b11d097cfce80d",
+   "0c88333dee6c01dca8220663d5de2c91",
+   "a31c18825c30f3b3511551c0e0a77c14",
+   "ea0fe024ddfbedd89363f9cb3c144bdc",
+   "f2b145a5d58ce3f860e3ebb6b35fb9c9",
+   "045cf3e009e370ad4dc280332883c41f"
   ],
   "tracking": [
-   "4a96e6bedd83d552be2b9bcc88a38e6f",
-   "9f8e2d4593e1149c2e119f48e273eb2c",
-   "219c2a013b28ac3f6d34455c40f4d36f",
-   "a5722b172db2500ba5b35b993b370a97",
-   "896937d9d89c7a5ab4732ef97e092971",
-   "2ad721e3ad8167d314c1b1d75a46a0de",
-   "6165413d62eaca0f4e75e7643fa9f833",
-   "c164362577948c88e8560dcfc830dc50",
-   "3416f69c9e1fde2ea8125604d3f31d1e",
-   "2a63a3fc0430259876746b70c4947c03",
-   "c4de3db495ed345bcd4c085ddfbdfb61",
-   "0c313602bc94bed7587959b052f00838",
-   "79f9d54580081e5eeb2e953825102d5e",
-   "1a86e82718a5b045718eca44de30b0e9",
-   "761dfd869c52d46b104b2946602a0bd1",
-   "3817ac7d690c79c9db60fd95375b49a8",
-   "309ec4754d09273baf6f3b5a286c2c23",
-   "7221630a564033765532b86d9c1ef6b9",
-   "747579c68e59ff1bc3cbfa541e3aa0d6",
-   "ce869bc7b55ebb9c376caee02b36ab9b",
-   "27414ad6f43bf64ab886d39465460df2",
-   "51683dfd7fe080fd88a88e328fcac17b",
-   "d3da88ef641ecca6efa90a9418aee113",
-   "512a68a6f22ef1485e80cf7af21d532d",
-   "80ce956e1a77d0c03090565ee39f42d6",
-   "ac13ed49b5192fce4e3058aafb398b8a",
-   "46a64252163222adbccd7d8573af836e",
-   "c515e8764280dec803031d5e3b1c6152",
-   "ecb13881e22449ea8bab18b71780f0af",
-   "232d5f69f38e53b7c0c7a422624d8152",
-   "d7824447e566bb76ff625c922d036558",
-   "a76006df64e1280899c80fa7212e1ac7",
-   "7601b46b39d8c809a7a1334d80a02890",
-   "0556eacb32121a865ae2bf6b6df6ee24",
-   "f52611d9ecadf2d703ade776e0685049",
-   "44b0721f7e02c28d15f19ad2ca03659f",
-   "212035489ce370781b41f72d730081b1",
-   "5ce1d9d9c1ab57445799327e2b28795a",
-   "ee1284b4f68263c05d6866838f2686d8",
-   "538a4b51220c7375117a49c598da7ca6"
+   "dd2d620bca3295bdf60164bda901dbeb",
+   "f26a5e21088d7a0451e86a940e200ddb",
+   "d05166251902a4c464cc20d3591d12e8",
+   "b6ca726c1273efc9b5a34518a663afa7",
+   "832ce56615f9ca3352cd72a01943ff94",
+   "de099e488eee7d11b7901b96714d4bf3",
+   "f2d10055639fb607743383dcaa0f48ff",
+   "2ae7e899686bce4ea11ac3d518ecdf07",
+   "555ef4b63400d0ac28a4971a24fc49ff",
+   "9b55528fbf9a19581fd614d32c587b08",
+   "ba924280d1a0eb11279facd500f713f6",
+   "de40a7c035f05f254bd4395a4079f17c",
+   "e2f409f6abd7804e184433617783db4a",
+   "ec31fec3a8438d56c66584a42423a241",
+   "d30ee1e345bac68b5970969c17249744",
+   "08eb5d2c54ea3d79b8e925828d432de7",
+   "ce4295dc26b6f15eb2900d9720197c26",
+   "3fa9cd1b99e293168c0082a4727e2554",
+   "799d52dbf065c4b8683a15eb9d09de64",
+   "0b08dbe8b6a92ba7d10e790bac5ed88d",
+   "920a93749fc6bcc76e7215b2c5e18a8f",
+   "8c46d1b06eff63b00addfa6089551cd2",
+   "11f3f7742751233ba8ad1215b706f84f",
+   "7df67642cdf79fdb09694eefd056df7b",
+   "41950ba80f4c2d05a1382cd8031762da",
+   "76e362dbf062ec523acc900a74171c51",
+   "2dbbbb4592e750d4aa68d5ca3a16dc54",
+   "a6a0cbaed28d36a12bf196d9270853cf",
+   "ef8276ccadd78796efde877e5971f9d7",
+   "1fc388e54eb458497283a2aba2e41dc2",
+   "ce4ba09b99ab3702271aab63a1e311bf",
+   "97e23d9a1fd3b0e50ecc2e1dd4a9ea4a",
+   "ef0494a34c75b5d9c2df0170eaa80a72",
+   "2f3280c6284941bc22465a0d45173f2a",
+   "7daab7ac94793f3fa7529a243fc1164a",
+   "f2e725e472a6fafc5579d06fda98dbbf",
+   "ab178b2a9ee4d8aa2d6ad13d3d49c8e3",
+   "fce74e72b6e8104daf156de3a91e9eff",
+   "3acc46b4405f17132a60e77cf9c7a06a",
+   "f4c1f8b95b3abd86a14756176825dc2d"
   ]
  }
 }

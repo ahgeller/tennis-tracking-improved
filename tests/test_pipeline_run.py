@@ -36,6 +36,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,10 +46,12 @@ import cv2
 import numpy as np
 import pytest
 
-from tennis_tracker import pass1, pass2, pipeline, utils
-from tennis_tracker.config import Config
+from tennis_tracker import pass1, pass2, pipeline, utils, video_decode
+from tennis_tracker.config import FOREGROUND, PROCESS, THREAD, Config
 from tennis_tracker.court.court_geometry import LINE_PAIRS_14
+from tennis_tracker.engines.ball_detectors import prepass_mode
 from tennis_tracker.engines.court_detector import CourtDetector
+from tennis_tracker.engines.player_detector import effective_player_interval
 from tennis_tracker.export import RunResult
 from tennis_tracker.headless import headless_config
 
@@ -85,10 +88,11 @@ STATIC_DISTRACTOR = (322, 48)        # bright blob above the far baseline; never
 BALL_RADIUS_PX = 4.0
 DET_BOX_RADIUS_PX = 6.0
 # Detector dropouts: frames 9/10/19 still show the ball, so the selector can
-# recover them from the motion mask; frames 27-29 also hide it in the video
-# (an occlusion), so the selector has to coast through them.
-DROPOUT_FRAMES = {9, 10, 19, 27, 28, 29}
-OCCLUDED_FRAMES = {27, 28, 29}
+# recover them from the motion mask; frames 27-29 and 33 also hide it in the
+# video (occlusions, no blob). The one-frame hole at 33 is one detector step, so
+# a straight fill bridges it; the three-frame hole at 27-29 stays empty.
+DROPOUT_FRAMES = {9, 10, 19, 27, 28, 29, 33}
+OCCLUDED_FRAMES = {27, 28, 29, 33}
 FALSE_POSITIVE = {14: (452.0, 150.0, 0.57)}   # frame -> (x, y, conf) added beside the real ball
 
 
@@ -194,6 +198,9 @@ class FakeGridTrackNet:
     def __init__(self, weights_path: str, cfg: Config):
         self.weights_path = str(weights_path)
         self.cfg = cfg
+        self.prepass_mode = prepass_mode(cfg, Path(weights_path))       # the real rule (an .npz: no file read)
+        self.closed = False
+        self.finished = False
         self.prepared: Optional[Dict[str, Any]] = None
         self.precomputed: Optional[List[List[Tuple[List[float], float]]]] = None
         self.inputs_seen: List[Tuple[int, Any]] = []
@@ -222,6 +229,12 @@ class FakeGridTrackNet:
 
     def detect_async_finish(self, pending: _Pending) -> List[Tuple[List[float], float]]:
         return pending.detections
+
+    def finish_prepass(self) -> None:
+        self.finished = True
+
+    def close(self) -> None:
+        self.closed = True
 
     def detect(self, frame_bgr, frame_index: int):
         return self.detect_async_finish(self.detect_async_start(frame_bgr, frame_index))
@@ -255,9 +268,11 @@ class _PlayerPending:
 class FakePlayerDetector:
     """``PlayerDetector`` surface returning two fixed tracked boxes."""
 
-    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None):
+    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None, *,
+                 fps: Optional[float] = None):
         self.cfg = cfg
         self.court_kps = court_keypoints
+        self.fps = fps
         self.cached_boxes: List[List[float]] = []
         self.slots: Dict[int, List[float]] = {}
         self.start_calls: List[int] = []
@@ -287,6 +302,9 @@ class FakePlayerDetector:
 
     def player_boxes_by_slot(self) -> Dict[int, List[float]]:
         return dict(self.slots)
+
+    def tracks_frame(self, frame_index: int) -> bool:
+        return True
 
 
 def frame_digest(frame: np.ndarray) -> str:
@@ -351,6 +369,12 @@ JSON_ONLY_OVERRIDES = dict(
     save_detector_input_debug=False,
     save_track_debug_video=False,
 )
+
+
+def open_inputs(cfg: Config):
+    """What ``pipeline.run`` opens before pass 1: the run's setup, its ball detector and inputs."""
+    setup = pipeline._setup_run(cfg)
+    return pipeline._open_inputs(setup, pipeline.build_ball_detector(setup.cfg))
 
 
 def make_config(tmp_path: Path, clip: Path, **overrides) -> Config:
@@ -558,6 +582,9 @@ def test_json_only_run_matches_golden_without_rendering(tmp_path, monkeypatch, f
     assert result["streams"] == {}
     assert "[pass 2] Skipped (no video outputs selected)" in out
     assert not Path(result["cfg"].output_video).exists()
+    # Nothing filters the selector boosts in pass 1 here: the selector filters the ones it reads.
+    timing = result["raw_json"]["timing"]
+    assert timing.get("pass1_pre_cuda_cc", 0.0) == 0.0 and timing.get("selector_boost_cc", 0.0) > 0.0
     assert_json_close(result["json"], expected, "JSON-only run differs from the golden")
 
 
@@ -672,7 +699,7 @@ def test_pass2_reports_a_short_second_decode(tmp_path, monkeypatch, fake_cuda, c
     real_read = pass2._FrameSource.read
 
     def read(self, frame_index):
-        return (None, True) if frame_index >= short else real_read(self, frame_index)
+        return None if frame_index >= short else real_read(self, frame_index)
 
     monkeypatch.setattr(pass2._FrameSource, "read", read)
     result = run_pipeline(tmp_path, monkeypatch, clip, **FULL_OVERRIDES, cache_input_frames_pass2=False)
@@ -694,6 +721,237 @@ def test_pass2_refuses_a_clip_it_cannot_reopen(tmp_path, monkeypatch, fake_cuda,
 
     install_fakes(monkeypatch)
     cfg = make_config(tmp_path, clip, **FULL_OVERRIDES, cache_input_frames_pass2=False)
-    monkeypatch.setattr(pass2, "cv2", SimpleNamespace(VideoCapture=Unopenable))   # pass 1 keeps the real one
+    monkeypatch.setattr(video_decode, "cv2", SimpleNamespace(VideoCapture=Unopenable))   # pass 1 keeps the real one
     with pytest.raises(RuntimeError, match="reopen the input video for pass 2"):
         pipeline.run(cfg)
+
+
+@pytest.mark.parametrize("mode", [FOREGROUND, PROCESS, THREAD])
+def test_a_foreground_or_process_prepass_starts_before_the_engines_and_a_threaded_one_after(
+        tmp_path, monkeypatch, fake_cuda, clip, mode):
+    """A prepass on the main thread runs before the court and player detectors are built, so
+    boxmot's import finishes behind it, and so does a prepass process, which runs beside their
+    builds; a prepass on a worker thread starts after them, so the player engine's CUDA graph is
+    captured with no other thread's CUDA work in flight."""
+    events: List[str] = []
+    prepare = FakeGridTrackNet.prepare_video
+
+    def recording_prepare(self, *args, **kwargs):
+        events.append("prepass")
+        return prepare(self, *args, **kwargs)
+
+    class RecordingCourt(FakeCourtDetector):
+        def __init__(self, cfg: Config):
+            events.append("court")
+            super().__init__(cfg)
+
+    class RecordingPlayers(FakePlayerDetector):
+        def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None, *,
+                     fps: Optional[float] = None):
+            events.append("players")
+            super().__init__(cfg, court_keypoints, fps=fps)
+
+    install_fakes(monkeypatch)
+    monkeypatch.setattr(FakeGridTrackNet, "prepare_video", recording_prepare)
+    monkeypatch.setattr(pipeline, "CourtDetector", RecordingCourt)
+    monkeypatch.setattr(pipeline, "PlayerDetector", RecordingPlayers)
+    pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode=mode))
+    assert events == (["court", "players", "prepass"] if mode == THREAD else ["prepass", "court", "players"])
+    assert FakeGridTrackNet.instances[0].closed
+
+
+def test_the_prepass_is_finished_after_pass_1_and_the_detector_closed_after_the_outputs(
+        tmp_path, monkeypatch, fake_cuda, clip):
+    """A prepass process is told to exit as soon as pass 1 is done, so its exit overlaps the
+    selector, and waited for (closed) only after the outputs."""
+    install_fakes(monkeypatch)
+    seen: List[Tuple[bool, bool]] = []
+    select = pipeline._select
+
+    def recording_select(ctx, pass1):
+        seen.append((ctx.detector.finished, ctx.detector.closed))
+        return select(ctx, pass1)
+
+    monkeypatch.setattr(pipeline, "_select", recording_select)
+    pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode=PROCESS))
+    assert seen == [(True, False)] and FakeGridTrackNet.instances[0].closed
+
+
+@pytest.mark.parametrize("stage", ["init", "pass1"])
+def test_the_ball_detector_is_closed_when_a_run_fails_or_is_interrupted(tmp_path, monkeypatch, fake_cuda, clip, stage):
+    """The detector, which may own a prepass process, is closed whatever ends the run early: an
+    error while the other engines are built, or Ctrl-C during pass 1; a failed init also releases
+    the clip it opened."""
+    install_fakes(monkeypatch)
+    captures = []
+    open_capture = pipeline.cv2.VideoCapture
+
+    def recording_capture(*args):
+        captures.append(open_capture(*args))
+        return captures[-1]
+
+    monkeypatch.setattr(pipeline.cv2, "VideoCapture", recording_capture)
+
+    def no_engine(*args, **kwargs):
+        raise OSError("no engine")
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    if stage == "init":
+        monkeypatch.setattr(pipeline, "PlayerDetector", no_engine)
+    else:
+        monkeypatch.setattr(pipeline, "collect_pass1", interrupted)
+    with pytest.raises(OSError if stage == "init" else KeyboardInterrupt):
+        pipeline.run(make_config(tmp_path, clip, **JSON_ONLY_OVERRIDES, ball_prepass_mode=PROCESS))
+    assert FakeGridTrackNet.instances[0].closed
+    if stage == "init":
+        assert len(captures) == 1 and not captures[0].isOpened()
+
+
+def test_a_video_run_probes_the_encoder_alongside_init_and_raises_what_the_probe_raised(
+        tmp_path, monkeypatch, fake_cuda, capsys, clip):
+    """The encoder is chosen on a thread while the detectors are built; the platform report still
+    names it, and a probe that fails fails the run as it did when it ran inline."""
+    monkeypatch.setattr(utils, "find_ffmpeg", lambda prefer_encoder="h264_nvenc": "/opt/ffmpeg")
+    monkeypatch.setattr(utils, "ffmpeg_has_encoder", lambda ffmpeg, encoder: True)
+    monkeypatch.setattr(utils, "ffmpeg_encoder_failure", lambda ffmpeg, encoder: None)
+    probes: List[str] = []
+    choose = utils.choose_encoder
+
+    def recording_choose(cfg, is_cuda=True):
+        probes.append(threading.current_thread().name)
+        return choose(cfg, is_cuda)
+
+    monkeypatch.setattr(pipeline, "choose_encoder", recording_choose)
+    install_fakes(monkeypatch)
+    ctx = open_inputs(make_config(tmp_path, clip, use_nvenc=True))
+    ctx.capture.release()
+    assert probes == ["encoder-probe"]
+    assert ctx.encoder is not None and ctx.encoder.preferred == utils.ENCODER_NVENC
+    assert "[platform] Accelerations: TensorRT, NVENC encoding, CUDA preprocessing" in capsys.readouterr().out
+
+    def broken(cfg, is_cuda=True):
+        raise OSError("ffmpeg vanished")
+
+    monkeypatch.setattr(pipeline, "choose_encoder", broken)
+    with pytest.raises(OSError, match="ffmpeg vanished"):
+        open_inputs(make_config(tmp_path, clip, use_nvenc=True))
+
+
+class _ScheduledPlayers(FakePlayerDetector):
+    """The fake on the real schedule (``effective_player_interval`` for the clip's frame rate): it
+    launches only on the frames the tracker runs on, and its one player moves 2 px right a frame."""
+
+    def __init__(self, cfg: Config, court_keypoints: Optional[List[float]] = None, *,
+                 fps: Optional[float] = None):
+        super().__init__(cfg, court_keypoints, fps=fps)
+        self.interval = effective_player_interval(cfg, fps)
+
+    def tracks_frame(self, frame_index: int) -> bool:
+        return frame_index % self.interval == 0
+
+    def detect_async_start(self, frame: np.ndarray, frame_index: int, frame_gpu_chw=None) -> Optional[_PlayerPending]:
+        return super().detect_async_start(frame, frame_index) if self.tracks_frame(frame_index) else None
+
+    def detect_async_finish(self, pending: Optional[_PlayerPending]) -> List[List[float]]:
+        if pending is None:
+            return []
+        shift = 2.0 * pending.frame_index
+        self.slots = {1: [10.0 + shift, 20.0, 30.0 + shift, 60.0]}
+        return list(self.slots.values())
+
+
+@pytest.mark.parametrize("fps", [30.0, 50.0, 59.5, 60.0])
+def test_players_are_detected_every_other_frame_from_60_fps_and_interpolated_between(
+        tmp_path, monkeypatch, fake_cuda, fps):
+    """A clip of nominal 60 FPS runs the player engine on the even frames and interpolates the
+    odd ones; 30 and 50 FPS clips run it on every frame. Either way every frame has its box."""
+    path = tmp_path / f"rally_{fps:g}fps.avi"
+    write_lossless_clip(path, synthetic_frames(), fps=fps)
+    install_fakes(monkeypatch)
+    built: List[_ScheduledPlayers] = []
+
+    def build(*args, **kwargs) -> _ScheduledPlayers:
+        built.append(_ScheduledPlayers(*args, **kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(pipeline, "PlayerDetector", build)
+    result = pipeline.run(make_config(tmp_path, path, **JSON_ONLY_OVERRIDES))
+    (players,) = built
+    assert players.fps == pytest.approx(fps, abs=0.01)
+    every_other = fps >= 55.0
+    assert players.start_calls == list(range(0, FRAMES, 2 if every_other else 1))
+    last_tracked = FRAMES - 2 if every_other else FRAMES - 1
+    for frame, boxes in enumerate(result.player_boxes):
+        shift = 2.0 * min(frame, last_tracked)          # after the last tracked frame, its box is held
+        assert boxes == {1: [10.0 + shift, 20.0, 30.0 + shift, 60.0]}, frame
+
+
+def _handing_on(handed: List[Tuple[int, Dict[int, List[float]], List[Any]]]) -> type:
+    """Pass 1's collector recording in `handed` what the commit hook is handed: each frame, its
+    player boxes as they stand at that moment, and the ghosts that came with it (what the live
+    tracker feeds on)."""
+
+    class HandedOn(pass1.Pass1Collector):
+        def committed(self, frame_index, ghosts):
+            handed.append((frame_index, copy.deepcopy(self.result.player_boxes[frame_index]), list(ghosts)))
+
+    return HandedOn
+
+
+@pytest.mark.parametrize("fps", [30.0, 60.0])
+def test_the_commit_hook_gets_every_frame_in_order_with_its_final_player_boxes(tmp_path, monkeypatch, fake_cuda, fps):
+    """A frame the player tracker skips is handed on with the next one it runs on, its boxes
+    already interpolated: the hook sees the boxes the run returns, frame by frame, in order."""
+    path = tmp_path / f"rally_{fps:g}fps.avi"
+    write_lossless_clip(path, synthetic_frames(), fps=fps)
+    install_fakes(monkeypatch)
+    handed: List[Tuple[int, Dict[int, List[float]], List[Any]]] = []
+    monkeypatch.setattr(pipeline, "PlayerDetector", _ScheduledPlayers)
+    monkeypatch.setattr(pass1, "Pass1Collector", _handing_on(handed))
+    result = pipeline.run(make_config(tmp_path, path, **JSON_ONLY_OVERRIDES))
+    assert [frame for frame, _, _ in handed] == list(range(FRAMES))
+    assert [boxes for _, boxes, _ in handed] == result.player_boxes
+
+
+class _Hold:
+    """A ``PlayerBoxHold`` over its own lists, recording each frame it hands on with its box's x."""
+
+    def __init__(self, positions):
+        self.boxes, self.tracked, self.handed = [], [], []
+        self.hold = pass1.PlayerBoxHold(self._hand_on, positions.__getitem__)
+
+    def _hand_on(self, frame, ghosts):
+        self.handed.append((frame, self.boxes[frame][7][0], ghosts))
+
+    def add(self, frame, tracked, x):
+        self.boxes.append({7: [x, 0.0, x + 1.0, 2.0]})
+        self.tracked.append(tracked)
+        ghosts = [(frame - 1, (frame, 0, frame + 1, 1))] if frame else []
+        self.hold.add(frame, ghosts, self.boxes, self.tracked)
+
+
+def test_a_skipped_frame_is_held_with_its_ghosts_until_the_next_tracked_frame():
+    """On a schedule of every third frame the skipped frames come out with the next tracked one, in
+    order, each with the ghosts found as it was committed and its box interpolated; the tail comes
+    out with ``release`` and keeps what it held."""
+    hold = _Hold(positions=range(5))
+    calls = []
+    for frame, tracked in enumerate([True, False, False, True, False]):
+        hold.add(frame, tracked, float(frame) if tracked else -1.0)     # a skipped frame holds a placeholder
+        calls.append([handed[0] for handed in hold.handed])
+    assert calls == [[0], [0], [0], [0, 1, 2, 3], [0, 1, 2, 3]]
+    hold.hold.release()
+    assert [frame for frame, _, _ in hold.handed] == [0, 1, 2, 3, 4]
+    assert [ghosts for _, _, ghosts in hold.handed] == [[]] + [[(f - 1, (f, 0, f + 1, 1))] for f in range(1, 5)]
+    assert [x for _, x, _ in hold.handed] == pytest.approx([0.0, 1.0, 2.0, 3.0, -1.0])
+
+
+def test_held_boxes_are_interpolated_by_source_position_across_dropped_frames():
+    """The live tracker numbers the frames it keeps 0, 1, 2...; with source frames 1 and 2 dropped,
+    a held frame between tracked frames at source 0 and 4 sits three quarters of the way."""
+    hold = _Hold(positions=[0, 3, 4, 5, 6])
+    for frame, (tracked, x) in enumerate([(True, 0.0), (False, -1.0), (True, 8.0), (False, -1.0), (True, 12.0)]):
+        hold.add(frame, tracked, x)
+    assert [x for _, x, _ in hold.handed] == pytest.approx([0.0, 6.0, 8.0, 10.0, 12.0])

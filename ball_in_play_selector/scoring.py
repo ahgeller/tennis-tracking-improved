@@ -1,7 +1,9 @@
 import math
 import cv2
 import numpy as np
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from tennis_tracker.court.court_geometry import (Corners, CourtKeypoints, doubles_corners,
+                                                 last_valid_court_keypoints, sideline_distance_m)
 
 from .config import SelectorConfig
 from .models import Detection, Track
@@ -37,6 +39,8 @@ _TINY_BRIDGE_PENALTY_MULT = 0.4
 # nearest in time to its first observation (within 0.1 s, at least two
 # frames) is within the handover distance; see _add_disjoint_tracks.
 _HANDOVER_WINDOW_SEC = 0.1
+# A fragment (``adopt_fragments``) may sit this far in time from the chain it joins.
+_FRAGMENT_WINDOW_SEC = 0.25
 _HANDOVER_MIN_FRAMES = 2
 # score_tracks: player boxes are dilated by this much (px) for the
 # near-player fraction, which only weakly multiplies the score.
@@ -264,26 +268,7 @@ def _add_disjoint_tracks(
         for obs in track.observations:
             chain_obs.setdefault(obs.frame, obs)
     handover_frames = max(_HANDOVER_MIN_FRAMES, int(round(cfg.fps * _HANDOVER_WINDOW_SEC)))
-    handover_dist = max(_HANDOVER_MIN_DIST_PX, lim.jump_reject * lim.diag)
-
-    def continuous(candidate: Track) -> bool:
-        """Whether the candidate's boundary meets the chain.
-
-        The chain observation nearest in time to the candidate's first
-        observation decides (offsets grow one frame at a time, the earlier
-        frame tried first): continuous when it lies within ``handover_dist``.
-        The last observation is only consulted when no chain observation falls
-        within ``handover_frames`` of the first one, so a far chain point next
-        to the start vetoes a candidate whose end connects cleanly (pinned by
-        test_disjoint_continuity_is_decided_at_the_start_edge).
-        """
-        for edge in (candidate.observations[0], candidate.observations[-1]):
-            for offset in range(1, handover_frames + 1):
-                for frame in (edge.frame - offset, edge.frame + offset):
-                    other = chain_obs.get(frame)
-                    if other is not None:
-                        return xy_dist(edge.cx, edge.cy, other.cx, other.cy) <= handover_dist
-        return False
+    handover_dist = _handover_dist(lim)
 
     for candidate in sorted(ordered, key=lambda track: track.score, reverse=True):
         if id(candidate) in chosen_ids:
@@ -294,12 +279,93 @@ def _add_disjoint_tracks(
             for track in chain
         )
         shared = sum(obs.frame in chain_obs for obs in candidate.observations)
-        if span_disjoint or (shared <= lim.overlap_tol and continuous(candidate)):
+        if span_disjoint or (shared <= lim.overlap_tol
+                             and _meets_chain(candidate, chain_obs, handover_frames, handover_dist)):
             chain.append(candidate)
             chosen_ids.add(id(candidate))
             for obs in candidate.observations:
                 chain_obs.setdefault(obs.frame, obs)
     return chain
+
+
+def _handover_dist(lim: _TimelineLimits) -> float:
+    """How far a track's edge may lie from the chain observation it meets."""
+    return max(_HANDOVER_MIN_DIST_PX, lim.jump_reject * lim.diag)
+
+
+def _meets_chain(candidate: Track, chain_obs: Dict[int, Detection], frames: int, dist: float) -> bool:
+    """Whether the candidate's boundary meets the chain.
+
+    The chain observation nearest in time to the candidate's first
+    observation decides (offsets grow one frame at a time, the earlier
+    frame tried first): it meets when that one lies within ``dist``.
+    The last observation is only consulted when no chain observation falls
+    within ``frames`` of the first one, so a far chain point next
+    to the start vetoes a candidate whose end connects cleanly (pinned by
+    test_disjoint_continuity_is_decided_at_the_start_edge).
+    """
+    for edge in (candidate.observations[0], candidate.observations[-1]):
+        for offset in range(1, frames + 1):
+            for frame in (edge.frame - offset, edge.frame + offset):
+                other = chain_obs.get(frame)
+                if other is not None:
+                    return xy_dist(edge.cx, edge.cy, other.cx, other.cy) <= dist
+    return False
+
+
+def _either_edge_meets_chain(candidate: Track, chain_obs: Dict[int, Detection], frames: int, dist: float) -> bool:
+    """Whether the candidate's first or last observation lies within ``dist`` of the chain observation
+    nearest to it in time (within ``frames``). Unlike ``_meets_chain`` one edge is enough: a fragment
+    the association split off at a bounce or a contact connects to the rally at one end only, and the
+    other end may face the next shot's first observations."""
+    for edge in (candidate.observations[0], candidate.observations[-1]):
+        nearest = next((chain_obs[frame] for offset in range(1, frames + 1)
+                        for frame in (edge.frame - offset, edge.frame + offset) if frame in chain_obs), None)
+        if nearest is not None and xy_dist(edge.cx, edge.cy, nearest.cx, nearest.cy) <= dist:
+            return True
+    return False
+
+
+def adopt_fragments(chain: List[Track], tracks: Sequence[Track], cfg: SelectorConfig, total_frames: int) -> List[Track]:
+    """The chain with the confident fragments beside it that ``core.selected_tracks`` turned away.
+
+    A true ball that the association breaks off the rally (a bounce or a contact changes its speed
+    past the ratio gate) starts a track of its own, often too short to be selected, and its frames
+    went unanswered: on mixed_v1 (2026-11-11) 15 labelled balls, with no wrong pick and no false
+    alarm added. A fragment is adopted when its median confidence is a reacquisition's
+    (``select_reacquire_conf``), it does not stay beside another court, none of its observations
+    falls inside a chain track's span, and one of its ends meets the chain
+    (``_either_edge_meets_chain``) within ``_FRAGMENT_WINDOW_SEC``. The most confident fragment is tried first; an adopted one joins the
+    chain the next is measured against.
+    """
+    if not chain:
+        return chain
+    chain = list(chain)
+    chosen_ids = {id(track) for track in chain}
+    chain_obs: Dict[int, Detection] = {}
+    for track in chain:
+        for obs in track.observations:
+            chain_obs.setdefault(obs.frame, obs)
+    frames = max(_HANDOVER_MIN_FRAMES, int(round(cfg.fps * _FRAGMENT_WINDOW_SEC)))
+    dist = _handover_dist(_timeline_limits(cfg, total_frames))
+
+    def median_conf(track: Track) -> float:
+        confidences = sorted(float(obs.conf) for obs in track.observations)
+        return confidences[len(confidences) // 2]
+
+    fragments = [(median_conf(track), track) for track in tracks
+                 if id(track) not in chosen_ids and track.observations and not track.selection.get("off_court")]
+    for confidence, fragment in sorted(fragments, key=lambda item: (-item[0], item[1].first_frame)):
+        if confidence < cfg.select_reacquire_conf:
+            break
+        inside = any(track.first_frame <= obs.frame <= track.last_obs_frame
+                     for obs in fragment.observations for track in chain)
+        if inside or not _either_edge_meets_chain(fragment, chain_obs, frames, dist):
+            continue
+        chain.append(fragment)
+        for obs in fragment.observations:
+            chain_obs.setdefault(obs.frame, obs)
+    return sorted(chain, key=lambda track: (track.first_frame, track.last_obs_frame))
 
 
 def select_timeline_chain(
@@ -393,6 +459,7 @@ def stitch_track_chain(chain: List[Track], cfg: SelectorConfig) -> Optional[Trac
     }
     return stitched
 
+
 def _court_fractions(
     track: Track, court_poly: Optional[np.ndarray], expand_px: float
 ) -> Tuple[float, float]:
@@ -427,6 +494,35 @@ def _court_fractions(
     n = len(track.observations)
     return near_court / n, strict_inside / n
 
+
+class _CourtCorners:
+    """Each frame's doubles corners: the frame's own court keypoints, else the last valid ones of
+    the clip, else none (the frame is not measured)."""
+
+    def __init__(self, keypoints_by_frame: Optional[Sequence[Optional[CourtKeypoints]]]) -> None:
+        self._keypoints = keypoints_by_frame or []
+        self._fallback = doubles_corners(last_valid_court_keypoints(self._keypoints))
+        self._by_frame: Dict[int, Optional[Corners]] = {}
+
+    def at(self, frame: int) -> Optional[Corners]:
+        if frame not in self._by_frame:
+            own = doubles_corners(self._keypoints[frame]) if 0 <= frame < len(self._keypoints) else None
+            self._by_frame[frame] = own if own is not None else self._fallback
+        return self._by_frame[frame]
+
+
+def _court_lateral_min_m(track: Track, corners: _CourtCorners) -> float:
+    """How close the track ever comes to our court sideways: the smallest sideline distance of its
+    observations, each against its frame's court; 0 when no observation has a four-corner court
+    (no evidence that the ball is elsewhere)."""
+    distances = [
+        sideline_distance_m(frame_corners, obs.cx, obs.cy)
+        for obs in track.observations
+        if (frame_corners := corners.at(obs.frame)) is not None
+    ]
+    return min(distances, default=0.0)
+
+
 def _near_player_fractions(
     track: Track,
     player_boxes_by_frame: Optional[PlayerBoxesByFrame],
@@ -456,7 +552,8 @@ def score_tracks(
     cfg: SelectorConfig,
     court_poly: Optional[np.ndarray] = None,
     player_boxes_by_frame: Optional[PlayerBoxesByFrame] = None,
-    total_frames: int = 0
+    total_frames: int = 0,
+    court_keypoints_by_frame: Optional[Sequence[Optional[CourtKeypoints]]] = None,
 ) -> List[Track]:
     """Score each track, sort by score descending.
 
@@ -482,6 +579,7 @@ def score_tracks(
         return tracks
 
     last_index = max(total_frames - 1, 1)
+    corners = _CourtCorners(court_keypoints_by_frame)
     for trk in tracks:
         obs = trk.observations
         n = trk.num_obs
@@ -492,6 +590,7 @@ def score_tracks(
         inside_frac, strict_inside_frac = _court_fractions(
             trk, court_poly, cfg.court_expand_px
         )
+        lateral_min_m = _court_lateral_min_m(trk, corners)
         motion_overlap = sum(1 for o in obs if o.on_motion) / max(n, 1)
         near_player_frac, near_player_court_frac = _near_player_fractions(
             trk, player_boxes_by_frame, court_poly, cfg.court_expand_px
@@ -527,6 +626,7 @@ def score_tracks(
             "span": span,
             "inside_frac": float(inside_frac),
             "inside_strict_frac": float(strict_inside_frac),
+            "court_lateral_min_m": float(lateral_min_m),
             "motion_evidence": float(motion_evidence),
             "motion_overlap": float(motion_overlap),
             "motion_kin_frac": float(motion_kin_frac),

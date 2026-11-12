@@ -258,7 +258,7 @@ def test_court_event_stage_runs_the_model_contacts_and_legs(bounce_model, capsys
     )
     pass1 = SimpleNamespace(player_boxes=[player] * len(track), court_keypoints=[KEYPOINTS] * len(track))
     selection = SimpleNamespace(per_frame=track)
-    events = pipeline._court_events(ctx, pass1, selection)
+    events = pipeline.compute_court_events(ctx, pass1, selection)
     out = capsys.readouterr().out
     assert isinstance(events, CourtEvents) and events.computed
     assert [bounce.frame for bounce in events.bounces] == [15] and events.contacts == []
@@ -272,13 +272,13 @@ def test_court_event_stage_runs_the_model_contacts_and_legs(bounce_model, capsys
     # Off, the stage neither loads the model nor prints; either flag alone turns it on.
     FakeBounceModel.loaded = []
     ctx.cfg.draw_court_minimap = False
-    assert pipeline._court_events(ctx, pass1, selection) == CourtEvents()
+    assert pipeline.compute_court_events(ctx, pass1, selection) == CourtEvents()
     assert FakeBounceModel.loaded == [] and capsys.readouterr().out == ""
     ctx.cfg.court_events = True
-    assert pipeline._court_events(ctx, pass1, selection) == events
+    assert pipeline.compute_court_events(ctx, pass1, selection) == events
     ctx.cfg.bounce_model_path = None
     with pytest.raises(RuntimeError, match="bounce_model_path"):
-        pipeline._court_events(ctx, pass1, selection)
+        pipeline.compute_court_events(ctx, pass1, selection)
 
 
 # What ``--court`` adds to the golden clip's tracking JSON: the stages run and find nothing.
@@ -328,22 +328,22 @@ def test_a_model_bounce_is_exported_with_its_provenance_and_its_leg(tmp_path, mo
     from tennis_tracker.export import court_events_to_json
 
     def one_landing(scene, model_path):
-        point = ball_point(scene.per_frame[35])
-        return BouncePrediction([BounceEvent(35, point.x, point.y, 0.9, "model", point.position)], [])
+        point = ball_point(scene.per_frame[24])
+        return BouncePrediction([BounceEvent(24, point.x, point.y, 0.9, "model", point.position)], [])
 
     monkeypatch.setattr(pipeline, "predict_bounce_events", one_landing)
     result = run_pipeline(tmp_path, monkeypatch, clip, **JSON_ONLY_OVERRIDES,
                           court_events=True, bounce_model_path=str(bounce_model))
-    block, row = result["raw_json"]["court_events"], result["raw_json"]["frames"][35]
-    assert row["present"] and row["position_kind"] == "filtered"            # the refit moved every detected row
-    assert block["bounces"] == [{"frame": 35, "x": row["measurement"]["x"], "y": row["measurement"]["y"], "score": 0.9,
+    block, row = result["raw_json"]["court_events"], result["raw_json"]["frames"][24]
+    assert row["present"] and row["position_kind"] == "filtered"            # a row the refit moved
+    assert block["bounces"] == [{"frame": 24, "x": row["measurement"]["x"], "y": row["measurement"]["y"], "score": 0.9,
                                  "origin": "model", "position": "measurement"}]  # placed at the detector's point
     assert block["bounce_candidates"] == [] and block["contacts"] == []
     (leg,) = block["rally_legs"]
-    assert leg["end_frame"] == 35 and leg["outcome"] == "bounce" and leg["start_frame"] < 35
+    assert leg["end_frame"] == 24 and leg["outcome"] == "bounce" and leg["start_frame"] < 24
     assert (leg["quality"], leg["start_quality"], leg["start_source"]) == ("confirmed", "inferred", "inferred")
     assert (leg["landing_origin"], leg["landing_position"]) == ("model", "measurement")
     assert all(isinstance(leg[key], list) and len(leg[key]) == 2 for key in ("start", "end"))
     events = result["result"].court_events
-    assert events.computed and [bounce.frame for bounce in events.bounces] == [35]
+    assert events.computed and [bounce.frame for bounce in events.bounces] == [24]
     assert json.loads(json.dumps(court_events_to_json(events))) == block

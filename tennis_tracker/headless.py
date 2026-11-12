@@ -9,20 +9,27 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
-from .config import Config
+from .config import Config, PrepassMode
 from .paths import BOUNCE_MODEL, COURT_ENGINE, PLAYER_ENGINE
+from .ball_weights import operating_visibility_gate
 from .export import RunResult
 from .tracking_schema import TrackingFrames
 
 
 def headless_config(video: Path, *, model_path: Path, conf: float, device: str, tracking_json: Path,
                     output_video: Optional[Path] = None, court_events: bool = False,
-                    window_step: Optional[int] = None) -> Config:
+                    window_step: Optional[int] = None, prepass_mode: Optional[PrepassMode] = None,
+                    visibility_gate: Optional[float] = None) -> Config:
     """The tracker's configuration for a run that writes the tracking JSON and no video: the
     bundled player and court engines, the selector's table silenced. ``output_video`` only names
     the video the run would have written (its debug outputs are derived from it); ``court_events``
     also computes and exports the court events, with the bundled bounce model; ``window_step`` is
-    ``Config.gridtracknet_window_step``, the prepass's frames between unit starts (None, its default)."""
+    ``Config.gridtracknet_window_step``, the prepass's frames between unit starts, and ``prepass_mode``
+    ``Config.ball_prepass_mode``, where the prepass runs (None, their defaults); ``visibility_gate`` is
+    ``Config.ball_visibility_gate`` (None: the one `model_path` was gated with,
+    ``ball_weights.operating_visibility_gate``; 0: off)."""
+    if visibility_gate is None:
+        visibility_gate = operating_visibility_gate(model_path)
     config = Config(
         input_video=str(video),
         output_video=str(output_video or tracking_json.with_suffix(".mp4")),
@@ -36,18 +43,23 @@ def headless_config(video: Path, *, model_path: Path, conf: float, device: str, 
         save_tracking_video=False,
         court_events=court_events,
         print_selector_tracks=False,
+        ball_visibility_gate=float(visibility_gate),
     )
-    return config if window_step is None else replace(config, gridtracknet_window_step=window_step)
+    if window_step is not None:
+        config = replace(config, gridtracknet_window_step=window_step)
+    return config if prepass_mode is None else replace(config, ball_prepass_mode=prepass_mode)
 
 
 def run_headless(video: Path, *, model_path: Path, conf: float, device: str, tracking_json: Path,
                  output_video: Optional[Path] = None, court_events: bool = False,
-                 window_step: Optional[int] = None) -> RunResult:
+                 window_step: Optional[int] = None, prepass_mode: Optional[PrepassMode] = None,
+                 visibility_gate: Optional[float] = None) -> RunResult:
     """Track ``video`` with ``headless_config``'s settings and return what was found."""
     from .pipeline import run     # the pipeline imports CUDA, TensorRT and the renderers: only when a run is wanted
 
     return run(headless_config(video, model_path=model_path, conf=conf, device=device, tracking_json=tracking_json,
-                               output_video=output_video, court_events=court_events, window_step=window_step))
+                               output_video=output_video, court_events=court_events, window_step=window_step,
+                               prepass_mode=prepass_mode, visibility_gate=visibility_gate))
 
 
 def tracking_payload(result: RunResult) -> TrackingFrames:

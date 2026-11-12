@@ -1,7 +1,16 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional, Tuple
 
-from tennis_tracker.paths import COURT_ENGINE, BALL_WEIGHTS, PLAYER_ENGINE
+from tennis_tracker.ball_weights import DEFAULT_CONF
+from tennis_tracker.paths import COURT_ENGINE, BALL_WEIGHTS, MODELS, PLAYER_ENGINE
+
+# Where the ball prepass runs (Config.ball_prepass_mode; engines/ball_detectors.prepass_mode resolves AUTO).
+PrepassMode = Literal["auto", "foreground", "thread", "process"]
+AUTO: PrepassMode = "auto"
+FOREGROUND: PrepassMode = "foreground"
+THREAD: PrepassMode = "thread"
+PROCESS: PrepassMode = "process"
+PREPASS_MODES: Tuple[PrepassMode, ...] = (AUTO, FOREGROUND, THREAD, PROCESS)
 
 
 @dataclass
@@ -9,12 +18,18 @@ class Config:
     # paths
     input_video: str = r"input_videos/TMP.mp4"
     output_video: str = "output_videos/prof_test.mp4"
-    # The ball detector: .pt HeatmapNet (the default; ``ball_models`` reads its record), .npz GridTrackNet, .engine TensorRT.
+    # The ball detector: a .pt record (``ball_models`` reads its architecture; the default is stream_s4),
+    # .npz GridTrackNet, .engine TensorRT.
     model_path: str = str(BALL_WEIGHTS)
 
     # Ball detector
     ball_class_name: Optional[str] = None
-    conf: float = 0.40     # 0.50 until 2026-10-27: on mixed_v1 0.40 gave +92 hits for +2 false alarms (output/selector_baseline)
+    # The default detector's gated threshold (ball_weights.py; a caller naming other weights passes theirs,
+    # ball_weights.operating_conf). heatmap_s4 runs at 0.40 (0.50 until 2026-10-27: on mixed_v1 0.40 gave +92
+    # hits for +2 false alarms), stream_s4 at 0.38 (the s4_fg1 epoch-46 file, with or without the visibility
+    # head; the epoch-60 file before it ran at 0.42: on mixed_v1 the new file at 0.38 keeps its 95 false
+    # alarms with recall 0.957 against 0.953).
+    conf: float = DEFAULT_CONF
     device: str = "auto"
     # Shift applied to GridTrackNet points, in px at 1080p (positive = down).
     # Measured on the 41 hand-verified clips video13-53: with 0 the median error
@@ -22,13 +37,52 @@ class Config:
     # (p90 6.5), the detections sitting a median 2 px below the labels.
     gridtracknet_y_offset_px: float = 0.0
     gridtracknet_source_stride: Optional[int] = None  # None = 2 at 60 FPS / 1 at 30 FPS (the training cadence)
-    gridtracknet_prepass_background: bool = True  # run the GridTrackNet prepass on a worker thread, overlapped with pass 1
+    # Where the five-frame prepass runs: "foreground" (before pass 1, alone), "thread" (a worker thread,
+    # beside pass 1), "process" (a child process, engines/ball_prepass_process.py, beside pass 1 and from
+    # the start of init) or "auto": the process for a network that streams (stream_s4 with
+    # ball_prepass_streaming), the foreground for the others. The answers are the same in every mode.
+    # In the child, stream_s4's prepass leaves init (1.0 to 2.4 s shorter than heatmap_s4's foreground
+    # one, audit/records/opt_abplus_s4.md) and costs pass 1 up to 0.4 s beside it; the windowed
+    # heatmap_s4 prepass, ~4 s, slowed pass 1 by more than that (opt_ball_prepass.md item 3,
+    # opt_abplus.md item 3).
+    ball_prepass_mode: PrepassMode = AUTO
     # Frames of a phase between one five-frame unit's start and the next: 1 starts a unit at every
     # frame and averages the up-to-five answers each frame gets (the default since 2026-10-26: on
     # heat4's weights, held out, false alarm 0.085 to 0.073 at recall 0.894 to 0.900, and through the
     # pipeline 0.178 to 0.164 at 0.898 to 0.906, for 1.5x the prepass time); 5 answers every frame
     # from one unit, the prepass as it was before.
     gridtracknet_window_step: int = 1
+    # What runs the prepass's network: "tensorrt", an FP16 engine built from the weights on first
+    # use and cached in ball_engine_dir (engines/ball_trt.py; 1.2 to 1.6 ms a unit against 3.8 to 4.1 ms
+    # eager on the throttled RTX 5080 laptop), or "torch", the FP16 PyTorch model. TensorRT falls back to
+    # torch, with a message, when it is not installed or cannot build the model.
+    ball_prepass_runtime: str = "tensorrt"
+    ball_engine_batch: int = 4          # units per engine call (the batch sweep in audit/records/opt_ball_prepass.md)
+    # A network that can stream (stream_s4) encodes each frame's transition once and decodes every
+    # unit from the cached features (ball_gpu.TransitionRing), as two engines; off, it runs unit by
+    # unit like any other. The units are the same and their answers agree to FP16 rounding
+    # (audit/records/opt_stream_prepass.md on the optimization branch).
+    ball_prepass_streaming: bool = True
+    # Experiment (tier 0, test D): above 0, a streaming network's transition has its previous frame
+    # moved by the integer camera translation found within this many 768x432 px before the difference
+    # is taken (ball_gpu.estimate_shift, aligned_previous), cancelling a pan. 0 (the default) leaves
+    # the transition as the network was trained on it.
+    ball_transition_align_px: int = 0
+    ball_engine_dir: str = str(MODELS / "engine_cache")
+    # The prepass decodes with NVDEC (PyNvVideoCodec) where it opens the clip, and its frames stay on
+    # the GPU; else cv2 decodes into pinned memory. Both give the same bytes (video_decode.py).
+    ball_prepass_gpu_decode: bool = True
+    # The visibility gate on the selector's fills: 0 (off) or a probability in (0, 1). The selector
+    # refuses an interpolated or motion fill on a frame whose visibility score (the stream_s4
+    # visibility head's "a ball is visible here" probability, streamnet.StreamNet ``return_vis``) is
+    # below the gate; a detection is never refused, and the tracking JSON records the score per
+    # frame (``visibility``). The streaming prepass computes the score from stream_s4 weights that
+    # carry the head (``ball_detectors.require_visibility_head`` refuses any other); the unit prepass
+    # that reads the head is on ``phase-vis-head2``, and ``replay_selector.py`` applies the gate to
+    # a recorded run's scores. Like ``conf`` the gate belongs to the weights: 0 here, and a caller
+    # that names weights and no gate passes theirs (``ball_weights.operating_visibility_gate``, 0.40
+    # for the default file; ``clean_tracker.py``, ``headless`` and ``evaluate_archive.py`` do).
+    ball_visibility_gate: float = 0.0
 
     # TensorRT
     trt_async_execute: bool = True
@@ -36,16 +90,31 @@ class Config:
     # Replay the per-frame player engine launch from a CUDA graph (see TensorRTRuntimeSession):
     # same kernels, 0.02 ms of CPU per frame instead of 1.9 ms. Needs trt_async_execute.
     trt_cuda_graph: bool = True
+    # Replay pass 1's fixed-shape per-frame GPU work (each frame's conversion and motion planes, the
+    # background update) from CUDA graphs: the same kernels, a fraction of the CPU launch cost
+    # (frame_window.GraphedFrameConversion). Off while the prepass runs on a worker thread, whose
+    # CUDA work would break a capture.
+    pass1_cuda_graphs: bool = True
+    # Build pass 1's motion masks with two CUDA kernels (tennis_tracker/motion_gpu.py) instead of some
+    # forty PyTorch ops a box: the same bits, a few launches (audit/records/opt_abplus.md). Off, or
+    # when NVRTC cannot build them, the PyTorch ops run.
+    motion_kernels: bool = True
 
     # Player & court detection
     player_model_path: Optional[str] = str(PLAYER_ENGINE)
     court_model_path: Optional[str] = str(COURT_ENGINE)
-    # Players move a few px per frame at 60 fps and ByteTrack coasts the boxes
-    # between inferences, while _is_near_player dilates them by margin plus
-    # twice the box height -- far more than one frame of staleness. Measured
-    # on the UCSD clip: det frames identical at every interval tried, 19 of
-    # 3674 frames differ, all in near-player fill vetoes.
+    # Above 1, the player engine and ByteTrack run on every Nth frame only and pass 1
+    # interpolates the boxes between (PlayerDetector). Kept at 1: N=3 cut pass 1 by about
+    # 1.2 ms/frame but lost one of 27 labelled landing hits (audit/records/opt_pass1.md).
     player_detect_interval: int = 1
+    # On a clip of this frame rate and above, the interval is at least 2: the player engine and
+    # ByteTrack run on every other frame (17 ms apart, where a player moves little) and the frames
+    # between are interpolated. Nominal 60 FPS clips report 59.5-60.2; 30 and 50 FPS clips stay on
+    # every frame. It saves 1.4-1.7 s of a Pomona run and 3.7 s of VolyAvw's, leaves the ball
+    # gate unchanged, and moves player boxes by a fraction of a pixel, which on stream_s4 let one
+    # extra labelled landing through (audit/records/opt_speed_players.md). 0 turns it off
+    # (`clean_tracker.py --players-every-frame`).
+    player_every_other_frame_fps: float = 55.0
     court_detect_interval: int = 400
     court_conf: float = 0.10
     print_court_raw: bool = False
@@ -106,6 +175,11 @@ class Config:
     aux_detect_on_detect_frames: bool = True
     aux_force_interval: int = 6
     frame_reader_prefetch: int = 8
+    # Pass 2 decodes past the frame cache with NVDEC (PyNvVideoCodec) where it opens the clip, else
+    # OpenCV (tennis_tracker/video_decode.py; both give the same pixels). Off: pass 2 wants host
+    # frames, and NVDEC's GPU work slowed its NVENC writes (pomona pass 2: 3.84 s with NVDEC,
+    # 3.62 s with OpenCV, median of 3 locked runs). NVDEC pays where the frames stay on the GPU.
+    gpu_decode: bool = False
 
     # ROI-based motion - only compute motion/CC near ball
     roi_motion_enabled: bool = True

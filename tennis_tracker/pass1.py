@@ -8,10 +8,12 @@ preprocessing of frame N+1; a frame is committed when its detections arrive.
 """
 from __future__ import annotations
 
+import collections
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,15 +21,19 @@ from ball_in_play_selector import PackedMask, RawDetection
 
 from .court.court_geometry import court_keypoints_key
 from .court.court_scene import PlayerBoxes
-from .engines.ball_detectors import FrameInput
-from .engines.player_detector import PlayerPending
+from .cuda_kernels import KernelUnavailable
+from .config import THREAD
+from .engines.ball_detectors import BallDetectorBackend, FrameInput
+from .engines.player_detector import PlayerPending, interpolate_player_boxes
 from .frame_window import FrameWindow
 from .motion import (
-    BackgroundModel, DetectorInputRequest, PreprocessResult, build_court_side_protect_mask, preprocess_frame_cuda,
+    BackgroundModel, BoostMasks, DetectorInputRequest, MotionMasks, PreprocessResult, build_court_side_protect_mask,
+    preprocess_frame_cuda,
 )
+from .motion_gpu import MotionKernels
 from .run_context import RunContext
 from .roi_tracking import ROIMotionTracker
-from .video_io import ThreadedFrameReader, VideoWriter
+from .video_io import ThreadedFrameReader, VideoWriter, pinned_source
 
 Box = Tuple[int, int, int, int]
 
@@ -50,7 +56,7 @@ class Pass1Result:
     """Everything pass 1 learned, one entry per decoded frame in source order."""
 
     detections: List[List[RawDetection]] = field(default_factory=list)
-    boost_masks: List[Optional[PackedMask]] = field(default_factory=list)
+    boost_masks: BoostMasks = field(default_factory=BoostMasks)              # filtered when first read
     raw_motions: List[Optional[PackedMask]] = field(default_factory=list)
     rois: List[Optional[List[Box]]] = field(default_factory=list)          # visual ROI boxes
     ghost_rois: List[List[Box]] = field(default_factory=list)              # ROIs of tracks that timed out
@@ -68,14 +74,13 @@ class Pass1Result:
 
 @dataclass
 class FrameRecord:
-    """A frame's evidence, held until its ball detections arrive."""
+    """A frame's evidence, held until its ball detections arrive.  The motion masks are still on
+    their way to the host (``MotionMasks``) and the player boxes are read at commit time, after
+    the frame's player inference has been finished."""
 
     frame_index: int
-    raw_motion_u8: Optional[np.ndarray]
-    boost_mask_u8: Optional[np.ndarray]
-    pack_roi: Optional[Box]                  # rectangle the masks are packed in
+    masks: Optional[MotionMasks]
     rois: Optional[List[Box]]
-    player_boxes: PlayerBoxes
     court_keypoints: Optional[List[float]]
     detector_frame: Optional[np.ndarray]
     detector_frame_cuda: Optional[torch.Tensor]
@@ -94,10 +99,8 @@ class _Preprocessed:
 
     detector_frame: Optional[np.ndarray]
     detector_frame_cuda: Optional[torch.Tensor] = None
-    raw_motion_u8: Optional[np.ndarray] = None
-    boost_mask_u8: Optional[np.ndarray] = None
+    masks: Optional[MotionMasks] = None
     rois_visual: Optional[List[Box]] = None
-    pack_roi: Optional[Box] = None
     det_pending: Any = None
 
     @property
@@ -148,7 +151,9 @@ class FrameCache:
         if self.full:
             return
         try:
-            self.frames.append(frame)
+            # A frame decoded into pinned memory is copied out of it: the clip's frames would
+            # otherwise hold gigabytes of page-locked RAM.
+            self.frames.append(frame.copy() if pinned_source(frame) is not None else frame)
         except MemoryError:
             self.capacity = len(self.frames)
             print(f"[pass 1] RAM frame cache stopped at {self.capacity} frames (MemoryError)")
@@ -177,16 +182,50 @@ def _new_frame_cache(ctx: RunContext) -> Optional[FrameCache]:
     return None
 
 
-def _union_box(rois: List[Box]) -> Box:
-    return (min(r[0] for r in rois), min(r[1] for r in rois),
-            max(r[2] for r in rois), max(r[3] for r in rois))
+Ghosts = List[Tuple[int, Box]]       # ghost ROIs ``(frame, box)`` found as a frame was committed
+
+
+class PlayerBoxHold:
+    """Hands committed frames on in order once their player boxes are final.
+
+    A frame the player tracker ran on goes on at once; one it skipped is held, with the ghosts
+    found as it was committed, until the next tracked frame is committed: then the boxes of the
+    held frames are interpolated between the two tracked frames, weighted by where each frame
+    sits on the source's time line (``position``: a dropped frame between them counts), and the
+    held frames go on before the tracked one.  ``release`` hands on what is still held (the
+    frames after the last tracked one, which keep its boxes).
+    """
+
+    def __init__(self, hand_on: Callable[[int, Ghosts], None], position: Callable[[int], int]) -> None:
+        self._hand_on = hand_on
+        self._position = position
+        self._held: List[Tuple[int, Ghosts]] = []
+
+    def add(self, frame: int, ghosts: Ghosts, boxes: List[PlayerBoxes], tracked: List[bool]) -> None:
+        """Frame `frame` is committed: `boxes` and `tracked` hold every committed frame's player
+        boxes (rewritten in place for the held frames) and whether the tracker ran on it."""
+        if not tracked[frame]:
+            self._held.append((frame, ghosts))
+            return
+        if self._held:
+            start = max(0, self._held[0][0] - 1)          # the tracked frame before the gap
+            span = slice(start, frame + 1)
+            boxes[span] = interpolate_player_boxes(boxes[span], tracked[span],
+                                                   [self._position(index) for index in range(start, frame + 1)])
+        self.release()
+        self._hand_on(frame, ghosts)
+
+    def release(self) -> None:
+        held, self._held = self._held, []
+        for held_frame, held_ghosts in held:
+            self._hand_on(held_frame, held_ghosts)
 
 
 def _same_box(a: Box, b: Box) -> bool:
     return all(abs(int(a[i]) - int(b[i])) <= _ROI_MATCH_TOLERANCE_PX for i in range(4))
 
 
-class _Pass1Collector:
+class Pass1Collector:
     """The pass-1 loop and the per-frame state it carries between iterations."""
 
     def __init__(self, ctx: RunContext, window: FrameWindow,
@@ -200,7 +239,8 @@ class _Pass1Collector:
         self.player_detector = ctx.player_detector
         self.window = window
         self.detector_input_writer = detector_input_writer
-        self.background = BackgroundModel(self.cfg, ctx.device)
+        self.background = BackgroundModel(self.cfg, ctx.device, cuda_graphs=use_cuda_graphs(self.cfg, ctx.detector))
+        self.motion_kernels = _load_motion_kernels(self.cfg, ctx.device)
         self.roi_tracker = ROIMotionTracker(self.cfg, self.video.width, self.video.height, self.video.fps)
         self.pre_cuda_perf: Optional[Dict[str, float]] = (
             {"pre_cuda_total": 0.0, "pre_cuda_raw_d2h": 0.0, "pre_cuda_cc_filter": 0.0}
@@ -220,6 +260,10 @@ class _Pass1Collector:
         self._frame_cache = _new_frame_cache(ctx)
         self.result = Pass1Result(cached_frames=self._frame_cache.frames if self._frame_cache is not None else None)
         self._progress_frame, self._progress_elapsed = 0, 0.0   # where the last progress line was
+        self._player_pending: Deque[PlayerPending] = collections.deque()   # launched, not yet finished
+        self._players_tracked: List[bool] = []    # per committed frame: did the player tracker run on it
+        # Hands each committed frame on (``committed``) once its player boxes are final.
+        self._player_hold = PlayerBoxHold(self.committed, self.source_position)
 
     # -- per-frame steps -------------------------------------------------------
 
@@ -269,23 +313,23 @@ class _Pass1Collector:
         return self._protect_mask_cuda
 
     def _preprocess(self, frame_index: int, court_kps: Optional[List[float]],
-                    detect_this_frame: bool) -> Tuple[PreprocessResult, Optional[List[Box]], Optional[Box]]:
+                    detect_this_frame: bool) -> Tuple[PreprocessResult, Optional[List[Box]]]:
         """Motion masks and detector input for the current frame.
 
-        Returns ``(preprocess_result, visual_rois, pack_roi)``.
+        Returns ``(preprocess_result, visual_rois)``.  The court-side protect mask only shapes
+        the detector input, so it is built only for a frame that asks for one.
         """
-        protect_mask_cuda = self._protect_mask_for(court_kps)
+        request = self._detector_input_request(detect_this_frame)
+        protect_mask_cuda = self._protect_mask_for(court_kps) if (request.cpu or request.cuda) else None
         rois, rois_visual = self.roi_tracker.next_rois(frame_index)
         if rois:
-            pack_roi = _union_box(rois)
             self.result.roi_frames += len(rois)
         else:
-            pack_roi = None
             self.result.fullframe_frames += 1
-        pre = preprocess_frame_cuda(self.window, self.background, self.cfg,
-                                    request=self._detector_input_request(detect_this_frame),
-                                    rois=rois, protect_mask=protect_mask_cuda, perf=self.pre_cuda_perf)
-        return pre, rois_visual, pack_roi
+        pre = preprocess_frame_cuda(self.window, self.background, self.cfg, request=request,
+                                    rois=rois, protect_mask=protect_mask_cuda, perf=self.pre_cuda_perf,
+                                    kernels=self.motion_kernels)
+        return pre, rois_visual
 
     def _detector_input_request(self, detect_this_frame: bool) -> DetectorInputRequest:
         """Which detector inputs this frame's preprocessing must build.
@@ -308,17 +352,36 @@ class _Pass1Collector:
 
     # -- committing frames ------------------------------------------------------
 
+    def _finish_players(self, through_frame: int) -> None:
+        """Finish the player inferences launched for frames up to ``through_frame``, in order.
+
+        A frame's player inference is launched in its own iteration and finished in the next,
+        just before the frame is committed, so the GPU has a whole frame of other work to run it
+        behind instead of the loop waiting for it; ByteTrack still sees every frame in order, and
+        a frame's boxes are the tracker's state after its own frame, as before.
+        """
+        while self._player_pending and self._player_pending[0].frame_index <= through_frame:
+            t0 = self.timing.start()
+            self.player_detector.detect_async_finish(self._player_pending.popleft())
+            self.timing.add("pass1_aux_wait", t0)
+
     def _commit(self, record: FrameRecord, dets: List[RawDetection]) -> None:
         """Append the frame's evidence; retire the ROIs of tracks that just timed out."""
+        self._finish_players(record.frame_index)
         t0 = self.timing.start()
         out = self.result
         dropped_ghost_rois = self.roi_tracker.update_from_dets(dets, record.frame_index)
         out.detections.append(dets)
-        out.boost_masks.append(PackedMask.pack(record.boost_mask_u8, roi=record.pack_roi))
-        out.raw_motions.append(PackedMask.pack(record.raw_motion_u8, roi=record.pack_roi))
+        masks = record.masks
+        if masks is not None:
+            masks.store_boost(out.boost_masks)
+        else:
+            out.boost_masks.append(None)
+        out.raw_motions.append(masks.packed_raw() if masks is not None else None)
         # A track that timed out never had the ball: its coasting ROIs on
         # earlier frames are moved from the visual ROI list to the ghost list,
         # and erase_ghost_rois() clears their motion in one batch after pass 1.
+        found: List[Tuple[int, Box]] = []
         for ghost_frame, rx1, ry1, rx2, ry2 in dropped_ghost_rois:
             if not (0 <= ghost_frame < len(out.raw_motions)) or ghost_frame == record.frame_index:
                 continue
@@ -328,10 +391,14 @@ class _Pass1Collector:
             kept = [box for box in out.rois[ghost_frame] if not _same_box(box, ghost)]
             if len(kept) != len(out.rois[ghost_frame]):
                 out.ghost_rois[ghost_frame].append(ghost)
+                found.append((ghost_frame, ghost))
             out.rois[ghost_frame] = kept if kept else None
         out.rois.append(record.rois)
         out.ghost_rois.append([])
-        out.player_boxes.append(record.player_boxes)
+        # A frame the player tracker skips (``effective_player_interval``) holds the last tracked
+        # frame's boxes until the next tracked frame's are in (``PlayerBoxHold`` interpolates them).
+        out.player_boxes.append(self.player_detector.player_boxes_by_slot())
+        self._players_tracked.append(self.player_detector.tracks_frame(record.frame_index))
         out.court_keypoints.append(record.court_keypoints)
         if self.detector_input_writer is not None:
             # Stream the detector input straight to its writer rather than keep it.
@@ -340,6 +407,18 @@ class _Pass1Collector:
             elif record.detector_frame_cuda is not None:
                 self.detector_input_writer.write(record.detector_frame_cuda.detach().cpu().numpy())
         self.timing.add("pass1_store", t0)
+        self._player_hold.add(record.frame_index, found, self.result.player_boxes, self._players_tracked)
+
+    def committed(self, frame_index: int, ghosts: Ghosts) -> None:
+        """Called once frame `frame_index`'s evidence is final, its player boxes included, in frame
+        order, with the ghost ROIs ``(frame, box)`` added to earlier frames as it was committed; for a
+        subclass that hands frames on (the live tracker). A frame the player tracker skipped comes
+        with the next frame it ran on (``PlayerBoxHold``), so its boxes are the interpolated ones."""
+
+    def source_position(self, frame_index: int) -> int:
+        """Where committed frame `frame_index` sits on the source's time line: the frame itself,
+        unless a subclass drops source frames (the live tracker)."""
+        return frame_index
 
     def _finish_pending(self, pending: PendingDetection) -> None:
         t0 = self.timing.start()
@@ -355,20 +434,16 @@ class _Pass1Collector:
         """Preprocess the frame and start its ball inference as soon as the input is ready, so
         it overlaps the CPU work that follows. Returns ``prev_pending`` unchanged, or None when a
         backend without output slots had to finish the previous frame first."""
-        pre, rois_visual, pack_roi = self._preprocess(frame_index, court_kps, detect_this_frame)
+        pre, rois_visual = self._preprocess(frame_index, court_kps, detect_this_frame)
         out = _Preprocessed(
             detector_frame=frame if self.detector.uses_raw_frames else pre.detector_frame,
             detector_frame_cuda=pre.detector_frame_cuda,
-            raw_motion_u8=pre.raw_motion, boost_mask_u8=pre.boost_mask,
-            rois_visual=rois_visual, pack_roi=pack_roi)
+            masks=pre.masks, rois_visual=rois_visual)
         if detect_this_frame:
             if prev_pending is not None and not self.can_overlap_ball_inference:
                 self._finish_pending(prev_pending)
                 prev_pending = None
             out.det_pending = self.detector.detect_async_start(out.detector_input, frame_index=frame_index)
-        post_t0 = self.timing.start()
-        self.background.remember_motion(out.raw_motion_u8, roi=out.pack_roi)
-        self.timing.add("pass1_pre_postmask", post_t0)
         return out, prev_pending
 
     def _queue_detection(self, record: FrameRecord, pre: _Preprocessed,
@@ -409,20 +484,16 @@ class _Pass1Collector:
             if self._frame_cache is not None:
                 self._frame_cache.add(frame)
             if cfg.enable_preprocess:
-                self.background.update(window.curr_gpu.v, window.curr_gpu.s)
+                self.background.update(window.curr_gpu.vs)
             detect_this_frame = self._should_detect(frame_index)
             court_kps, player_pending = self._aux_detect(frame_index, frame, detect_this_frame)
+            if player_pending is not None:
+                self._player_pending.append(player_pending)
 
             pre_t0 = timing.start()
             pre = _Preprocessed(detector_frame=frame)
             if cfg.enable_preprocess:
                 pre, prev_pending = self._preprocess_frame(frame_index, frame, court_kps, detect_this_frame, prev_pending)
-            if player_pending is not None:
-                # The wait for the player engine and its result's trip to the host, apart from the
-                # launch, so the timing report shows how much of a frame pass 1 spends waiting.
-                aux_t0 = timing.start()
-                self.player_detector.detect_async_finish(player_pending)
-                timing.add("pass1_aux_wait", aux_t0)
             timing.add("pass1_preprocess", pre_t0)
 
             if prev_pending is not None:
@@ -430,11 +501,8 @@ class _Pass1Collector:
 
             record = FrameRecord(
                 frame_index=frame_index,
-                raw_motion_u8=pre.raw_motion_u8,
-                boost_mask_u8=pre.boost_mask_u8,
-                pack_roi=pre.pack_roi,
+                masks=pre.masks,
                 rois=pre.rois_visual if pre.rois_visual is not None else self.roi_tracker.last_rois,
-                player_boxes=self.player_detector.player_boxes_by_slot(),
                 court_keypoints=court_kps,
                 detector_frame=pre.detector_frame,
                 detector_frame_cuda=pre.detector_frame_cuda,
@@ -449,6 +517,10 @@ class _Pass1Collector:
 
         if pending is not None:
             self._finish_pending(pending)
+        self._finish_players(frame_index)
+        # The frames the player tracker skipped have their boxes (``PlayerBoxHold``), except those
+        # after the last frame it ran on, which keep that frame's boxes.
+        self._player_hold.release()
         return self.result
 
 
@@ -461,22 +533,55 @@ def _open_detector_input_writer(ctx: RunContext) -> Optional[VideoWriter]:
                        cfg, encoder=ctx.encoder)
 
 
+def use_cuda_graphs(cfg, detector: BallDetectorBackend) -> bool:
+    """Whether pass 1 replays its fixed-shape GPU work from CUDA graphs: ``cfg.pass1_cuda_graphs``,
+    unless the prepass runs on a worker thread of this process, whose CUDA work during a capture
+    would invalidate it (a prepass process has its own context)."""
+    return bool(cfg.pass1_cuda_graphs) and detector.prepass_mode != THREAD
+
+
+def _pinned_frame_shape(ctx: RunContext) -> Optional[Tuple[int, int]]:
+    """The ``(height, width)`` pass 1's reader decodes into pinned buffers when the frames go to the
+    GPU, so their upload needs no copy into a pinned buffer on this thread; else None."""
+    if not (ctx.cfg.enable_preprocess and ctx.device.type == "cuda"):
+        return None
+    return ctx.video.height, ctx.video.width
+
+
+def _load_motion_kernels(cfg, device: torch.device) -> Optional[MotionKernels]:
+    """The motion-mask kernels (``motion_gpu``) when ``cfg.motion_kernels`` asks for them and the
+    device is a GPU, else None (the PyTorch ops build the same masks); a kernel that cannot be
+    loaded is reported and the PyTorch ops run."""
+    if not (cfg.enable_preprocess and cfg.motion_kernels and device.type == "cuda"):
+        return None
+    try:
+        return MotionKernels.load(device, Path(cfg.ball_engine_dir))
+    except KernelUnavailable as error:
+        # Only loading falls back: a launch that fails later, mid-clip, raises to the caller rather
+        # than switch paths half way through the masks.
+        reason = str(error).partition("\n")[0]
+        print(f"[pass 1] motion kernels unavailable, building the masks with PyTorch ops ({reason})")
+        return None
+
+
 def collect_pass1(ctx: RunContext) -> Pass1Result:
     """Decode the clip and collect per-frame evidence; raises RuntimeError on an empty clip."""
     cfg, timing = ctx.cfg, ctx.timing
     print("[preprocess] CUDA S+V motion path" if cfg.enable_preprocess else "[preprocess] disabled")
-    reader = ThreadedFrameReader(ctx.capture, prefetch=max(2, cfg.frame_reader_prefetch))
+    reader = ThreadedFrameReader(ctx.capture, prefetch=max(2, cfg.frame_reader_prefetch),
+                                 pinned_shape=_pinned_frame_shape(ctx))
     first = reader.read()
     if first is None:
         reader.release()
         raise RuntimeError(f"No frames in video: {ctx.video.path}")
     second = reader.read()
-    window = FrameWindow(ctx.device, cfg.enable_preprocess, first, second)
+    window = FrameWindow(ctx.device, cfg.enable_preprocess, first, second,
+                         cuda_graphs=use_cuda_graphs(cfg, ctx.detector))
     timing.add("init_total", ctx.init_t0)
     pass1_t0 = timing.start()
     print("[pass 1] Collecting detections...")
     detector_input_writer = _open_detector_input_writer(ctx)
-    collector = _Pass1Collector(ctx, window, detector_input_writer)
+    collector = Pass1Collector(ctx, window, detector_input_writer)
     try:
         result = collector.run(reader)
     finally:
@@ -520,7 +625,7 @@ def erase_ghost_rois(result: Pass1Result) -> int:
     t0 = time.perf_counter()
     erased_frames = 0
     for frame_index, ghosts in enumerate(result.ghost_rois):
-        if ghosts and _erase_ghosts_in_frame(result, frame_index, ghosts):
+        if ghosts and erase_ghosts_in_frame(result, frame_index, ghosts):
             erased_frames += 1
     print(f"[pass 1] Batched ghost deletion cleaned {erased_frames} frames in {time.perf_counter() - t0:.2f}s")
     return erased_frames
@@ -536,7 +641,7 @@ def _clear_boxes(mask: Optional[np.ndarray], boxes: List[Box]) -> bool:
     return changed
 
 
-def _erase_ghosts_in_frame(result: Pass1Result, frame_index: int, ghosts: List[Box]) -> bool:
+def erase_ghosts_in_frame(result: Pass1Result, frame_index: int, ghosts: List[Box]) -> bool:
     """Clear the ghost ROIs in one frame's raw and boost masks and repack the ones that changed;
     whether either mask changed."""
     raw = result.raw_motions[frame_index] if frame_index < len(result.raw_motions) else None

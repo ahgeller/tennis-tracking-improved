@@ -13,11 +13,12 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+from tennis_tracker.court.court_geometry import CourtKeypoints
 
 from .config import REFERENCE_DIAG_PX, SelectorConfig
 from .models import Detection, FrameResult, RawDetection, Source, Track
 from .physics import predict_projectile
-from .scoring import is_near_player, score_tracks, select_timeline_chain, stitch_track_chain
+from .scoring import adopt_fragments, is_near_player, score_tracks, select_timeline_chain, stitch_track_chain
 from .association import build_detections, build_tracks
 from .utils import MaskLike, PackedMask, PlayerBoxesByFrame, ensure_mask_u8, pxpf_at_fps
 
@@ -62,9 +63,9 @@ _TOP_REENTRY_FRAC = 0.15
 _SINGLE_HOLE_MAX_STEP_DIAG_FRAC = 0.015
 # A non-detector point further than max(120 px, 5.5% of the diagonal) from
 # its predecessor is dropped: better one missing row than a cross-court line.
-# The jump gate's floor, the kink and spike gates below and the relabel floor
-# are 1080p pixels, scaled to the clip's diagonal where they are read (``_px``).
-# The refit's bounds, Huber width and outlier floor are not: they describe the
+# The jump gate's floor and the kink and spike gates below are 1080p pixels,
+# scaled to the clip's diagonal where they are read (``_px``).
+# The refit's bounds and Huber width are not: they describe the
 # detector's error, which the replay says is the same count of native pixels at
 # 720p as at 1080p (scaling them cost 17 hits on the 720p clips, 2026-10-27).
 _JUMP_GATE_MIN_PX = 120.0
@@ -81,26 +82,29 @@ _SPIKE_GATE_MIN_PX = 10.0
 _REFINE_SOURCE_WEIGHT = {"det": 1.0, "motion": 0.30, "interp": 0.15}
 _REFINE_WEAK_DET_WEIGHT = 0.6
 _REFINE_SPIKE_WEIGHT = 0.02
-# Detector confidence that makes a point a full-weight anchor, and the one
-# past which it counts as a strong detection whose residual bounds the refit.
+# Detector confidence that makes a point a full-weight anchor of its neighbours' fit.
 _REFINE_FULL_WEIGHT_CONF = 0.70
-_REFINE_STRONG_DET_CONF = 0.55
 # Every point is fitted over at most this many neighbours on each side, with a
 # Huber loss that down-weights residuals beyond this many pixels.
 _REFINE_WINDOW = 10
 _REFINE_HUBER_PX = 4.0
-# How far the refit may move a point: a strong detection, a motion blob, a fill.
-_REFIT_BOUND_STRONG_DET_PX = 3.0
+# How far the refit may move a point: a detection, a motion blob, a fill. Until 2026-11-11 a
+# detection under 0.55 took the fill's 12 px; on mixed_v1 that dragged true weak detections 10 to
+# 18 px off the ball (replay of the default run: +12 hits at 3 px, no false alarm and no wrong
+# pick added). Every move is bounded: until 2026-10-30 a spike and a
+# strong detection off the local fit moved without a bound (meant to repair a
+# short target switch) and were relabelled 'interp' past ~44 px. On the 62
+# non-held-out clips (shipped model) those moves put 27 rows more than 30 px
+# from the label, 26 of them detections that had been within 10 px, for 2
+# repaired: they are bounces and contacts the fit cannot follow
+# (audit/records/opt_picker_rules.md).
+_REFIT_BOUND_DET_PX = 3.0
 _REFIT_BOUND_MOTION_PX = 6.0
 _REFIT_BOUND_FILL_PX = 12.0
-# A strong detection whose residual exceeds max(9 px, 4x the median residual
-# of the other detector points) is off the path, so its move is unbounded.
-_REFIT_OUTLIER_MIN_PX = 9.0
-_REFIT_OUTLIER_RESIDUAL_MULT = 4.0
-# Past this much correction a "det" point is no longer where the detector
-# fired, so it stops being reported as one (~44 px at 1080p, never under 12).
-_REFINE_DET_RELABEL_FRAC = 0.02
-_REFINE_DET_RELABEL_MIN_PX = 12.0
+# A fit that lands within this of a point (a point already on its neighbours' line) leaves it
+# exactly where it is: the residue is floating-point noise that differs between BLAS builds, and
+# it would flip the point's position_kind from 'measurement' to 'filtered'.
+_REFIT_NOISE_PX = 1e-6
 
 
 def _px(value_at_1080p: float, diag: float) -> float:
@@ -109,7 +113,8 @@ def _px(value_at_1080p: float, diag: float) -> float:
 
 
 def selected_tracks(tracks: List[Track]) -> List[Track]:
-    """Keep established shots, reacquisitions, airborne balls, and slow in-court rolls.
+    """Keep established shots, reacquisitions, airborne balls, and slow in-court rolls, unless the
+    track stays beside a neighbouring court.
 
     Every threshold comes from each track's own ``cfg`` (already scaled to the
     clip's frame rate and resolution).
@@ -161,9 +166,11 @@ def selected_tracks(tracks: List[Track]) -> List[Track]:
             and extent_px >= cfg.select_rolling_extent_frac * cfg.diag
             and score_density >= cfg.select_rolling_score_density_min
         )
+        # Whatever its evidence, a ball that stays beside another court is not ours.
+        off_court = track.score_value("court_lateral_min_m") > cfg.select_off_court_lateral_m
         track.selection = {"established": established, "reacquired": reacquired,
-                           "airborne": airborne, "rolling": rolling}
-        if established or reacquired or airborne or rolling:
+                           "airborne": airborne, "rolling": rolling, "off_court": off_court}
+        if (established or reacquired or airborne or rolling) and not off_court:
             selected.append(track)
     return sorted(selected, key=lambda track: (track.first_frame, track.last_obs_frame))
 
@@ -315,10 +322,6 @@ def _motion_candidate(
     return None
 
 
-def _segment_speed(first: Detection, second: Detection) -> float:
-    return math.hypot(second.cx - first.cx, second.cy - first.cy) / max(1, second.frame - first.frame)
-
-
 def _segment_cosine(a: Detection, b: Detection, c: Detection, d: Detection) -> float:
     """Cosine between the incoming segment a->b and the outgoing segment c->d."""
     ax, ay = b.cx - a.cx, b.cy - a.cy
@@ -440,42 +443,22 @@ def _find_spikes(x: np.ndarray, y: np.ndarray, diag: float = REFERENCE_DIAG_PX) 
     return spikes
 
 
-def _refit_bound(
-    index: int,
-    spikes: np.ndarray,
-    is_strong_det: np.ndarray,
-    source: str,
-    residual: np.ndarray,
-    local: int,
-    base_w: np.ndarray,
-) -> Optional[float]:
-    """How far the refit may move point `index`; None means unbounded."""
-    if spikes[index]:
-        return None
-    if is_strong_det[index]:
-        det_mask = base_w >= _REFINE_WEAK_DET_WEIGHT     # the detector points of the window
-        det_mask[local] = False
-        if det_mask.any():
-            other_residual = float(np.median(residual[det_mask]))
-            if residual[local] > max(_REFIT_OUTLIER_MIN_PX, _REFIT_OUTLIER_RESIDUAL_MULT * other_residual):
-                return None
-        return _REFIT_BOUND_STRONG_DET_PX
+def _refit_bound(source: str) -> float:
+    """How far the refit may move a point: a detection, a motion blob, a fill."""
+    if source == "det":
+        return _REFIT_BOUND_DET_PX
     if source == "motion":
         return _REFIT_BOUND_MOTION_PX
     return _REFIT_BOUND_FILL_PX
 
 
-def _refine_weights(points: Sequence[FrameResult]) -> Tuple[np.ndarray, np.ndarray]:
-    """Per-point fit weights and the strong-detection flags, before spikes are marked."""
-    weights = np.array([
+def _refine_weights(points: Sequence[FrameResult]) -> np.ndarray:
+    """Per-point fit weights, before spikes are marked."""
+    return np.array([
         (1.0 if item.conf >= _REFINE_FULL_WEIGHT_CONF else _REFINE_WEAK_DET_WEIGHT) if item.source == "det"
         else _REFINE_SOURCE_WEIGHT[item.source]
         for item in points
     ])
-    is_strong_det = np.array([
-        item.source == "det" and item.conf >= _REFINE_STRONG_DET_CONF for item in points
-    ])
-    return weights, is_strong_det
 
 
 def _despiked(x: np.ndarray, y: np.ndarray, spikes: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -506,13 +489,11 @@ def _segment_bounds(m: int, kinks: Sequence[int]) -> Tuple[np.ndarray, np.ndarra
 
 def _local_fit(
     tt: np.ndarray, xx: np.ndarray, yy: np.ndarray, base_w: np.ndarray, degree: int
-) -> Tuple[float, float, np.ndarray]:
+) -> Tuple[float, float]:
     """Two rounds of a Huber-reweighted weighted polynomial fit; the fitted
-    position at ``tt == 0`` and the last round's residuals."""
-    count = len(tt)
-    robust = np.ones(count)
+    position at ``tt == 0``."""
+    robust = np.ones(len(tt))
     fit_x = fit_y = 0.0
-    residual = np.zeros(count)
     for _ in range(2):
         sqrt_w = np.sqrt(base_w * robust)
         design = np.vander(tt, degree + 1)
@@ -523,12 +504,12 @@ def _local_fit(
         residual = np.hypot(fitted[:, 0] - xx, fitted[:, 1] - yy)
         robust = np.minimum(1.0, _REFINE_HUBER_PX / np.maximum(residual, 1e-9))
         fit_x, fit_y = coeffs[-1, 0], coeffs[-1, 1]
-    return fit_x, fit_y, residual
+    return fit_x, fit_y
 
 
 def _refit_positions(
     points: Sequence[FrameResult], x: np.ndarray, y: np.ndarray, weights: np.ndarray,
-    is_strong_det: np.ndarray, spikes: np.ndarray, kinks: Sequence[int],
+    kinks: Sequence[int],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Every point refitted within its segment and window, moved at most its bound."""
     m = len(points)
@@ -545,13 +526,14 @@ def _refit_positions(
         if base_w.sum() <= 0.0:
             continue
         tt = np.arange(lo, hi + 1, dtype=np.float64) - i
-        fit_x, fit_y, residual = _local_fit(tt, x[lo:hi + 1], y[lo:hi + 1], base_w, 2 if count >= 6 else 1)
-        local = i - lo
-        bound = _refit_bound(i, spikes, is_strong_det, points[i].source, residual, local, base_w)
+        fit_x, fit_y = _local_fit(tt, x[lo:hi + 1], y[lo:hi + 1], base_w, 2 if count >= 6 else 1)
+        bound = _refit_bound(points[i].source)
         dx = fit_x - x[i]
         dy = fit_y - y[i]
         distance = math.hypot(dx, dy)
-        if bound is not None and distance > bound:
+        if distance < _REFIT_NOISE_PX:
+            continue
+        if distance > bound:
             scale = bound / distance
             dx *= scale
             dy *= scale
@@ -565,28 +547,21 @@ def _refine_run(results: List[FrameResult], start: int, end: int, diag: float = 
     points = results[start:end]
     x = np.array([item.cx for item in points])
     y = np.array([item.cy for item in points])
-    weights, is_strong_det = _refine_weights(points)
+    weights = _refine_weights(points)
+    # A spike barely weighs on its neighbours' fit, but it is moved no further than any other
+    # point of its source: a 1-3 frame excursion off the local fit is far more often the ball at a
+    # bounce or a contact than the detector on another object.
     spikes = _find_spikes(x, y, diag)
     weights[spikes] = _REFINE_SPIKE_WEIGHT
-    is_strong_det[spikes] = False
     kinks = _find_trajectory_kinks(*_despiked(x, y, spikes), diag)
-    new_x, new_y = _refit_positions(points, x, y, weights, is_strong_det, spikes, kinks)
-
-    # Repairing a short target switch needs a large correction, so the move
-    # itself stays unbounded. Large relocations are labeled as fitted recovery;
-    # smaller detector-supported adjustments retain their source. The immutable
-    # measurement coordinates remain available separately in either case.
-    relabel_px = max(_px(_REFINE_DET_RELABEL_MIN_PX, diag), _REFINE_DET_RELABEL_FRAC * float(diag))
+    new_x, new_y = _refit_positions(points, x, y, weights, kinks)
+    # Every move is bounded well inside the detector's own error, so a detection keeps its source;
+    # its immutable measurement coordinates stay available beside the fitted ones.
     for index, item in enumerate(points):
         if item.source == "det" and item.measurement is None:
             item.measurement = (float(item.cx), float(item.cy))
-        moved = math.hypot(new_x[index] - item.cx, new_y[index] - item.cy)
         item.cx = float(new_x[index])
         item.cy = float(new_y[index])
-        if item.source == "det" and moved > relabel_px:
-            item.source = "interp"
-            item.interpolated = True
-            item.source_reason = "refit_relocated_detection"
 
 
 def refine_trajectory(results: List[Optional[FrameResult]], diag: float = REFERENCE_DIAG_PX) -> None:
@@ -617,6 +592,19 @@ class _Scene:
     fill_frames: int                # longest gap or tail the selector fills
     min_fill_speed: float           # px/frame at this fps and resolution
     near_player_fill_speed: float   # the same floor beside a player
+    # The visibility gate (``Config.ball_visibility_gate``): per source frame the detector's
+    # probability that a ball is visible (None where it has none), and the probability below
+    # which a fill is refused; 0 is off.
+    visibility: Optional[Sequence[Optional[float]]] = None
+    visibility_gate: float = 0.0
+
+    def fill_refused(self, frame: int) -> bool:
+        """Whether the visibility gate refuses a fill on `frame`: the gate is on and the frame's
+        score is below it. A frame without a score is never refused; a detection never asks."""
+        if self.visibility_gate <= 0.0 or self.visibility is None or frame >= len(self.visibility):
+            return False
+        score = self.visibility[frame]
+        return score is not None and score < self.visibility_gate
 
     def motion_candidate(
         self, frame: int, x: float, y: float, area: float, steps: int, speed: float
@@ -647,36 +635,21 @@ def _place_detections(
 def _gap_is_supported(
     scene: _Scene, observations: List[Detection], index: int, speed: float, direction_supported: bool
 ) -> bool:
-    """Whether a straight fill between observations[index] and [index+1] is a safe claim."""
+    """Whether a straight fill without a blob between observations[index] and [index+1] is a safe
+    claim.
+
+    Only through a hole of one detector step (one missing frame at 30 FPS, two at 60): there it is
+    the ball's line through a racket, the net or a bounce. Over a longer hole a fill without a
+    single observation is a guess: on the 62 non-held-out clips (shipped model) such fills hit 22
+    labels for 54 false alarms, 19 of them off the ball's line (audit/records/opt_picker_rules.md).
+    A blob still places the frames it is found on.
+    """
     left, right = observations[index], observations[index + 1]
     gap = right.frame - left.frame
-    strong_anchors = left.conf >= _STRONG_ANCHOR_CONF and right.conf >= _STRONG_ANCHOR_CONF
-    # A long fill (> ~0.1 s) is a physics claim: both anchors must be
-    # corroborated by a same-track neighbour, and the ball may not change
-    # speed by more than the configured ratio across the gap.  A free-flying
-    # ball cannot triple its speed in the same direction; a detector jump to
-    # a static object after a long miss looks exactly like that.
-    isolation_frames = _isolation_frames(scene.fps)
-    if gap > isolation_frames:
-        corroborated = (
-            index > 0
-            and left.frame - observations[index - 1].frame <= isolation_frames
-            and index + 2 < len(observations)
-            and observations[index + 2].frame - right.frame <= isolation_frames
-        )
-        speed_consistent = all(
-            scene.cfg.fill_speed_ratio_min
-            <= speed / max(_segment_speed(first, second), 1e-6)
-            <= scene.cfg.fill_speed_ratio_max
-            for first, second in (
-                (observations[index - 1], left) if index > 0 else (None, None),
-                (right, observations[index + 2]) if index + 2 < len(observations) else (None, None),
-            )
-            if first is not None
-        )
-        strong_anchors = strong_anchors and corroborated and speed_consistent
     return (
-        strong_anchors
+        gap - 1 <= scene.cfg.detector_phase_stride
+        and left.conf >= _STRONG_ANCHOR_CONF
+        and right.conf >= _STRONG_ANCHOR_CONF
         and direction_supported
         and (gap == 2 or speed >= scene.min_fill_speed)
     )
@@ -708,13 +681,19 @@ def _fill_gap(
     )
     # Judged once for the whole gap, but re-read per frame below: a single
     # frame vetoed beside a player must not disqualify the rest of the gap.
-    gap_pair_supported = _gap_is_supported(scene, observations, index, speed, direction_supported)
-    near_player_slow = speed < scene.near_player_fill_speed
+    gap_pair_supported = (
+        _gap_is_supported(scene, observations, index, speed, direction_supported) and not vertex_in_gap
+    )
     cfg = scene.cfg
+    near_player_slow = speed < scene.near_player_fill_speed
     offset_x = offset_y = 0.0
     offset_active = False
     for frame in range(left.frame + 1, right.frame):
         if results[frame] is not None:
+            continue
+        if scene.fill_refused(frame):
+            offset_x = offset_y = 0.0
+            offset_active = False
             continue
         alpha = (frame - left.frame) / float(gap)
         base_x = left.cx + alpha * (right.cx - left.cx)
@@ -729,7 +708,7 @@ def _fill_gap(
         motion, search_radius = scene.motion_candidate(
             frame, base_x, base_y, area, frame - left.frame, speed
         )
-        pair_supported = gap_pair_supported and not vertex_in_gap
+        pair_supported = gap_pair_supported
         motion_supported = (
             motion is not None
             and (direction_supported or gap == 2)
@@ -831,10 +810,11 @@ def _extend_tail(
         motion, search_radius = scene.motion_candidate(
             frame, base_x, base_y, right.area, step, tail_speed
         )
-        if motion is None:
+        if motion is None or scene.fill_refused(frame):
             # A single blobless frame is a dropped mask, not proof the ball
             # is gone; keep coasting on the prediction for a moment. The
-            # run still ends the moment the evidence runs out for good.
+            # run still ends the moment the evidence runs out for good. A
+            # frame the visibility gate refuses counts as a miss the same way.
             misses += 1
             if misses > cfg.motion_tail_miss_budget:
                 break
@@ -866,6 +846,7 @@ def _close_single_frame_holes(scene: _Scene, results: List[Optional[FrameResult]
             and left.source == right.source == "det"
             and left.conf >= _STRONG_ANCHOR_CONF and right.conf >= _STRONG_ANCHOR_CONF
             and scene.min_fill_speed <= speed <= max_step
+            and not scene.fill_refused(frame)
             and not is_near_player(
                 0.5 * (left.cx + right.cx),
                 0.5 * (left.cy + right.cy),
@@ -916,6 +897,9 @@ def select_ball_in_play(
     raw_motions: Optional[Sequence[Optional[MaskLike]]] = None,
     player_boxes_by_frame: Optional[PlayerBoxesByFrame] = None,
     debug: bool = False,
+    court_keypoints_by_frame: Optional[Sequence[Optional[CourtKeypoints]]] = None,
+    visibility: Optional[Sequence[Optional[float]]] = None,
+    visibility_gate: float = 0.0,
 ) -> Tuple[List[Optional[FrameResult]], Optional[Track], List[Track]]:
     """Select one ball trajectory from per-frame detector candidates.
 
@@ -923,6 +907,12 @@ def select_ball_in_play(
     source frame ``t``.  ``boost_masks`` / ``raw_motions`` are per-frame motion
     masks (``utils.PackedMask``, a full-frame uint8 array, or None),
     ``player_boxes_by_frame[t]`` a dict or list of player boxes.
+    ``court_keypoints_by_frame[t]`` is frame ``t``'s court keypoints (or None); a track is
+    measured against them for the neighbouring-court test, and without them nothing is vetoed.
+    ``visibility[t]`` is the detector's probability that a ball is visible on
+    frame ``t`` (None where it has none) and ``visibility_gate`` the probability
+    below which no fill is placed on that frame (``_Scene.fill_refused``); the
+    default, 0, is off and the scores are not read.
 
     Returns ``(per_frame, chosen, tracks)``: one ``FrameResult`` or ``None`` per
     source frame, the stitched chosen track (``None`` when nothing qualified),
@@ -930,7 +920,8 @@ def select_ball_in_play(
     """
     total = len(detections_by_frame)
     cfg = SelectorConfig(fps=fps, width=width, height=height)
-    scene = make_scene(cfg, fps, total, width, height, boost_masks, raw_motions, player_boxes_by_frame)
+    scene = make_scene(cfg, fps, total, width, height, boost_masks, raw_motions, player_boxes_by_frame,
+                       visibility=visibility, visibility_gate=visibility_gate)
     detections = build_detections(detections_by_frame, boost_masks)
     tracks = score_tracks(
         build_tracks(detections, cfg),
@@ -938,8 +929,9 @@ def select_ball_in_play(
         court_poly=court_polygon,
         player_boxes_by_frame=player_boxes_by_frame,
         total_frames=total,
+        court_keypoints_by_frame=court_keypoints_by_frame,
     )
-    selected = select_timeline_chain(selected_tracks(tracks), cfg, total)
+    selected = adopt_fragments(select_timeline_chain(selected_tracks(tracks), cfg, total), tracks, cfg, total)
     for track in selected:
         track.in_timeline = True
     chosen = stitch_track_chain(selected, cfg)
@@ -971,10 +963,13 @@ def make_scene(
     boost_masks: Optional[Sequence[Optional[MaskLike]]],
     raw_motions: Optional[Sequence[Optional[MaskLike]]],
     player_boxes_by_frame: Optional[PlayerBoxesByFrame],
+    visibility: Optional[Sequence[Optional[float]]] = None,
+    visibility_gate: float = 0.0,
 ) -> _Scene:
     """The inputs the output phase reads, with the fill window at this clip's frame rate and the
     speed floors at its frame rate and resolution: a floor tuned in 1080p pixels is a fraction of
-    the picture, and a 720p ball moving the same way covers two thirds of the pixels."""
+    the picture, and a 720p ball moving the same way covers two thirds of the pixels. The
+    visibility scores and gate are ``select_ball_in_play``'s."""
     res_scale = cfg.diag / REFERENCE_DIAG_PX
     return _Scene(
         cfg=cfg, fps=fps, total=total, width=width, height=height,
@@ -983,6 +978,7 @@ def make_scene(
         fill_frames=max(_FILL_WINDOW_MIN_FRAMES, int(round(float(fps) * _FILL_WINDOW_SEC))),
         min_fill_speed=pxpf_at_fps(_MIN_FILL_SPEED_PXPF * res_scale, fps, clamp=False),
         near_player_fill_speed=pxpf_at_fps(_NEAR_PLAYER_FILL_SPEED_PXPF * res_scale, fps, clamp=False),
+        visibility=visibility, visibility_gate=float(visibility_gate),
     )
 
 

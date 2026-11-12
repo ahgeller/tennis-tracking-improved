@@ -2,11 +2,17 @@
 
 ## Purpose and entry points
 
-This is an offline GPU tennis-video tracker. `clean_tracker.py` runs detection,
+This is a GPU tennis-video tracker, offline by default and live with `--live` or
+`--camera` (`tennis_tracker/live/`, below). `clean_tracker.py` runs detection,
 selection and optional rendering (`--weights` points it at other ball-detector
-weights, `.npz` or `.pt`; the default, `models/ball_detector.pt`, is the heat-map
-network's control run of 2026-10-26, and `models/legacy/` keeps the GridTrackNet
-`.npz` files and the old YOLO `ball.engine`). Outputs are an annotated MP4 and
+weights, `.npz` or `.pt`; the default, `models/candidates/stream_s4_fg1_e46_peakhead.pt`, is the
+`stream_s4` network at 0.38 with its visibility head, run with the selector's visibility gate
+at 0.40 (`--visibility-gate 0` turns the gate off; `candidates/stream_s4_fg1_e46.pt` is the same
+detector without the head, the default from 2026-11-05 to 2026-11-10, and
+`candidates/stream_s4_e60.pt`, the default before that, runs at 0.42), `models/ball_detector.pt` the heat-map network's
+control run of 2026-10-26, run at 0.40, and `models/legacy/` keeps the GridTrackNet
+`.npz` files and the old YOLO `ball.engine`; without `--conf` the threshold is the
+one `tennis_tracker/ball_weights.py` records for the weights). Outputs are an annotated MP4 and
 per-frame JSON. It is not a calibrated 3D ball-flight or line-calling system.
 
 The labelling and GridTrackNet fine-tuning workspace (`finetune/`, its launchers,
@@ -36,35 +42,94 @@ tree. This branch, `main`, is the tracker alone; do not add workspace code here.
   `README.md` ("Keeping one network") says what to delete when an architecture loses,
   and that `memory_s4` and `heatmap_s2` were removed on 2026-10-26 after the held-out
   comparison (the ledger has the runs).
+- The fast candidates on the same contract (`.pt` records, all registered in
+  `ball_models`; untrained until the `train` branch runs them): `heatmap_lite.py`
+  (`heatmap_lite`, HeatmapNet slimmed), `streamnet.py` (`stream_s4`: a shared encoder per
+  frame transition, `encode_frame` once per frame and `decode` per unit from four cached
+  transitions, equal to the unit forward pass; the prepass streams it through
+  `streaming_halves` unless `Config.ball_prepass_streaming` is off) and `wasbnet.py` (`wasb_5f`, WASB-SBDT's
+  small HRNet at stride 4). `repvgg.py` holds their RepVGG blocks and the fold to plain
+  convolutions: `ball_models.deployed(model)` is the inference form (export it, not the
+  trainable one `load_ball_model` returns); `ball_models.load_deployed(weights, device)` folds
+  from the float32 record, so each fused weight is rounded to FP16 once. Measurements: `audit/records/opt_detector_archs.md`
+  on the `optimization` branch.
 - `tennis_tracker/engines/`: `ball_detectors.py`, the progressive GridTrackNet
   prepass and the single-frame TensorRT ball engine. At about 60 FPS, even and
   odd phases each run at about 30 FPS. Preserve source-frame indices and
   temporal order. `Config.gridtracknet_window_step` (1, the default since
   2026-10-26) is the frames of a phase between unit starts: below 5 a frame's
-  overlapping units are averaged before one decode (`_UnitStream`,
-  `_HeatAverage`); 5 is the old prepass, one unit per frame.
+  overlapping units are averaged before one decode (`_UnitStream`, and
+  `HeatRing` in `ball_gpu.py`); 5 is the old prepass, one unit per frame.
+  `ball_gpu.py` is the prepass's device side (OpenCV's resize to the byte, the heat
+  ring, peaks, `TransitionRing`, the cached transition features a streaming network's units are
+  decoded from, and the one kernel that turns NVDEC's NV12 pictures into the model
+  input with the same bytes; `tennis_tracker/cuda_kernels.py` compiles such kernels
+  with the NVRTC PyTorch ships and caches the cubins; `video_decode.py` is NVDEC
+  and OpenCV decoding with OpenCV's pixels); `ball_trt.py` builds and caches the ball model's TensorRT engine
+  (`Config.ball_prepass_runtime`), or a streaming network's encoder and decoder engines
+  (with `Config.ball_visibility_gate` on, the decoder that also answers the stream_s4 visibility
+  head, an engine of its own; the prepass averages a frame's logits over its units in
+  `ball_gpu.LogitRing`, `visibility_scores` gives the probabilities, the prepass process sends
+  them beside its rows and the live tracker feeds them to the fixed-lag selector; weights without
+  the head are refused, `ball_detectors.require_visibility_head`);
+  `ball_prepass_process.py` runs the prepass in a child process (`RemotePrepass`: started
+  with the detector, so it builds its engines while the parent builds its own; told to exit by
+  `finish_prepass` once pass 1 is done, waited for by `close`, which the pipeline calls whatever
+  ends the run, and it exits with its parent). `Config.ball_prepass_mode` places the prepass: `auto` (the default)
+  runs a streaming network's (stream_s4's) in the child beside init and pass 1 and any other
+  before pass 1 (`audit/records/opt_abplus_s4.md` and `opt_ball_prepass.md` on the
+  `optimization` branch have why).
   `engine_session.py`: the TensorRT session the ball, player
   and court engines share; `engine_files.py`: locating engine files, their
   Ultralytics metadata and I/O tensor table (no CUDA); `engine_boxes.py`:
   decoding detection-engine outputs into boxes for the ball and player
   backends. `build_engines.py`: YOLO checkpoint to ONNX to TensorRT engine, run
   as `python -m tennis_tracker.engines.build_engines`. `player_detector.py`:
-  TensorRT players with ByteTrack association.
+  TensorRT players with ByteTrack association. From `Config.player_every_other_frame_fps`
+  (55) up, the engine and ByteTrack run on every other frame (`effective_player_interval`)
+  and pass 1 interpolates the boxes of the frames between (`interpolate_player_boxes`);
+  0 (`clean_tracker.py --players-every-frame`) runs them on every frame.
   `court_detector.py`: court keypoints every N frames, last good result cached.
   `tennis_tracker/paths.py`: the model asset paths every consumer (Config
-  defaults, scripts) spells once. `headless.py`: the one Config and run for a
+  defaults, scripts) spells once. `tennis_tracker/ball_weights.py`: the known ball-detector files'
+  gated thresholds (`operating_conf`) and the error that says where a missing one comes from.
+  `headless.py`: the one Config and run for a
   caller that wants the tracker's answer and no video.
 - `tennis_tracker/pipeline.py`: orders the stages, calls the selector and, with
   `--court` (`Config.court_events`, implied by the minimap), the court events,
   reports. `run_context.py`: data the stages pass each other (`CourtEvents`:
   the bounces, candidates, kinematic bounces, contacts and legs found). `pass1.py`
   (with `frame_window.py`): decoding, background/motion state, ROI collection,
-  detector calls. `pass2.py`: rendering pass. `export.py`: `RunResult`, what a
-  run returns, and the tracking JSON writer, whose `court_events` block carries
-  every event with its provenance (`{}` when they were not computed).
+  detector calls; the fixed-shape per-frame GPU work (frame conversion, motion
+  planes, background update) replays from CUDA graphs
+  (`Config.pass1_cuda_graphs`); frames are decoded into pinned buffers and
+  uploaded from them (`video_io.pinned_source`), and the pass 2 frame cache
+  keeps pageable copies. `Pass1Result.boost_masks` (`motion.BoostMasks`) leaves a
+  frame's boost-mask filter to its first reader: an entry is filtered the first time it
+  is indexed, and ghost-ROI erasure reads and writes through that indexing, so it erases
+  the filtered mask; read and write it by index, never through a copied list.
+  `pass2.py`: rendering pass. `export.py`: `RunResult`,
+  what a run returns, and the tracking JSON writer, whose `court_events` block
+  carries every event with its provenance (`{}` when they were not computed).
   `tracking_schema.py`: the tracking JSON's shape (TypedDicts, typing only),
   which the writer and the scorers share. `motion.py`, `roi_tracking.py`: CUDA
-  motion masks and ROI tracking.
+  motion masks and ROI tracking; `motion_gpu.py` builds the same masks, bit for
+  bit, with two NVRTC kernels (`Config.motion_kernels`; the PyTorch ops in
+  `motion.py` are the reference and the fallback).
+- `tennis_tracker/live/`: the live tracker (`clean_tracker.py --live`, `--camera`): frames in one at
+  a time, each frame's ball out a fixed delay later, the offline stages unchanged. `pipeline.py`
+  drives them (`run_live`; its `region_for` gate, called in `_Pump._push_ball` where a frame
+  reaches the ball model, is the Phase C seam); `source.py` is the frame source and its drop policy; `fixed_lag.py` re-runs the
+  unchanged selector over a sliding window and commits frames `delay` old (`delay` None: the
+  offline answer, exactly); `evidence.py` records the selector's input so
+  `tools/live_lag_sweep.py` (on `train`) replays another lag on the CPU; `selector_process.py`
+  runs the selector in a child process. The prepass is fed through
+  `GridTrackNetBallDetector.open_stream` (`PrepassStream`, which `_prepass` also runs).
+  Pass 1 hands each committed frame on through `Pass1Collector.committed` once its player
+  boxes are final (`pass1.PlayerBoxHold`): at 60 FPS a frame the player tracker skipped
+  reaches the hook one frame late, with the next tracked frame, its boxes interpolated by
+  source index (`Pass1Collector.source_position`, so dropped frames count).
+  `audit/records/opt_live.md` has the measurements and what is not live yet.
 - `tennis_tracker/court/`: `court_geometry.py`, keypoints, side guides, polygon,
   homography; the court-event stages, each reading one `CourtScene`:
   `court_scene.py` (`CourtScene`, the event types and the player-box queries),
@@ -115,9 +180,10 @@ GPU/version specific.
 
 `python -m pytest -q` (pytest required) runs every test: all suites live in
 `tests/` (`pytest.ini` sets `testpaths` and puts the root on the import path),
-use synthetic inputs only and need no GPU. `clean_tracker.py --self-test` runs
-the selector, court-event, ROI and GridTrackNet modules from `tests/` through
-pytest. Put new tests in `tests/` as plain pytest functions (fixtures and
+use synthetic inputs only; the tests that need a CUDA device (the kernels, the
+engines, the uploads) are skipped without one. `clean_tracker.py --self-test`
+runs the selector, court-event, ROI and GridTrackNet modules from `tests/`
+through pytest. Put new tests in `tests/` as plain pytest functions (fixtures and
 `parametrize`, not `unittest.TestCase`), shared synthetic fixtures in
 `tests/_helpers.py`. `audit/` keeps the review's reports and verification
 scripts; `audit/records/` holds their logs and results, and

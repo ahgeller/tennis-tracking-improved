@@ -6,13 +6,22 @@ files here under these names (`tennis_tracker/paths.py` is where they are spelle
 
 | file | what it is | needed for |
 |---|---|---|
-| `ball_detector.pt` | the ball detector (a `heatmap_s4` record) | every run |
+| `candidates/stream_s4_fg1_e46_peakhead.pt` | the default ball detector (a `stream_s4` record: run s4_fg1 epoch 46 with the peak visibility head of run s4_fg1_peak; run at 0.38 with the visibility gate at 0.40) | every run, unless `--weights` names another |
+| `candidates/stream_s4_fg1_e46.pt` | the same detector without the visibility head, the default from 2026-11-05 to 2026-11-10 (run at 0.38, no gate) | `--weights models/candidates/stream_s4_fg1_e46.pt` |
+| `candidates/stream_s4_e60.pt` | the previous default (a `stream_s4` record, epoch 60; run at 0.42) | `--weights models/candidates/stream_s4_e60.pt` |
+| `ball_detector.pt` | the heat-map ball detector (a `heatmap_s4` record; run at 0.40), the training workspace's model | `--weights models/ball_detector.pt` |
 | `player.engine` | TensorRT player detector | every run |
 | `courtdetection.engine` | TensorRT court keypoint detector | every run |
 | `ctb_regr_bounce.cbm` | CatBoost bounce model | `--court` only |
 
 `clean_tracker.py --weights <file>` runs any other ball detector, `.pt` or
-GridTrackNet `.npz`, without copying it here.
+GridTrackNet `.npz`, without copying it here. Without `--conf` a run takes the
+threshold the weights were gated at (`tennis_tracker/ball_weights.py`: the three `.pt`
+files above; 0.40 for any other). That table is keyed by path, not by what is in the file:
+weights elsewhere (a retrained stream_s4 in `finetune/models/`) run at 0.40, which the
+run prints, and weights copied over one of these names (`ft.py promote`) take that
+name's threshold, which `promote` warns about. Gate new weights and give them their
+own entry in `ball_weights.py`, or pass `--conf`.
 
 ## Train your own ball detector
 

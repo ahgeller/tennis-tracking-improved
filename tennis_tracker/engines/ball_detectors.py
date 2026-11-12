@@ -4,9 +4,11 @@ single-frame TensorRT engine.
 Both sit behind ``BallDetectorBackend``: ``GridTrackNetBallDetector`` (the default, a
 five-frame temporal model run as a whole-clip prepass; ``_prepass`` keeps source-frame
 indices and temporal order; the model is whichever ``ball_models.load_ball_model`` builds
-for ``Config.model_path``, GridTrackNet for ``.npz`` and HeatmapNet for ``.pt``) and the
-single-frame Ultralytics TensorRT engine (``Config.model_path`` ending in ``.engine``),
-driven through ``TensorRTRuntimeSession`` from ``engine_session``.
+for ``Config.model_path``, GridTrackNet for ``.npz`` and HeatmapNet for ``.pt``, run as a
+cached TensorRT engine from ``ball_trt`` or as the PyTorch model, a network that streams as its
+two halves over ``ball_gpu.TransitionRing``) and the single-frame
+Ultralytics TensorRT engine (``Config.model_path`` ending in ``.engine``), driven through
+``TensorRTRuntimeSession`` from ``engine_session``.
 """
 from __future__ import annotations
 
@@ -16,26 +18,37 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Deque, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union, cast
 
 import cv2
 import numpy as np
 import torch
 from ball_in_play_selector import RawDetection
 
-from ..config import Config
+from ..config import AUTO, FOREGROUND, PREPASS_MODES, PROCESS, Config, PrepassMode
+from .ball_gpu import (HeatRing, LogitRing, ModelResize, Nv12ModelResize, Readback, StreamHalves, TransitionRing, grid_peaks,
+                      load_nv12_kernel, peak_points, transition_slots)
+from .ball_prepass_process import PrepassRows, RemotePrepass
 from .engine_boxes import OutputMode, decode_engine_boxes, engine_output_mode
 from .engine_session import TensorRTRuntimeSession
-from ..ball_models import load_ball_model
+from .. import video_decode
+from ..cuda_kernels import Kernel
+from .. import streamnet
+from ..ball_models import arch_of, load_ball_model, load_deployed, model_class
+from ..heatmapnet import read_record
 from ..frame_rate import require_phase_stride
-from ..gridtracknet import HEIGHT, WIDTH, GridPoint, decode_grid, decode_predictions, frame_tensor
+from ..gridtracknet import FRAMES_PER_UNIT, HEIGHT, WIDTH, GridPoint
 
 # A BGR HWC uint8 frame, either a host array or a CUDA tensor of the same layout.
 FrameInput = Union[np.ndarray, torch.Tensor]
-# The prepass's pieces: one frame's input tensor with its source index, and a five-frame unit
-# (the frames' tensors concatenated) with the source indices it covers.
-_PrepassFrame = Tuple[torch.Tensor, int]
-_PrepassUnit = Tuple[torch.Tensor, List[int]]
+# What the prepass reads: such a frame, or an NV12 picture NVDEC decoded (converted as it is resized).
+PrepassFrame = Union[np.ndarray, torch.Tensor, video_decode.Nv12Frame]
+# The prepass's pieces: one frame's value with its source index, and a five-frame unit (the
+# frames' values, in order) with the source indices it covers. A value is the frame's input tensor,
+# or for a streaming network the number ``TransitionRing.push`` gave it (None for a phase's first).
+_FrameValue = Union[torch.Tensor, int, None]
+_PrepassFrame = Tuple[_FrameValue, int]
+_PrepassUnit = Tuple[List[_FrameValue], List[int]]
 
 _BALL_NMS_IOU = 0.45
 # GridTrackNet gives a point; the box handed to the selector is this fraction
@@ -43,8 +56,87 @@ _BALL_NMS_IOU = 0.45
 _BOX_RADIUS_FRAC = 0.003
 _MIN_BOX_RADIUS_PX = 2.0
 _REFERENCE_HEIGHT_PX = 1080.0
-_UNITS_PER_INFERENCE = 4
+_UNITS_PER_INFERENCE = 4            # units per call of the PyTorch model
+# Inference calls whose peaks may still be on their way to the host before the prepass waits for
+# the oldest: enough that the device never idles while the host reads the next frames.
+_READBACKS_IN_FLIGHT = 3
 _DEFAULT_NAMES: Dict[int, str] = {0: "ball"}
+RUNTIMES = ("tensorrt", "torch")
+
+
+def prepass_mode(cfg: Config, weights: Path) -> PrepassMode:
+    """Where the prepass over `weights` runs: ``Config.ball_prepass_mode``, with ``AUTO`` resolved to
+    ``PROCESS`` for a network that streams (``streaming_halves``, while ``Config.ball_prepass_streaming``
+    is on) and ``FOREGROUND`` for any other. Another mode is a ValueError."""
+    mode = cfg.ball_prepass_mode
+    if mode not in PREPASS_MODES:
+        raise ValueError(f"ball_prepass_mode must be one of {PREPASS_MODES}, not {mode!r}")
+    if mode != AUTO:
+        return mode
+    streams = cfg.ball_prepass_streaming and callable(getattr(model_class(arch_of(weights)), "streaming_halves", None))
+    return PROCESS if streams else FOREGROUND
+
+
+class FrameReader:
+    """What the prepass reads a clip through: ``read()`` returns ``(ok, frame)`` like
+    ``cv2.VideoCapture.read``, the frame a BGR HWC uint8 host array or a CUDA tensor of that
+    layout, and ``release()`` frees the decoder. ``open_frames`` is the one place a reader is
+    made, so another decoder (NVDEC) replaces ``cv2.VideoCapture`` there alone."""
+
+    def read(self) -> Tuple[bool, Optional[FrameInput]]:
+        raise NotImplementedError
+
+    def release(self) -> None:
+        raise NotImplementedError
+
+
+class PinnedCapture(FrameReader):
+    """``cv2.VideoCapture`` decoding each frame straight into one of a few page-locked host buffers,
+    which go up to `device` on the current stream without a wait: no pageable frame is copied into
+    pinned memory first (1.2 ms a 1080p frame read and uploaded, against 3.6 ms through
+    ``Tensor.pin_memory``; ``audit/records/opt_ball_prepass.md``). A buffer is decoded into again
+    only once the upload that read it has finished. A frame cv2 could not decode in place (another
+    size) is returned as its host array."""
+
+    def __init__(self, capture: Any, device: torch.device, slots: int = 4):
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._capture, self._device = capture, device
+        self._buffers = [torch.empty((height, width, 3), dtype=torch.uint8, pin_memory=True) for _ in range(slots)]
+        self._uploaded: List[Optional[torch.cuda.Event]] = [None] * slots
+        self._next = 0
+
+    def read(self) -> Tuple[bool, Optional[FrameInput]]:
+        slot = self._next
+        self._next = (slot + 1) % len(self._buffers)
+        uploaded = self._uploaded[slot]
+        if uploaded is not None:
+            uploaded.synchronize()
+        host = self._buffers[slot]
+        ok, frame = self._capture.read(host.numpy())
+        if not ok or frame is None:
+            return False, None
+        if frame.ctypes.data != host.data_ptr() or tuple(frame.shape) != tuple(host.shape):
+            return True, frame
+        on_device = host.to(self._device, non_blocking=True)
+        event = torch.cuda.Event()
+        event.record()
+        self._uploaded[slot] = event
+        return True, on_device
+
+    def release(self) -> None:
+        self._capture.release()
+
+
+def open_frames(video_path: Path, device: Optional[torch.device] = None) -> Any:
+    """A ``FrameReader`` over `video_path`, decoding into pinned memory and uploading to `device`
+    when that is a CUDA device; one that cannot be opened is a RuntimeError."""
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise RuntimeError(f"Could not open input video for GridTrackNet: {video_path}")
+    if device is not None and device.type == "cuda" and capture.get(cv2.CAP_PROP_FRAME_WIDTH) > 0:
+        return PinnedCapture(capture, device)
+    return capture
 
 
 class BallDetectorBackend:
@@ -66,9 +158,17 @@ class BallDetectorBackend:
     uses_raw_frames = False
     use_async = False
     async_slots = 1
+    # Where a whole-clip backend's prepass runs (``prepass_mode``); a per-frame backend has none.
+    prepass_mode = FOREGROUND
 
     def prepare_video(self, video_path: Path, fps: float, width: int, height: int, total: int) -> None:
         """Hook for whole-clip backends; ``total`` is the container's frame count hint."""
+
+    def finish_prepass(self) -> None:
+        """Pass 1 has every detection: let a prepass process start exiting (``close`` waits)."""
+
+    def close(self) -> None:
+        """Release what the backend holds beyond this process's memory (a prepass process)."""
 
     def detect(self, frame_bgr: FrameInput, frame_index: int) -> List[RawDetection]:
         raise NotImplementedError
@@ -82,6 +182,50 @@ class BallDetectorBackend:
     def supports_cuda_frame(self) -> bool:
         return False
 
+    def visibility_scores(self) -> Optional[List[Optional[float]]]:
+        """Per decoded source frame, the probability that a ball is visible
+        (``Config.ball_visibility_gate``), None where the frame has none; None altogether from a
+        backend that computes none."""
+        return None
+
+
+def visibility_gate(cfg: Config) -> float:
+    """``Config.ball_visibility_gate`` checked: 0 (off) or a probability in (0, 1); anything else
+    is a ValueError."""
+    gate = float(cfg.ball_visibility_gate)
+    if not 0.0 <= gate < 1.0:
+        raise ValueError(f"ball_visibility_gate is 0 (off) or a probability below 1, not {gate}")
+    return gate
+
+
+def refuse_visibility_gate(cfg: Config) -> None:
+    """For a backend that computes no visibility score (the single-frame TensorRT ball engine): a
+    run asking for the gate is refused at start-up rather than run with it silently off. The
+    five-frame streaming prepass over stream_s4 weights with the visibility head is the one that
+    answers it (``GridTrackNetBallDetector``)."""
+    gate = visibility_gate(cfg)
+    if gate:
+        raise ValueError(f"ball_visibility_gate={gate} needs the five-frame stream_s4 prepass with its visibility "
+                         "head; this ball backend computes no visibility score")
+
+
+def require_visibility_head(cfg: Config, weights: Path) -> None:
+    """With the visibility gate on, `weights` must be a streaming network's record carrying the
+    visibility head, run by the streaming prepass; a ValueError says which of those is missing.
+    Checked from the record, so the parent of a prepass process refuses at start-up too."""
+    gate = visibility_gate(cfg)
+    if not gate:
+        return
+    arch = arch_of(weights)
+    streams = callable(getattr(model_class(arch), "streaming_halves", None))
+    if not streams or not cfg.ball_prepass_streaming:
+        raise ValueError(f"ball_visibility_gate={gate} needs the streaming prepass of a stream_s4 network "
+                         f"(ball_prepass_streaming on); {Path(weights).name} is {arch}"
+                         + ("" if cfg.ball_prepass_streaming else " and ball_prepass_streaming is off"))
+    if not streamnet.has_vis_head(read_record(Path(weights), arch)["state_dict"]):
+        raise ValueError(f"ball_visibility_gate={gate} needs weights with the stream_s4 visibility head; "
+                         f"{Path(weights).name} has none")
+
 
 @dataclass
 class CachedDetections:
@@ -91,22 +235,56 @@ class CachedDetections:
     detections: List[RawDetection]
 
 
+@dataclass
+class _Flush:
+    """One flush of the prepass, waiting for its peaks to reach the host: the frames below ``upto``
+    are final once it is applied. ``frames`` are the averaged frames ``peaks`` answers, one row
+    each; ``units`` (the one-unit-per-frame prepass) are the units it answers, five rows each."""
+
+    upto: int
+    peaks: Optional[Readback] = None
+    frames: Sequence[int] = ()
+    units: Sequence[Sequence[int]] = ()
+    points: Optional[List[GridPoint]] = None      # decoded on the host already (``_decode``)
+    # The visibility head's mean logit per row of ``frames`` (averaged) or per frame of ``units``.
+    logits: Optional[Readback] = None
+
+
 class GridTrackNetBallDetector(BallDetectorBackend):
     """Run the five-frame model at its native 30-FPS cadence.
 
     The model is GridTrackNet or HeatmapNet by ``weights_path``
     (``ball_models.load_ball_model``); both take the same 15-channel unit and
     answer in the same layout, so everything here reads the model's own
-    ``INPUT_CHANNELS`` and grid and nothing asks which it holds. Units are
-    batched four to an inference call.
+    ``INPUT_CHANNELS`` and grid and nothing asks which it holds. It runs as a
+    TensorRT FP16 engine (``ball_trt``, ``Config.ball_prepass_runtime``
+    "tensorrt", batches of ``Config.ball_engine_batch`` units, the last one
+    padded) or as the PyTorch model (four units a call).
+
+    A model with ``streaming_halves`` (``streamnet``, ``stream_s4``) streams instead when
+    ``Config.ball_prepass_streaming`` is on: each frame's transition is encoded once and every
+    unit the windowed prepass would run is decoded from its four cached transitions
+    (``ball_gpu.TransitionRing``), the halves as two TensorRT engines (``ball_trt``) or, should
+    those be unavailable, as PyTorch modules. The units, their batching and everything after the
+    network are the windowed prepass's. With ``Config.ball_visibility_gate`` on, the decoder also
+    answers the network's visibility head (weights without one are refused): a frame's logits from
+    the units holding it are averaged as its grids are (``ball_gpu.LogitRing``) and
+    ``visibility_scores`` gives each frame's probability that a ball is visible.
 
     ``Config.gridtracknet_window_step`` below 5 (the default is 1) starts a
     unit every that many frames of a phase instead of every 5, so a frame is
     answered by up to five overlapping units, and the answers a frame gets are
-    averaged grid by grid before it is decoded once (``_HeatAverage``).
+    averaged grid by grid before it is decoded once (``ball_gpu.HeatRing``).
 
-    ``prepare_video`` decodes the whole clip once (by default on a worker
-    thread, see ``Config.gridtracknet_prepass_background``) and caches one
+    The clip is decoded by NVDEC where it can (``Config.ball_prepass_gpu_decode``;
+    each NV12 picture becomes the model input in one kernel, ``ball_gpu.Nv12ModelResize``),
+    else by cv2. Every frame is resized to the model's input on the GPU (the bytes
+    OpenCV's resize gives of OpenCV's picture, either way) and each frame's peak is found there, so
+    only four floats a frame come back, through pinned memory a few calls
+    behind the device.
+
+    ``prepare_video`` decodes the whole clip once (before pass 1, on a worker thread or in a child
+    process: ``prepass_mode``, ``Config.ball_prepass_mode``) and caches one
     detection per decoded source frame; ``detections_at(i)`` returns frame
     ``i``'s result, waiting for the prepass if it is behind, and raises once
     the prepass has finished without ever decoding frame ``i``.
@@ -119,15 +297,26 @@ class GridTrackNetBallDetector(BallDetectorBackend):
     uses_raw_frames = True
     use_async = False
     async_slots = 1
+    _gate: float = 0.0                                          # the checked Config.ball_visibility_gate
+    _visibility: Optional[List[Optional[float]]] = None        # per frame, with the gate on
 
     def __init__(self, weights_path: str, cfg: Config):
         if not torch.cuda.is_available():
             raise RuntimeError("GridTrackNet requires CUDA-enabled torch.")
+        require_visibility_head(cfg, Path(weights_path))
         self.cfg = cfg
+        self._gate = visibility_gate(cfg)
+        # With the visibility gate, the head's probability per decoded source frame (``visibility_scores``).
+        self._visibility: Optional[List[Optional[float]]] = None
         self.device = torch.device(f"cuda:{cfg.device}")
-        self._decode = decode_predictions
-        self._frame_tensor = frame_tensor
-        self.model = load_ball_model(Path(weights_path), self.device)
+        self._frame_tensor: Callable[[PrepassFrame, torch.device], torch.Tensor] = self._model_input
+        # The one-unit-per-frame prepass finds each frame's peak on the device; a decoder set here,
+        # ``gridtracknet.decode_predictions``'s signature, decodes the model's output on the host
+        # instead (the tests' seam for stand-in models that answer no grid).
+        self._decode: Optional[Callable[[torch.Tensor, int, int, float], List[GridPoint]]] = None
+        self._resizers: Dict[Tuple[int, int], ModelResize] = {}
+        self._nv12_resizers: Dict[Tuple[int, int, bool], Nv12ModelResize] = {}
+        self._nv12_kernel: Optional[Kernel] = None
         window_step = self.window_step()
         # One entry per decoded source frame, appended by the prepass.
         self.precomputed: Optional[List[List[RawDetection]]] = None
@@ -138,12 +327,90 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         self._ready = threading.Condition()
         self._worker: Optional[threading.Thread] = None
         self._worker_error: Optional[BaseException] = None
-        with torch.inference_mode():
-            self.model(torch.zeros((1, self.model.INPUT_CHANNELS, HEIGHT, WIDTH), device=self.device, dtype=torch.float16))
-        torch.cuda.synchronize(self.device)
+        # Called with every newly published ``upto`` (the prepass process sends the rows on).
+        self.on_publish: Optional[Callable[[int], None]] = None
+        self._remote: Optional[RemotePrepass] = None
+        self.model: Any = None
+        self.engine: Any = None
+        self.stream_halves: Optional[StreamHalves] = None
+        self.prepass_mode = prepass_mode(cfg, Path(weights_path))
+        if self.prepass_mode == PROCESS:
+            # The child builds the model and the engines, starting now; this process only reads its answers.
+            self._remote = RemotePrepass(weights_path, cfg)
+            print(f"[detector] the ball prepass runs in its own process ({Path(weights_path).name}, "
+                  f"pid {self._remote.pid})")
+            return
+        self.model = load_ball_model(Path(weights_path), self.device)
+        self.stream_halves = self._open_stream(Path(weights_path))
+        if self.stream_halves is None:
+            self.engine = self._open_engine(Path(weights_path))
+        halves = self.stream_halves
+        if halves is not None and halves.stream is None:    # the PyTorch halves run: let cuDNN pick its kernels now
+            with torch.inference_mode():
+                frame = torch.zeros((halves.batch, 3, HEIGHT, WIDTH), device=self.device,
+                                    dtype=next(self.model.parameters()).dtype)
+                halves.decode(*(level.repeat(1, FRAMES_PER_UNIT - 1, 1, 1) for level in halves.encode(frame, frame)))
+            torch.cuda.synchronize(self.device)
+        elif self.engine is None and halves is None:        # the PyTorch model runs: let cuDNN pick its kernels now
+            channels = int(getattr(self.model, "INPUT_CHANNELS"))
+            with torch.inference_mode():
+                self.model(torch.zeros((1, channels, HEIGHT, WIDTH), device=self.device, dtype=torch.float16))
+            torch.cuda.synchronize(self.device)
         windows = "" if window_step == 5 else f", a unit every {window_step} frame(s)"
-        print(f"[detector] {self.model.ARCH} FP16, {self.model.GRID_COLS}x{self.model.GRID_ROWS} grid "
-              f"(confidence={cfg.conf:.2f}, device={self.device}{windows})")
+        runtime = f"TensorRT FP16, {self.engine.batch} units a call" if self.engine is not None else "FP16"
+        if halves is not None:
+            engines = "TensorRT FP16 encoder and decoder" if halves.stream is not None else "FP16"
+            runtime = f"{engines} streaming, {halves.batch} a call"
+        gate = f", visibility gate {self._gate:.2f}" if self._gate else ""
+        print(f"[detector] {self.model.ARCH} {runtime}, {self.model.GRID_COLS}x{self.model.GRID_ROWS} grid "
+              f"(confidence={cfg.conf:.2f}, device={self.device}{windows}{gate})")
+
+    def _open_engine(self, weights: Path) -> Any:
+        """The cached TensorRT engine for `weights` (``ball_trt``) when ``Config.ball_prepass_runtime``
+        asks for one and the device is a GPU, else None (the PyTorch model runs). A runtime that is
+        neither is a ValueError; an engine TensorRT cannot provide is reported and None returned."""
+        runtime = self.cfg.ball_prepass_runtime
+        if runtime not in RUNTIMES:
+            raise ValueError(f"ball_prepass_runtime must be one of {RUNTIMES}, not {runtime!r}")
+        if runtime != "tensorrt" or self.device.type != "cuda":
+            return None
+        try:
+            from .ball_trt import BallEngine, ensure_ball_engine
+            path = ensure_ball_engine(weights, self.model, int(self.cfg.ball_engine_batch),
+                                      Path(self.cfg.ball_engine_dir), self.device)
+            return BallEngine(path, self.model, self.device)
+        except (RuntimeError, OSError, ImportError) as error:
+            print(f"[detector] TensorRT engine unavailable, running the PyTorch model ({error})")
+            return None
+
+    def _open_stream(self, weights: Path) -> Optional[StreamHalves]:
+        """The model's streaming halves (``streaming_halves``, of the network ``ball_models.load_deployed``
+        folds from the weights, which replaces the model) when it has them and
+        ``Config.ball_prepass_streaming`` is on, else None (the model runs unit by unit). They run as cached TensorRT engines when ``Config.ball_prepass_runtime`` and the
+        device allow, else as the PyTorch modules, a TensorRT failure reported as ``_open_engine``
+        reports it. With the visibility gate on they are the halves that answer the head too."""
+        if not self.cfg.ball_prepass_streaming or not callable(getattr(self.model, "streaming_halves", None)):
+            return None
+        runtime = self.cfg.ball_prepass_runtime
+        if runtime not in RUNTIMES:
+            raise ValueError(f"ball_prepass_runtime must be one of {RUNTIMES}, not {runtime!r}")
+        self.model = load_deployed(weights, self.device)
+        visibility = bool(self._gate)
+        encoder, decoder = self.model.streaming_halves(visibility=True) if visibility else self.model.streaming_halves()
+        if runtime == "tensorrt" and self.device.type == "cuda":
+            batch = int(self.cfg.ball_engine_batch)
+            try:
+                from .ball_trt import ensure_stream_engines, open_stream_engines
+                if visibility:
+                    paths = ensure_stream_engines(weights, self.model.ARCH, encoder, decoder, batch,
+                                                  Path(self.cfg.ball_engine_dir), self.device, visibility=True)
+                    return open_stream_engines(paths, self.device, visibility=True)
+                paths = ensure_stream_engines(weights, self.model.ARCH, encoder, decoder, batch,
+                                              Path(self.cfg.ball_engine_dir), self.device)
+                return open_stream_engines(paths, self.device)
+            except (RuntimeError, OSError, ImportError) as error:
+                print(f"[detector] TensorRT engines unavailable, streaming the PyTorch model ({error})")
+        return StreamHalves(encoder, decoder, _UNITS_PER_INFERENCE, visibility=visibility)
 
     def window_step(self) -> int:
         """The frames of a phase between the prepass's unit starts: ``Config.gridtracknet_window_step``,
@@ -162,29 +429,75 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         except ValueError as error:
             raise RuntimeError(str(error)) from error
 
+    def _open_frames(self, video_path: Path) -> Any:
+        """The prepass's reader: NVDEC's NV12 pictures on the device when ``Config.ball_prepass_gpu_decode``
+        asks for them, NVDEC opens the clip and the NV12 kernel loads (``ball_gpu.Nv12ModelResize``),
+        else cv2 through ``open_frames``; a fallback is reported.
+
+        NVDEC with the BGR conversion (``nv12_to_bgr``) and then ``ModelResize`` would be slower than
+        cv2: the prepass is bound by the GPU there, and the conversion's int32 passes over the whole
+        picture added 1.3 s on pomona (``audit/records/opt_phaseA_followup.md``)."""
+        if self.cfg.ball_prepass_gpu_decode and self.device.type == "cuda" and video_decode.nvdec_available():
+            try:
+                if self._nv12_kernel is None:
+                    self._nv12_kernel = load_nv12_kernel(self.device, Path(self.cfg.ball_engine_dir))
+                return video_decode.NvdecDecoder(video_path, device=self.device, nv12=True)
+            except RuntimeError as error:          # KernelUnavailable is one
+                print(f"[detector] {str(error).splitlines()[0]}; the prepass decodes on the CPU")
+        return open_frames(video_path, self.device)
+
+    def _model_input(self, frame: PrepassFrame, device: torch.device) -> torch.Tensor:
+        """One frame as the model's (3, HEIGHT, WIDTH) RGB FP16 input on `device`: an NV12 picture
+        converted and resized in one kernel (``Nv12ModelResize``), or a BGR HWC uint8 frame (host
+        array or CUDA tensor; a host frame goes up as uint8 through pinned memory without waiting)
+        resized by ``ModelResize``. Both give the bytes OpenCV's picture resized by OpenCV gives."""
+        if isinstance(frame, video_decode.Nv12Frame):
+            key = (frame.width, frame.height, frame.full_range)
+            nv12_resize = self._nv12_resizers.get(key)
+            if nv12_resize is None:
+                assert self._nv12_kernel is not None
+                nv12_resize = self._nv12_resizers[key] = Nv12ModelResize(
+                    frame.width, frame.height, WIDTH, HEIGHT, frame.full_range, device, self._nv12_kernel)
+            return nv12_resize(frame)
+        if isinstance(frame, torch.Tensor):
+            source = frame.to(device)
+        else:
+            source = torch.from_numpy(np.ascontiguousarray(frame))
+            if device.type == "cuda":
+                source = source.pin_memory().to(device, non_blocking=True)
+        size = (int(source.shape[1]), int(source.shape[0]))
+        resize = self._resizers.get(size)
+        if resize is None:
+            resize = self._resizers[size] = ModelResize(size[0], size[1], WIDTH, HEIGHT, device)
+        return resize(source)
+
     def prepare_video(self, video_path: Path, fps: float, width: int, height: int, total: int,
                       background: Optional[bool] = None) -> None:
         """Decode the video once and cache one detection per decoded frame.
 
         ``total`` is the container's frame count, only a hint: the cache
         grows with the frames actually decoded, and a mismatch is reported.
-        ``background`` (default ``cfg.gridtracknet_prepass_background``) runs
-        the prepass on a worker thread so pass 1 can start on frame 0 while
-        the detector is still ahead of it; ``detect()`` then blocks only if
-        pass 1 catches up.  Results are identical to the synchronous pass,
-        whose failure raises from here.
+        ``background`` (default: unless ``prepass_mode`` is ``FOREGROUND``)
+        returns at once, the prepass running on a worker thread or in the
+        prepass process, so pass 1 can start on frame 0 while the detector is
+        still ahead of it; ``detect()`` then blocks only if pass 1 catches up.
+        Results are identical to the synchronous pass, whose failure raises
+        from here.
         """
         source_stride = self.source_stride_for(fps)
-        capture = cv2.VideoCapture(str(video_path))
-        if not capture.isOpened():
-            raise RuntimeError(f"Could not open input video for GridTrackNet: {video_path}")
-        self.precomputed = []
-        self._ready_upto = 0
-        self._done = False
-        self._worker_error = None
+        cached = self._begin_prepass()
         if background is None:
-            background = self.cfg.gridtracknet_prepass_background
-        args = (capture, source_stride, width, height, int(total))
+            background = self.prepass_mode != FOREGROUND
+        if self._remote is not None:
+            self._run_remote(self._remote, video_path, fps, width, height, total, cached)
+            if not background:
+                with self._ready:
+                    while not self._done:
+                        self._ready.wait(timeout=0.5)
+                self._raise_if_failed()
+            return
+        capture = self._open_frames(video_path)
+        args =(capture, cached, source_stride, width, height, int(total))
         if background:
             self._worker = threading.Thread(target=self._prepass, args=args, daemon=True, name="gridtracknet-prepass")
             self._worker.start()
@@ -193,10 +506,42 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             self._prepass(*args)
             self._raise_if_failed()
 
+    def _run_remote(self, remote: RemotePrepass, video_path: Path, fps: float, width: int, height: int, total: int,
+                    cached: List[List[RawDetection]]) -> None:
+        """Start the prepass process on the clip: its final rows land in `cached` in order and are
+        published as they arrive; its end, or its error, finishes the prepass here."""
+        def on_rows(message: PrepassRows) -> None:
+            del cached[message.start:]
+            cached.extend(message.rows)
+            scores = self._visibility
+            if scores is not None:
+                del scores[message.start:]
+                scores.extend(message.visibility if message.visibility is not None else [None] * len(message.rows))
+            self._publish(message.start + len(message.rows))
+
+        def on_end(error: Optional[BaseException]) -> None:
+            self._worker_error = error
+            self._finish()
+
+        remote.run(video_path, fps, width, height, total, on_rows, on_end)
+
+    def finish_prepass(self) -> None:
+        """Tell the prepass process, if the prepass runs in one, to exit."""
+        if self._remote is not None:
+            self._remote.stop()
+
+    def close(self) -> None:
+        """Stop the prepass process, if the prepass runs in one, and wait for it."""
+        if self._remote is not None:
+            self._remote.close()
+            self._remote = None
+
     def _publish(self, upto: int) -> None:
         with self._ready:
             self._ready_upto = max(self._ready_upto, upto)
             self._ready.notify_all()
+        if self.on_publish is not None:
+            self.on_publish(upto)
 
     def _finish(self) -> None:
         with self._ready:
@@ -211,91 +556,90 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             raise error
         raise RuntimeError("GridTrackNet prepass failed") from error
 
-    def _prepass(self, capture: cv2.VideoCapture, source_stride: int, width: int, height: int,
+    def _work_stream(self) -> Any:
+        """The CUDA stream the prepass works on: the engine's (so its output is read in order without
+        a wait), else a stream of its own on the worker thread so it overlaps pass 1 on the default
+        stream; None, the current stream, in the foreground or off the GPU."""
+        if self.device.type != "cuda":
+            return None
+        if self.engine is not None:
+            return self.engine.stream
+        if self.stream_halves is not None and self.stream_halves.stream is not None:
+            return self.stream_halves.stream
+        return torch.cuda.Stream(device=self.device) if self._worker is not None else None
+
+    def _begin_prepass(self) -> List[List[RawDetection]]:
+        """A new clip's prepass state: an empty ``precomputed``, which it returns, nothing final yet."""
+        cached: List[List[RawDetection]] = []
+        self.precomputed = cached
+        self._visibility = [] if self._gate else None
+        self._ready_upto = 0
+        self._done = False
+        self._worker_error = None
+        return cached
+
+    def open_stream(self, fps: float, width: int, height: int) -> "PrepassStream":
+        """A prepass fed one frame at a time (``PrepassStream.push``) instead of reading a clip, for a
+        caller that gets the frames as they arrive (``live``). Its rows land in ``precomputed`` and are
+        published as they become final, as ``prepare_video``'s are. It runs every unit as soon as it
+        is cut (``PrepassStream``'s `eager`), so a frame is final as soon as no later unit can cover
+        it rather than when a batch fills. The caller pushes inside ``stream_scope`` and calls
+        ``PrepassStream.finish`` after the last frame, which ends the prepass."""
+        if self._remote is not None:
+            raise RuntimeError("a prepass in its own process reads the clip itself; it cannot be fed frames")
+        cached = self._begin_prepass()
+        self._worker = None
+        return PrepassStream(self, cached, self.source_stride_for(fps), width, height, eager=True)
+
+    @contextlib.contextmanager
+    def stream_scope(self) -> Iterator[Any]:
+        """Inference mode on the prepass's CUDA stream (``_work_stream``), which it yields (None for
+        the current stream)."""
+        stream = self._work_stream()
+        scope = torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext()
+        with scope, torch.inference_mode():
+            yield stream
+
+    def _prepass(self, capture: Any, cached: List[List[RawDetection]], source_stride: int, width: int, height: int,
                  total_hint: int) -> None:
-        cached = self.precomputed
-        finalized = set()
-        # One independent stream of five-frame units per phase. The model wants 30 FPS
-        # spacing, so at 60 FPS the odd frames form a second, equally valid unit stream;
-        # running only phase 0 leaves every odd frame unobserved. ``_UnitStream`` cuts a
-        # phase's units every ``window_step`` of its frames from the last five it saw.
-        window_step = self.window_step()
-        streams = [_UnitStream(window_step) for _ in range(source_stride)]
-        batches: List[_PrepassUnit] = []
-        average = _HeatAverage() if window_step != 5 else None
-        frame_index = inference_calls = detected = 0
-        started = time.perf_counter()
-        y_offset = self.cfg.gridtracknet_y_offset_px * height / _REFERENCE_HEIGHT_PX
-        radius = max(_MIN_BOX_RADIUS_PX, _BOX_RADIUS_FRAC * np.hypot(width, height))
-
-        def flush(final: bool = False) -> None:
-            nonlocal inference_calls, detected
-            # Every frame below the oldest unit not yet cut is final (a mid-clip call cannot be
-            # sure of later frames: the next unit may still cover them).
-            pending_min = min((stream.pending_start for stream in streams if stream.pending_start is not None),
-                              default=frame_index + 1)
-            upto = len(cached) if final else min(pending_min, frame_index + 1)
-            if batches:
-                with torch.inference_mode():
-                    output = self.model(torch.stack([item[0] for item in batches]))
-                    if average is None:
-                        decoded = self._decode(output, width, height, self.cfg.conf)
-                    else:
-                        average.add(output, [indices for _, indices in batches])
-                if average is None:
-                    detected += _store_decoded(batches, decoded, finalized, cached, y_offset, radius)
-                inference_calls += 1
-                batches.clear()
-            if average is not None:
-                detected += average.decode_below(upto, width, height, self.cfg.conf, cached, y_offset, radius)
-            self._publish(upto)
-
+        run: Optional[PrepassStream] = None
         try:
-            # All of the worker's CUDA work lives on its own stream so it overlaps
-            # pass 1 on the default stream instead of serialising behind it.
-            stream = torch.cuda.Stream(device=self.device) if self._worker is not None else None
-            stream_scope = torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext()
-            with stream_scope:
+            with self.stream_scope():
+                run = PrepassStream(self, cached, source_stride, width, height)
                 while True:
                     ok, frame = capture.read()
                     if not ok:
                         break
-                    cached.append([])
-                    unit = streams[frame_index % source_stride].push((self._frame_tensor(frame, self.device), frame_index))
-                    if unit is not None:
-                        batches.append(unit)
-                        if len(batches) == _UNITS_PER_INFERENCE:
-                            flush()
-                    frame_index += 1
-                batches.extend(window for window in (stream.trailing_window() for stream in streams) if window is not None)
-                flush(final=True)
-                if stream is not None:
-                    stream.synchronize()
-                else:
-                    torch.cuda.synchronize(self.device)
+                    run.push(frame)
+                run.finish()
         except BaseException as error:  # surfaced to the consumer by _raise_if_failed
             self._worker_error = error
         finally:
             capture.release()
-            self._publish(len(cached))
+            self._publish(len(cached))      # a failed prepass ends here, with what it made final
             self._finish()
-
-        elapsed = time.perf_counter() - started
-        self._report_prepass(frame_index, detected, inference_calls, source_stride, elapsed, total_hint)
+        if run is not None:
+            run.report(total_hint, getattr(capture, "backend", video_decode.BACKEND_OPENCV))
 
     def _report_prepass(self, frame_index: int, detected: int, inference_calls: int, source_stride: int,
-                        elapsed: float, total_hint: int) -> None:
+                        elapsed: float, total_hint: int, decode: str = video_decode.BACKEND_OPENCV) -> None:
         """The prepass's console line, and a second when the decoded frame count differs from the
         container's (the decoded count is the one every index refers to)."""
         print(
             f"[detector] GridTrackNet prepass: {frame_index} source frames, {detected} detections, "
             f"{inference_calls} batched calls across {source_stride} phase(s) "
-            f"in {elapsed:.1f}s ({frame_index / max(elapsed, 1e-9):.1f} source fps)"
+            f"in {elapsed:.1f}s ({frame_index / max(elapsed, 1e-9):.1f} source fps, {decode} decode)"
             + (" [overlapped with pass 1]" if self._worker is not None else "")
         )
         if self._worker_error is None and frame_index != total_hint:
             print(f"[detector] GridTrackNet prepass: the container reported {total_hint} frames, "
                   f"{frame_index} decoded; the decoded count is used")
+
+    @property
+    def ready_upto(self) -> int:
+        """Frames below this are final (``precomputed`` holds their answers)."""
+        with self._ready:
+            return self._ready_upto
 
     def wait_until_ready(self, index: int) -> None:
         """Block until frame ``index`` is final or the prepass has finished; raises if it failed."""
@@ -303,6 +647,25 @@ class GridTrackNetBallDetector(BallDetectorBackend):
             while self._ready_upto <= index and not self._done:
                 self._ready.wait(timeout=0.5)
         self._raise_if_failed()
+
+    def visibility_scores(self) -> Optional[List[Optional[float]]]:
+        """With the visibility gate on, the head's probability per decoded source frame once the
+        prepass has finished (it waits for that; a failed prepass raises); None with the gate off."""
+        if self._visibility is None:
+            return None
+        with self._ready:
+            while not self._done:
+                self._ready.wait(timeout=0.5)
+        self._raise_if_failed()
+        return list(self._visibility)
+
+    def visibility_rows(self, start: int, end: int) -> Optional[List[Optional[float]]]:
+        """The visibility scores of the frames `start` to `end` (final ones: below ``ready_upto``),
+        without waiting; None with the gate off. What the prepass process sends beside its rows and
+        the live tracker reads as frames become final."""
+        if self._visibility is None:
+            return None
+        return list(self._visibility[start:end])
 
     def detect_clip(self, video_path: Path, fps: float, width: int, height: int,
                     total: int) -> List[List[RawDetection]]:
@@ -313,7 +676,7 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         A prepass that fails raises instead of returning partial results.
         """
         self.prepare_video(video_path, fps, width, height, total, background=False)
-        return list(self.precomputed)
+        return list(self.precomputed or [])
 
     def detections_at(self, index: int) -> List[RawDetection]:
         """Detections for source frame ``index``, waiting for the prepass if it
@@ -343,25 +706,221 @@ class GridTrackNetBallDetector(BallDetectorBackend):
         return pending.detections
 
 
-def _store_decoded(batches: List[_PrepassUnit], decoded: List[GridPoint], finalized: Set[int],
-                   cached: List[List[RawDetection]], y_offset: float, radius: float) -> int:
-    """Write one inference call's decoded points into the prepass cache, in batch order; the
-    first unit to answer for a source frame finalises it, a later overlapping unit is ignored.
-    A point becomes a box of `radius` around it, moved down by `y_offset`. Returns the number of
-    frames given a detection."""
-    detected = 0
-    for batch_index, (_, indices) in enumerate(batches):
-        start = batch_index * 5
-        for source_index, (point, confidence) in zip(indices, decoded[start:start + 5]):
-            if source_index in finalized:
-                continue
-            finalized.add(source_index)
-            if point is None:
-                continue
-            x, y = point[0], point[1] + y_offset
-            cached[source_index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
-            detected += 1
-    return detected
+class PrepassStream:
+    """One clip's prepass, a frame at a time: ``push`` takes each decoded frame in source order and
+    ``finish``, after the last, cuts the trailing windows and makes every frame final. The rows land
+    in ``cached``, one per pushed frame, and each newly final ``upto`` is published through the
+    detector, which answers ``detections_at`` from them.
+
+    There is one independent stream of five-frame units per phase. The model wants 30 FPS spacing,
+    so at 60 FPS the odd frames form a second, equally valid unit stream; running only phase 0 would
+    leave every odd frame unobserved. ``_UnitStream`` cuts a phase's units every ``window_step`` of its
+    frames from the last five it saw. A streaming network's units carry their frames' transition
+    numbers in the ring instead of the frames.
+
+    Units run when a batch of them fills. ``eager`` runs each unit as soon as it is cut (a static
+    batch padded, as at the clip's end) and waits for its peaks, so a frame is published as soon as
+    no unit still to come covers it (``lookahead_frames``). The answers are the batched ones: each
+    unit's rows are the same, and a frame's answers are summed in the same chronological order."""
+
+    def __init__(self, detector: "GridTrackNetBallDetector", cached: List[List[RawDetection]], source_stride: int,
+                 width: int, height: int, eager: bool = False):
+        self.detector = detector
+        self.cfg = detector.cfg
+        self.cached = cached
+        self.eager = bool(eager)
+        self.started = time.perf_counter()
+        self.elapsed: Optional[float] = None
+        self.width, self.height = int(width), int(height)
+        self.source_stride = int(source_stride)
+        self.window_step = detector.window_step()
+        self.streams = [_UnitStream(self.window_step) for _ in range(self.source_stride)]
+        self.batches: List[_PrepassUnit] = []
+        self.engine = detector.engine
+        self.network = self.engine if self.engine is not None else detector.model
+        self.halves = detector.stream_halves
+        self.static = self.engine if self.engine is not None else self.halves     # a network of a static batch
+        self.batch_units = self.static.batch if self.static is not None else _UNITS_PER_INFERENCE
+        self.transitions: Optional[TransitionRing] = None
+        if self.halves is not None:
+            slots = transition_slots(self.batch_units, self.window_step, self.source_stride)
+            self.transitions = TransitionRing(self.halves, slots, self.source_stride,
+                                              align_radius=int(self.cfg.ball_transition_align_px))
+        self.averaging = self.window_step != 5
+        # The head's probability per frame when the gate asks (the detector's list, a slot per pushed frame).
+        self.visibility: Optional[List[Optional[float]]] = getattr(detector, "_visibility", None)
+        self.covered: Set[int] = set()          # the frames summed in the ring and not yet decoded
+        self.ring: Optional[HeatRing] = None
+        self.logit_ring: Optional[LogitRing] = None
+        self.finalized: Set[int] = set()
+        self.in_flight: Deque[_Flush] = deque()
+        self.frame_index = self.inference_calls = self.detected = 0      # frame_index: frames pushed
+        self.ended = False
+        self.grid = (0, 0)
+        self.y_offset = self.cfg.gridtracknet_y_offset_px * height / _REFERENCE_HEIGHT_PX
+        self.radius = max(_MIN_BOX_RADIUS_PX, _BOX_RADIUS_FRAC * np.hypot(width, height))
+
+    @property
+    def lookahead_frames(self) -> int:
+        """Mid-clip, the source frames that must follow a frame before it is final: the last unit
+        covering it starts at or before it and is five frames of its phase long, so it is cut at most
+        four frames of the phase later, and a phase's frames are ``source_stride`` apart."""
+        return (FRAMES_PER_UNIT - 1) * self.source_stride
+
+    def push(self, frame: PrepassFrame) -> None:
+        """Take the clip's next decoded frame: a BGR frame (host array or CUDA tensor) or an NV12 picture."""
+        self.cached.append([])
+        if self.visibility is not None:
+            self.visibility.append(None)
+        index = self.frame_index
+        phase = index % self.source_stride
+        tensor = self.detector._frame_tensor(frame, self.detector.device)
+        value: _FrameValue = tensor if self.transitions is None else self.transitions.push(tensor, phase)
+        unit = self.streams[phase].push((value, index))
+        self.frame_index += 1
+        if unit is not None:
+            self.batches.append(unit)
+            if self.eager or len(self.batches) == self.batch_units:
+                self._flush()
+
+    def finish(self) -> None:
+        """After the last frame: cut each phase's trailing window, make every frame final, wait for
+        the prepass's CUDA work and end the prepass (``detections_at`` no longer waits). Call it
+        inside the detector's ``stream_scope``; ``report`` prints the prepass's line after it."""
+        self._cut_trailing()
+        device = self.detector.device
+        if device.type == "cuda":
+            torch.cuda.current_stream(device).synchronize()
+        self.detector._publish(len(self.cached))
+        self.detector._finish()
+        self.elapsed = time.perf_counter() - self.started
+
+    def report(self, total_hint: int, decode: str = video_decode.BACKEND_OPENCV) -> None:
+        """The prepass's console line (``GridTrackNetBallDetector._report_prepass``)."""
+        elapsed = self.elapsed if self.elapsed is not None else time.perf_counter() - self.started
+        self.detector._report_prepass(self.frame_index, self.detected, self.inference_calls, self.source_stride,
+                                      elapsed, total_hint, decode)
+
+    def _cut_trailing(self) -> None:
+        self.ended = True
+        batches = self.batches
+        batches.extend(window for window in (stream.trailing_window() for stream in self.streams) if window is not None)
+        while self.static is not None and len(batches) > self.batch_units:    # trailing windows past a static batch
+            rest = batches[self.batch_units:]
+            del batches[self.batch_units:]
+            self._flush()
+            batches.extend(rest)
+        self._flush(final=True)
+
+    def _store(self, index: int, found: GridPoint) -> None:
+        point, confidence = found
+        if point is None:
+            return
+        x, y, radius = point[0], point[1] + self.y_offset, self.radius
+        self.cached[index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
+        self.detected += 1
+
+    def _apply(self, flush: _Flush) -> None:
+        # The peaks become points on the host; with overlapping units each decoded frame is
+        # final, otherwise the first unit to answer a source frame finalises it and a later
+        # overlapping unit (the clip's trailing window) is ignored. The head's logits follow the
+        # same rows and become probabilities.
+        points = flush.points
+        if flush.peaks is not None:
+            rows, cols = self.grid
+            points = peak_points(flush.peaks.wait(), rows, cols, self.width, self.height, self.cfg.conf)
+        visibility = self.visibility
+        logits = flush.logits.wait().tolist() if flush.logits is not None and visibility is not None else None
+        if points is not None:
+            if self.averaging:
+                for position, (index, found) in enumerate(zip(flush.frames, points)):
+                    self._store(index, found)
+                    if visibility is not None and logits is not None:
+                        visibility[index] = _probability(logits[position])
+            else:
+                for unit_index, indices in enumerate(flush.units):
+                    for position, (index, found) in enumerate(zip(indices, points[unit_index * FRAMES_PER_UNIT:])):
+                        if index not in self.finalized:
+                            self.finalized.add(index)
+                            self._store(index, found)
+                            if visibility is not None and logits is not None:
+                                visibility[index] = _probability(logits[unit_index * FRAMES_PER_UNIT + position])
+        self.detector._publish(flush.upto)
+
+    def _drain(self, everything: bool = False) -> None:
+        in_flight = self.in_flight
+        while in_flight and (everything or len(in_flight) > _READBACKS_IN_FLIGHT or in_flight[0].peaks is None
+                             or in_flight[0].peaks.ready()):
+            self._apply(in_flight.popleft())
+
+    def _flush(self, final: bool = False) -> None:
+        # Every frame below the oldest unit not yet cut is final (a mid-clip call cannot be sure of
+        # later frames: the next unit may still cover them). ``newest`` is the last frame pushed,
+        # or the frame count once the clip has ended.
+        batches = self.batches
+        newest = self.frame_index if self.ended else self.frame_index - 1
+        pending_min = min((stream.pending_start for stream in self.streams if stream.pending_start is not None),
+                          default=newest + 1)
+        upto = newest if final else min(pending_min, newest + 1)
+        record = _Flush(upto)
+        if batches:
+            units = [indices for _, indices in batches]
+            logits: Optional[torch.Tensor] = None
+            if self.transitions is not None:     # pads its static batch itself
+                output = self.transitions.decode([cast(List[Optional[int]], values) for values, _ in batches])
+                if self.halves is not None and self.halves.visibility:
+                    output, logits = output
+            else:
+                frames = [cast(torch.Tensor, tensor) for tensors, _ in batches for tensor in tensors]
+                if self.engine is not None:      # a static batch: pad with the last unit
+                    frames += frames[-FRAMES_PER_UNIT:] * (self.batch_units - len(batches))
+                stacked = torch.cat(frames).view(len(frames) // FRAMES_PER_UNIT, -1, *frames[0].shape[1:])
+                output = self.network(stacked)
+            self.grid = grid = (int(output.shape[-2]), int(output.shape[-1]))
+            if self.averaging:
+                if self.ring is None:
+                    slots = _ring_slots(self.batch_units, self.window_step, self.source_stride)
+                    self.ring = HeatRing(slots, *grid, output.device)
+                for indices in units:
+                    self.covered.update(indices)
+                self.ring.check_span(min(self.covered), newest)
+                self.ring.add(output, units)
+                if logits is not None and self.visibility is not None:
+                    if self.logit_ring is None:
+                        self.logit_ring = LogitRing(self.ring.slots, output.device)
+                    self.logit_ring.add(logits, units)
+            elif self.detector._decode is not None:
+                record.points = self.detector._decode(output[:len(units)], self.width, self.height, self.cfg.conf)
+                record.units = units
+            else:
+                record.peaks = Readback(grid_peaks(output[:len(units)].reshape(-1, 3, *grid)))
+                record.units = units
+            if logits is not None and self.visibility is not None and not self.averaging:
+                record.logits = Readback(logits[:len(units)].reshape(-1).float())
+            self.inference_calls += 1
+            batches.clear()
+        if self.ring is not None:
+            ready = sorted(index for index in self.covered if index < upto)
+            if ready:
+                self.covered.difference_update(ready)
+                record.peaks, record.frames = Readback(self.ring.take(ready)), ready
+                if self.logit_ring is not None:
+                    record.logits = Readback(self.logit_ring.take(ready))
+        self.in_flight.append(record)
+        self._drain(everything=final or self.eager)
+
+
+def _probability(logit: float) -> float:
+    """The sigmoid of a visibility logit, as a Python float."""
+    return float(1.0 / (1.0 + np.exp(-np.float64(logit))))
+
+
+def _ring_slots(batch_units: int, window_step: int, source_stride: int) -> int:
+    """Slots enough for ``HeatRing`` to hold every frame the prepass has summed and not decoded:
+    the frames one call's units start across (``batch_units`` units, a unit every ``window_step``
+    frames of a phase, so ``batch_units * window_step`` source frames whatever the phases) and one
+    unit's length on either side, doubled for headroom; ``HeatRing.check_span`` guards it."""
+    return 2 * (batch_units * window_step + 2 * FRAMES_PER_UNIT * source_stride)
 
 
 class _UnitStream:
@@ -401,46 +960,8 @@ class _UnitStream:
 
 
 def _window(frames: Deque[_PrepassFrame]) -> _PrepassUnit:
-    return torch.cat([value for value, _ in frames]), [index for _, index in frames]
+    return [value for value, _ in frames], [index for _, index in frames]
 
-
-class _HeatAverage:
-    """A frame's answers from every unit that covers it, summed grid by grid (the model's
-    ``(3, rows, cols)`` per frame, in float32) until the frame is final, then decoded once
-    (``decode_grid``) from the mean."""
-
-    def __init__(self):
-        self.sums: Dict[int, torch.Tensor] = {}
-        self.counts: Dict[int, int] = {}
-
-    def add(self, output: torch.Tensor, indices: List[List[int]]) -> None:
-        grids = output.float().reshape(output.shape[0], 5, 3, output.shape[-2], output.shape[-1])
-        for row, unit in enumerate(indices):
-            for position, index in enumerate(unit):
-                if index in self.sums:
-                    self.sums[index] += grids[row, position]
-                    self.counts[index] += 1
-                else:
-                    self.sums[index] = grids[row, position].clone()
-                    self.counts[index] = 1
-
-    def decode_below(self, upto: int, width: int, height: int, threshold: float, cached: List[List[RawDetection]],
-                     y_offset: float, radius: float) -> int:
-        """Decode every accumulated frame below `upto` into `cached` and drop it; returns how many
-        were given a detection."""
-        ready = sorted(index for index in self.sums if index < upto)
-        if not ready:
-            return 0
-        means = torch.stack([self.sums.pop(index) / self.counts.pop(index) for index in ready]).cpu().numpy()
-        detected = 0
-        for index, grids in zip(ready, means):
-            point, confidence = decode_grid(grids, width, height, threshold)
-            if point is None:
-                continue
-            x, y = point[0], point[1] + y_offset
-            cached[index] = [([x - radius, y - radius, x + radius, y + radius], confidence)]
-            detected += 1
-        return detected
 
 
 def decode_ball_predictions(
@@ -492,6 +1013,7 @@ class TensorRTRuntimeBallDetector(BallDetectorBackend):
     ):
         if not torch.cuda.is_available():
             raise RuntimeError("TensorRT runtime backend requires CUDA.")
+        refuse_visibility_gate(cfg)
         self.cfg = cfg
         self.names = names or dict(_DEFAULT_NAMES)
         self.ball_cls_id = ball_cls_id
@@ -538,8 +1060,8 @@ class TensorRTRuntimeBallDetector(BallDetectorBackend):
             t, scale = self.session.preprocess_cuda_hwc_frame(frame_bgr)
             if t is None:
                 frame_bgr = frame_bgr.detach().cpu().numpy()
-        if t is None:
-            t, scale = self.session.preprocess_frame(frame_bgr)
+        if t is None or scale is None:
+            t, scale = self.session.preprocess_frame(np.asarray(frame_bgr))
         outputs = self.session.forward_tensor(t, out_slot=out_slot)
         return TensorRTBallPending(outputs, scale, self.session.completion_event(), t, frame_size)
 
