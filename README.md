@@ -1,16 +1,64 @@
-# Triton Ball Tennis: training branch
+# Triton Ball Tennis: train
 
-This branch holds everything the tracker on `main` does not need to run: the
-labelling workspace, the trainer, the Colab notebook and the scorers. This
-README is the training playbook; the workspace commands (import, label, check,
-audit) are in `finetune/README.md`.
+The training and labelling workspace: the label tool, the trainer, the Colab notebook and the scorers,
+with the tracker itself in `system/` (documented by `system/README.md`; the `live` and `fast` branches
+carry the same code under a README for running it).
 
-The tracker itself is `system/`: `main`'s whole tree, byte for byte, documented
-by `system/README.md`. Everything outside it is training and labelling:
-`finetune/` (the workspace, the trainer, the scorers), the root scripts that front
-them, `tests/` (their suites) and `audit/` (their ledgers). Changes to the tracker
-are made in `system/` and ported to `main`, or made on `main` and ported here;
-`AGENTS.md` has the recipe.
+[![The offline tracker on the sample clip](system/media/tracking_demo.gif)](system/media/tracking_demo.mp4)
+
+## What training needs
+
+None of the data is in git. On the PC it all lives under `finetune/` of the main checkout and every
+other worktree links to it (`python tools/link_worktree_data.py`).
+
+| what | where | size | needed for |
+|---|---|---|---|
+| The clips | `finetune/videos/` (88 files) | 0.9 GB | everything |
+| The hand labels | `finetune/labels/` (`<clip>.csv` and sidecars, 86 reviewed clips) | 4 MB | training, scoring |
+| `clips.csv`, `exclude.txt`, `review_status.json`, `holdouts.json` | `finetune/` | small | which clips train and which are held out (`mixed_v1`, 24 clips) |
+| The frame cache | `finetune/cache/data/frames/` | 44 GB of PNG, built by the trainer on first use | training |
+| Raw frame copies | beside the PNGs, only with `--raw-frames` | about 90 GB more | a 9% faster epoch, same batches |
+| Pseudo-labelled clips | `finetune/pseudo/` | 1.4 GB | `--pseudo`, 30% of each epoch in the current recipe |
+| The teacher and the start weights | `system/models/ball_detector.pt` | 31 MB | `--distill`, fine-tunes |
+| The ball detector in use | `system/models/candidates/stream_s4_fg1_e46_peakhead.pt` | 31 MB | scoring, the tracker |
+| Player and court engines | `system/models/*.engine`, built per machine | | pipeline scoring |
+
+Software: Python 3.10 with a CUDA build of torch 2.10 (`requirements.txt` has the pins and the install
+order); the label tool also needs conda-forge's Qt build of OpenCV. Hardware: one NVIDIA GPU. On the
+RTX 5080 laptop (16 GB) an epoch of the current recipe (batch 4, 8 workers, 16,948 units) takes about
+7 minutes and scoring it on the held-out clips 2.5 more; a 60-epoch run is about 8.5 hours. On a Colab
+A100 the notebook below does the same from a data zip (about 870 MB).
+
+## Where the model stands (2026-11-11)
+
+- In use: `stream_s4`, run `s4_fg1` epoch 46, with the peak visibility head of run `s4_fg1_peak`.
+  On `mixed_v1`: recall 0.959 with 67 false alarms offline, 0.957 with 67 live.
+- Tried since and not better: the EMA weights (with or without re-estimated BatchNorm), the mean of
+  the late epochs, a 12-epoch fork at LR 0.3 (`s4_fork1`), and `heatmap_s4` (0.952 / 89).
+- The last gains came from outside the detector: the visibility check (95 to 67 false alarms) and two
+  selector fixes (recall 0.955 to 0.959).
+
+To score a model on the held-out clips, from the repository root:
+
+```powershell
+python evaluate_archive.py --archive finetune --mode pipeline --holdout mixed_v1 --out-dir output/NAME
+python evaluate_archive.py --archive finetune --mode pipeline --holdout mixed_v1 --live --out-dir output/NAME_live
+python -m finetune.scoring.replay_selector output/NAME --archive finetune     # a selector change, on the CPU
+```
+
+## The four branches
+
+| branch | what it is |
+|---|---|
+| `live` | the live tracker: frames in as they arrive, answers under a second behind |
+| `fast` | the offline tracker: a whole video in, annotated video and JSON out, faster than realtime |
+| `train` | the training and labelling workspace with the same tracker inside `system/` |
+| `backup` | the tracker as it was before this work (the former `main`) |
+
+`live`, `fast` and `train` carry the same code and differ only in this README. A code change is made
+once and applied to all three.
+
+# The training playbook
 
 Everything below runs in the notebook `finetune/GridTrackNet_FineTune_Colab.ipynb`
 on a Colab GPU (A100 if you can get one) with the data zip on Google Drive. The PC
