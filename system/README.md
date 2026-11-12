@@ -7,7 +7,19 @@ It produces an annotated MP4 and per-frame tracking JSON.
 
 ## Demo
 
-[![GridTrackNet tennis tracking demo](media/tracking_demo.gif)](media/tracking_demo.mp4)
+[![Tennis tracking demo: the offline tracker with the court events](media/tracking_demo.gif)](media/tracking_demo.mp4)
+
+The offline tracker (`python clean_tracker.py -i sample\pomona.mp4 --court`), rendered on 2026-11-11 with
+the default weights: the 34 s sample clip takes 14.8 s on an RTX 5080 laptop.
+
+[![Tennis tracking demo: the live tracker](media/live_demo.gif)](media/live_demo.mp4)
+
+The live tracker on the same clip (`python clean_tracker.py --live --input sample\pomona.mp4`): frames arrive
+at the clip's rate and each answer is committed a median 0.78 s behind the camera (p99 0.88 s), no frame
+dropped. The live tracker writes JSON only; this overlay was drawn from it.
+
+On the 24 held-out clips (`mixed_v1`, 8,515 visible and 518 absent labels) the default weights score recall
+0.959 with 67 false alarms offline and 0.957 with 67 live.
 
 The overlay distinguishes where each selected point came from:
 
