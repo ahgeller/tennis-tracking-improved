@@ -82,23 +82,23 @@ _SPIKE_GATE_MIN_PX = 10.0
 _REFINE_SOURCE_WEIGHT = {"det": 1.0, "motion": 0.30, "interp": 0.15}
 _REFINE_WEAK_DET_WEIGHT = 0.6
 _REFINE_SPIKE_WEIGHT = 0.02
-# Detector confidence that makes a point a full-weight anchor, and the one
-# past which it counts as a strong detection, held to the tightest bound.
+# Detector confidence that makes a point a full-weight anchor of its neighbours' fit.
 _REFINE_FULL_WEIGHT_CONF = 0.70
-_REFINE_STRONG_DET_CONF = 0.55
 # Every point is fitted over at most this many neighbours on each side, with a
 # Huber loss that down-weights residuals beyond this many pixels.
 _REFINE_WINDOW = 10
 _REFINE_HUBER_PX = 4.0
-# How far the refit may move a point: a strong detection, a motion blob, a fill
-# (a weak detection too). Every move is bounded: until 2026-10-30 a spike and a
+# How far the refit may move a point: a detection, a motion blob, a fill. Until 2026-11-11 a
+# detection under 0.55 took the fill's 12 px; on mixed_v1 that dragged true weak detections 10 to
+# 18 px off the ball (replay of the default run: +12 hits at 3 px, no false alarm and no wrong
+# pick added). Every move is bounded: until 2026-10-30 a spike and a
 # strong detection off the local fit moved without a bound (meant to repair a
 # short target switch) and were relabelled 'interp' past ~44 px. On the 62
 # non-held-out clips (shipped model) those moves put 27 rows more than 30 px
 # from the label, 26 of them detections that had been within 10 px, for 2
 # repaired: they are bounces and contacts the fit cannot follow
 # (audit/records/opt_picker_rules.md).
-_REFIT_BOUND_STRONG_DET_PX = 3.0
+_REFIT_BOUND_DET_PX = 3.0
 _REFIT_BOUND_MOTION_PX = 6.0
 _REFIT_BOUND_FILL_PX = 12.0
 # A fit that lands within this of a point (a point already on its neighbours' line) leaves it
@@ -443,26 +443,22 @@ def _find_spikes(x: np.ndarray, y: np.ndarray, diag: float = REFERENCE_DIAG_PX) 
     return spikes
 
 
-def _refit_bound(strong_det: bool, source: str) -> float:
-    """How far the refit may move a point: a strong detection, a motion blob, anything else."""
-    if strong_det:
-        return _REFIT_BOUND_STRONG_DET_PX
+def _refit_bound(source: str) -> float:
+    """How far the refit may move a point: a detection, a motion blob, a fill."""
+    if source == "det":
+        return _REFIT_BOUND_DET_PX
     if source == "motion":
         return _REFIT_BOUND_MOTION_PX
     return _REFIT_BOUND_FILL_PX
 
 
-def _refine_weights(points: Sequence[FrameResult]) -> Tuple[np.ndarray, np.ndarray]:
-    """Per-point fit weights and the strong-detection flags, before spikes are marked."""
-    weights = np.array([
+def _refine_weights(points: Sequence[FrameResult]) -> np.ndarray:
+    """Per-point fit weights, before spikes are marked."""
+    return np.array([
         (1.0 if item.conf >= _REFINE_FULL_WEIGHT_CONF else _REFINE_WEAK_DET_WEIGHT) if item.source == "det"
         else _REFINE_SOURCE_WEIGHT[item.source]
         for item in points
     ])
-    is_strong_det = np.array([
-        item.source == "det" and item.conf >= _REFINE_STRONG_DET_CONF for item in points
-    ])
-    return weights, is_strong_det
 
 
 def _despiked(x: np.ndarray, y: np.ndarray, spikes: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -513,7 +509,7 @@ def _local_fit(
 
 def _refit_positions(
     points: Sequence[FrameResult], x: np.ndarray, y: np.ndarray, weights: np.ndarray,
-    is_strong_det: np.ndarray, kinks: Sequence[int],
+    kinks: Sequence[int],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Every point refitted within its segment and window, moved at most its bound."""
     m = len(points)
@@ -531,7 +527,7 @@ def _refit_positions(
             continue
         tt = np.arange(lo, hi + 1, dtype=np.float64) - i
         fit_x, fit_y = _local_fit(tt, x[lo:hi + 1], y[lo:hi + 1], base_w, 2 if count >= 6 else 1)
-        bound = _refit_bound(bool(is_strong_det[i]), points[i].source)
+        bound = _refit_bound(points[i].source)
         dx = fit_x - x[i]
         dy = fit_y - y[i]
         distance = math.hypot(dx, dy)
@@ -551,14 +547,14 @@ def _refine_run(results: List[FrameResult], start: int, end: int, diag: float = 
     points = results[start:end]
     x = np.array([item.cx for item in points])
     y = np.array([item.cy for item in points])
-    weights, is_strong_det = _refine_weights(points)
+    weights = _refine_weights(points)
     # A spike barely weighs on its neighbours' fit, but it is moved no further than any other
     # point of its source: a 1-3 frame excursion off the local fit is far more often the ball at a
     # bounce or a contact than the detector on another object.
     spikes = _find_spikes(x, y, diag)
     weights[spikes] = _REFINE_SPIKE_WEIGHT
     kinks = _find_trajectory_kinks(*_despiked(x, y, spikes), diag)
-    new_x, new_y = _refit_positions(points, x, y, weights, is_strong_det, kinks)
+    new_x, new_y = _refit_positions(points, x, y, weights, kinks)
     # Every move is bounded well inside the detector's own error, so a detection keeps its source;
     # its immutable measurement coordinates stay available beside the fitted ones.
     for index, item in enumerate(points):

@@ -175,7 +175,7 @@ def test_direction_cosine_of_straight_and_reversed_paths():
 def test_refit_keeps_a_short_excursion_where_the_detector_put_it():
     # A 1-2 frame excursion off the local fit is far more often the ball at a bounce or a
     # contact than the detector on another object (the non-held-out clips, 2026-10-30), so the
-    # refit moves it no further than any strong detection and it stays a detection; the
+    # refit moves it no further than any detection and it stays a detection; the
     # excursion barely weighs on its neighbours, which keep their line.
     smooth = [
         FrameResult(cx=float(frame * 10), cy=100.0, conf=0.9, source="det")
@@ -187,6 +187,18 @@ def test_refit_keeps_a_short_excursion_where_the_detector_put_it():
     assert all(abs(smooth[frame].cy - 100.0) < 1.0 for frame in range(15) if frame not in (7, 8))
     assert all(result.source == "det" for result in smooth)
     assert smooth[7].measurement == (70.0, 180.0)
+
+
+def test_refit_holds_a_weak_detection_as_close_as_a_strong_one():
+    # A detection under 0.55 used to take the fill's 12 px bound and was dragged 10 to 18 px off
+    # the ball (mixed_v1, 2026-11-11); whatever its confidence a detection now moves at most 3 px.
+    path = [
+        FrameResult(cx=float(frame * 10), cy=100.0, conf=0.9, source="det")
+        for frame in range(15)
+    ]
+    path[7].cy, path[7].conf = 111.0, 0.45
+    refine_trajectory(path, 734.0)
+    assert abs(path[7].cy - 111.0) <= 3.0 + 1e-9 and path[7].source == "det"
 
 
 def test_refit_never_moves_a_bounce_vertex_off_its_detection():
