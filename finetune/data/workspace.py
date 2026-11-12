@@ -160,7 +160,7 @@ class LabelHomeMissing(FileNotFoundError):
 
 def label_home() -> Path:
     """The labels folder a person's labelling session reads and writes: the label tool's default,
-    and the label scorers'. Within a git worktree of this repository (``phases/<name>``, made with
+    and the label scorers'. Within a git worktree of this repository (``final_*`` or ``extras/<name>``, made with
     ``git worktree add``), the main checkout's ``finetune/labels``: a worktree only holds a copy of
     the labels (``tools/link_worktree_data.py``), and an edit made in a copy would never reach the
     labels everything else reads. In the main checkout, or with the workspace relocated

@@ -17,7 +17,7 @@ label: the label tool and the label scorers resolve the main copy's labels
 
 The candidate weights (`system/models/candidates`) and the TensorRT engine cache
 (`system/models/engine_cache`) are copied from the reference worktree,
-`phases/ABplus` (`--reference` names another), before the main copy's
+`final_nonlive` (`--reference` names another), before the main copy's
 `system/models` fills in the rest. Each worktree would otherwise build its own
 stream_s4 engine on first use, and two builds of the same weights choose different
 FP16 tactics, so their detections differ in the fourth decimal: outputs compare
@@ -25,7 +25,7 @@ across worktrees only on the same engine file (audit/records/opt_speed_motion.md
 They are copied, not junctioned, so a worktree that builds an engine for weights of
 its own keeps it to itself. An engine a worktree has already built is kept; delete
 it to take the reference's. The default ball detector is one of the candidates
-(`system/tennis_tracker/paths.py`, `STREAM_WEIGHTS`), so a reference that lacks it
+(`system/tennis_tracker/paths.py`, `BALL_WEIGHTS`), so a reference that lacks it
 leaves the new worktree without one until the file is copied by hand; the first run
 says so.
 """
@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 MAIN = Path(r"C:\Users\Andrew\Desktop\clean_version\optimization_test")
-REFERENCE = MAIN / "phases" / "ABplus"
+REFERENCE = MAIN / "final_nonlive"
 HERE = Path(__file__).resolve().parent.parent
 
 JUNCTIONS = ("finetune/videos", "finetune/cache")

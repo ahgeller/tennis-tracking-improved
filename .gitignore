@@ -51,3 +51,7 @@ scorecard.png
 *.cbm
 /.gpu_bench_lock/
 /phases/
+/extras/
+/final_train/
+/final_live/
+/final_nonlive/

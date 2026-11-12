@@ -24,7 +24,7 @@ scorecard (see *Scorecards*).
 
 `--labels` defaults to the *label home* (`workspace.label_home()`): the main
 checkout's `finetune/labels`, even when the tool is run from a git worktree
-(`phases/<name>`, whose `finetune/labels` is only a copy made by
+(`final_*` or `extras/<name>`, whose `finetune/labels` is only a copy made by
 `tools/link_worktree_data.py`). An edit made in a copy would never reach the labels
 everything else reads, so a worktree's tool writes past its copy to the real ones.
 The tool prints the folder it uses as `[labels] <path>` when it starts. With the

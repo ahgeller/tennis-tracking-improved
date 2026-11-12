@@ -12,7 +12,7 @@ _SPEC.loader.exec_module(link_worktree_data)
 
 ENCODER = "system/models/engine_cache/stream_s4_fg1_e46-stream_s4-encoder-b4-bfe4069fc4f7a0fe.engine"
 SHARED_ENGINE = "system/models/engine_cache/ball_detector-heatmap_s4-b4-bec16c318bac1aad.engine"
-CANDIDATE = "system/models/candidates/stream_s4_fg1_e46.pt"            # the default ball detector
+CANDIDATE = "system/models/candidates/stream_s4_fg1_e46.pt"            # a candidate ball detector
 PREVIOUS_CANDIDATE = "system/models/candidates/stream_s4_e60.pt"        # the default before it, still gated
 
 
