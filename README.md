@@ -2,7 +2,7 @@
 
 The training and labelling workspace: the label tool, the trainer, the Colab notebook and the scorers,
 with the tracker itself in `system/` (documented by `system/README.md`; the `live` and `fast` branches
-carry the same code under a README for running it).
+are that folder alone, with nothing for training in them).
 
 [![The offline tracker on the sample clip](system/media/tracking_demo.gif)](system/media/tracking_demo.mp4)
 
@@ -52,11 +52,11 @@ python -m finetune.scoring.replay_selector output/NAME --archive finetune     # 
 |---|---|
 | `live` | the live tracker: frames in as they arrive, answers under a second behind |
 | `fast` | the offline tracker: a whole video in, annotated video and JSON out, faster than realtime |
-| `train` | the training and labelling workspace with the same tracker inside `system/` |
+| `train` | this branch: the training and labelling workspace with the same tracker inside `system/` |
 | `backup` | the tracker as it was before this work (the former `main`) |
 
-`live`, `fast` and `train` carry the same code and differ only in this README. A code change is made
-once and applied to all three.
+`live` and `fast` hold the contents of `system/` and nothing else. A tracker change is made here in
+`system/` and copied to both (`git diff --binary A B -- system | git apply -p2` on each).
 
 # The training playbook
 
