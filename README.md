@@ -19,8 +19,8 @@ other worktree links to it (`python tools/link_worktree_data.py`).
 | The frame cache | `finetune/cache/data/frames/` | 44 GB of PNG, built by the trainer on first use | training |
 | Raw frame copies | beside the PNGs, only with `--raw-frames` | about 90 GB more | a 9% faster epoch, same batches |
 | Pseudo-labelled clips | `finetune/pseudo/` | 1.4 GB | `--pseudo`, 30% of each epoch in the current recipe |
-| The teacher and the start weights | `system/models/ball_detector.pt` | 31 MB | `--distill`, fine-tunes |
-| The ball detector in use | `system/models/candidates/stream_s4_fg1_e46_peakhead.pt` | 31 MB | scoring, the tracker |
+| The teacher and the start weights | `system/models/ball_detector.pt` | 13 MB | `--distill`, fine-tunes |
+| The ball detector in use | `system/models/candidates/stream_s4_fg1_e46_peakhead.pt` | 2.7 MB | scoring, the tracker |
 | Player and court engines | `system/models/*.engine`, built per machine | | pipeline scoring |
 
 Software: Python 3.10 with a CUDA build of torch 2.10 (`requirements.txt` has the pins and the install
