@@ -1,9 +1,56 @@
-# Triton Ball Tennis
+# Triton Ball Tennis: fast
 
-A GPU tennis-video tracker built around five-frame temporal ball detection
-(HeatmapNet, with GridTrackNet still runnable), TensorRT player and court
-detection, and conservative motion/physics recovery.
-It produces an annotated MP4 and per-frame tracking JSON.
+The offline tennis tracker: one video in, an annotated video and a per-frame tracking JSON out, faster
+than realtime. It is the most accurate of the modes because it sees the whole clip before it answers.
+
+[![The offline tracker on the sample clip](media/tracking_demo.gif)](media/tracking_demo.mp4)
+
+## Run it
+
+```powershell
+python clean_tracker.py -i sample\pomona.mp4 -o output\           # ball, players, annotated video
+python clean_tracker.py -i sample\pomona.mp4 -o output\ --court   # plus landings, hits, rallies and the minimap
+python clean_tracker.py -i sample\pomona.mp4 --no-video           # JSON only
+```
+
+No flags are needed for the best measured settings: the weights, their threshold (0.38) and the
+empty-frame check (0.40) are the defaults. `--visibility-gate 0` turns the check off. Every option:
+`python clean_tracker.py -h` and the reference below.
+
+## Measured (2026-11-11, RTX 5080 laptop)
+
+| | |
+|---|---|
+| Accuracy, 24 held-out clips (8,515 visible / 518 absent labels) | recall 0.959, 67 false alarms |
+| The same clips with the live tracker (the `live` branch) | recall 0.957, 67 false alarms |
+| Position error on those clips | median 1.0 px, 90% within 4.0 px (1080p) |
+| Speed | the 34 s, 60 fps sample clip in 14.8 s with `--court` and the video |
+
+The accuracy rows were measured with the `train` branch's evaluator, which holds the labelled clips.
+
+## What it needs
+
+- Windows, an NVIDIA GPU with TensorRT (measured on an RTX 5080 laptop, 16 GB), Python 3.10.
+- `pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128`, then
+  `pip install -r requirements.txt`.
+- The model files, which are not in git (`models/README.md` lists each one and where it comes from).
+  The ball detector is `models/candidates/stream_s4_fg1_e46_peakhead.pt`; the player and court
+  engines are built once per machine with `python -m tennis_tracker.engines.build_engines`. A run
+  that misses a file says which one in its first line.
+
+## The four branches
+
+| branch | what it is |
+|---|---|
+| `live` | the live tracker: frames in as they arrive, answers under a second behind |
+| `fast` | the offline tracker: a whole video in, annotated video and JSON out, faster than realtime |
+| `train` | the training and labelling workspace (label tool, trainer, scorers) with this tracker inside its `system/` folder |
+| `backup` | the tracker as it was before this work (the former `main`) |
+
+`live` and `fast` hold the tracker alone, the same code under two READMEs; nothing here trains or
+labels. A tracker change is made in `train`'s `system/` folder and copied to both.
+
+# Reference
 
 ## Demo
 
