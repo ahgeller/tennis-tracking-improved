@@ -18,7 +18,7 @@ from tennis_tracker.court.court_geometry import CourtKeypoints
 from .config import REFERENCE_DIAG_PX, SelectorConfig
 from .models import Detection, FrameResult, RawDetection, Source, Track
 from .physics import predict_projectile
-from .scoring import is_near_player, score_tracks, select_timeline_chain, stitch_track_chain
+from .scoring import adopt_fragments, is_near_player, score_tracks, select_timeline_chain, stitch_track_chain
 from .association import build_detections, build_tracks
 from .utils import MaskLike, PackedMask, PlayerBoxesByFrame, ensure_mask_u8, pxpf_at_fps
 
@@ -931,7 +931,7 @@ def select_ball_in_play(
         total_frames=total,
         court_keypoints_by_frame=court_keypoints_by_frame,
     )
-    selected = select_timeline_chain(selected_tracks(tracks), cfg, total)
+    selected = adopt_fragments(select_timeline_chain(selected_tracks(tracks), cfg, total), tracks, cfg, total)
     for track in selected:
         track.in_timeline = True
     chosen = stitch_track_chain(selected, cfg)

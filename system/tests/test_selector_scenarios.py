@@ -17,7 +17,7 @@ from ball_in_play_selector.core import (
     selected_tracks,
     trajectory_observations,
 )
-from ball_in_play_selector.scoring import score_tracks, select_timeline_chain, stitch_track_chain
+from ball_in_play_selector.scoring import adopt_fragments, score_tracks, select_timeline_chain, stitch_track_chain
 from tennis_tracker.court.court_geometry import build_ordered_court_polygon, doubles_corners, sideline_distance_m
 
 FRAME_SHAPE = (360, 640)
@@ -307,7 +307,7 @@ def _point_track(track_id, points, score, cfg):
 
 
 def test_disjoint_continuity_is_decided_at_the_start_edge():
-    # Pins scoring._add_disjoint_tracks.continuous as it behaves today: the
+    # Pins scoring._meets_chain (the continuity test of _add_disjoint_tracks) as it behaves today: the
     # chain observation nearest in time to the candidate's FIRST observation
     # decides, and the last observation is never consulted when one exists.
     # A candidate whose start sits far from the chain but whose end meets it
@@ -324,6 +324,37 @@ def test_disjoint_continuity_is_decided_at_the_start_edge():
     )
     assert [track.track_id for track in select_timeline_chain([outer, near_end], chain_cfg, 200)] == [5]
     assert [track.track_id for track in select_timeline_chain([outer, near_start], chain_cfg, 200)] == [5, 7]
+
+
+def test_a_confident_fragment_beside_the_chain_is_adopted():
+    # The association breaks a true ball off the rally at a bounce or a contact; the fragment is too
+    # short for selected_tracks and its frames used to go unanswered. It is adopted when one of its
+    # ends meets the chain, and only then: not a far one, a weak one, one beside another court, or
+    # one inside a chain track's span.
+    cfg = _cfg(30.0)
+    rally = _line_track(5, list(range(0, 40)), 100.0, 50.0, cfg)                 # x = 100 + frame
+
+    def fragment(track_id, frames, x_offset, conf=0.9):
+        track = _line_track(track_id, frames, x_offset, 0.0, cfg)
+        for obs in track.observations:
+            obs.conf = conf
+        return track
+
+    near = fragment(6, [41, 42, 43], 100.0)
+    one_end = _point_track(7, [(41, 141.0), (42, 500.0), (43, 900.0)], 0.0, cfg)  # the far end faces nothing
+    far = fragment(8, [41, 42, 43], 900.0)
+    weak = fragment(9, [41, 42, 43], 100.0, conf=0.45)
+    beside = fragment(10, [41, 42, 43], 100.0)
+    beside.selection = {"off_court": True}
+    inside = fragment(11, [20, 21], 100.0)
+
+    def adopted(*others):
+        return [track.track_id for track in adopt_fragments([rally], [rally, *others], cfg, 200)]
+
+    assert adopted(near) == [5, 6] and adopted(one_end) == [5, 7]
+    assert adopted(far) == adopted(weak) == adopted(beside) == adopted(inside) == [5]
+    assert adopted(near, far, weak) == [5, 6]
+    assert adopt_fragments([], [near], cfg, 200) == []                        # no chain, nothing to join
 
 
 def test_weak_endpoint_without_motion_creates_no_interpolation():
